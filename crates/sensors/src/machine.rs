@@ -2,8 +2,6 @@
 
 use std::path::PathBuf;
 
-use syspilot_proto::message::DriverState;
-
 use crate::worker::Machine;
 
 /// Directory, next to the executable, that holds the PawnIO modules.
@@ -20,29 +18,22 @@ fn modules_directory() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(MODULES_DIRECTORY))
 }
 
-/// The driver state as far as it can be told without opening the driver.
-fn installed_driver_state() -> DriverState {
-    match syspilot_pawnio::installed_version() {
-        Some(version) => DriverState::Ready { version },
-        None => DriverState::Missing,
-    }
-}
-
 /// Looks at the machine: Windows' own sensors, the inventory, and what the
-/// PawnIO driver adds when it is installed.
+/// PawnIO driver adds when it is installed. Windows' sensors come first,
+/// so the readings every machine has lead the list.
 pub fn probe() -> Machine {
-    let _ = modules_directory();
-    Machine {
-        driver: installed_driver_state(),
-        features: Vec::new(),
-        system: syspilot_hw::sysinfo::collect(),
-        providers: syspilot_hw::os::probe(),
-    }
+    let driver = syspilot_hw::driver::probe(&modules_directory());
+    let mut system = syspilot_hw::sysinfo::collect();
+    system.sections.extend(driver.info);
+    let mut providers = syspilot_hw::os::probe();
+    providers.extend(driver.providers);
+    Machine { driver: driver.state, features: driver.features, system, providers }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use syspilot_proto::message::DriverState;
 
     #[test]
     fn modules_are_looked_for_beside_the_executable() {
@@ -63,6 +54,12 @@ mod tests {
         assert_eq!(
             matches!(machine.driver, DriverState::Missing),
             syspilot_pawnio::installed_version().is_none()
+        );
+        let keys: Vec<&str> = machine.features.iter().map(|feature| feature.key.as_str()).collect();
+        assert_eq!(keys, ["cpu-sensors", "board-sensors", "memory-sensors", "fan-control"]);
+        assert!(
+            !machine.features[3].available,
+            "(machine probe): expected fan control to be unavailable in this version"
         );
     }
 }
