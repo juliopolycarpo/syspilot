@@ -17,7 +17,7 @@ use crate::form::{Choice, CustomForm, Field};
 use crate::model::{self, Link, Snapshot, Tone, Trends, ViewLevel};
 use crate::preferences::{self, Preferences, Theme};
 use crate::widgets::{self, Palette, glyph};
-use crate::{launch, pages};
+use crate::{contrast, launch, pages};
 
 /// Pause before trying to reach the service again.
 const RETRY_DELAY: Duration = Duration::from_secs(2);
@@ -536,7 +536,7 @@ impl Component for App {
             settled: Vec::new(),
             link: Link::Connecting,
             snapshot: Snapshot::default(),
-            palette: Palette::new(ColorScheme::Dark),
+            palette: Palette::new(ColorScheme::Dark, contrast::high_contrast_on()),
             page: Page::Home,
             preferences,
             filter: String::new(),
@@ -575,7 +575,11 @@ impl Component for App {
                 }
             }
             Message::Go(page) => self.go(page),
-            Message::Scheme(scheme) => self.palette = Palette::new(scheme),
+            // A contrast theme comes and goes with a theme change, so it is
+            // asked about again here.
+            Message::Scheme(scheme) => {
+                self.palette = Palette::new(scheme, contrast::high_contrast_on());
+            }
             Message::Filter(text) => self.filter = text,
             Message::Toggle(id, on) => self.toggle_tweak(id, on, context),
             Message::ToggleCustom(id, on) => self.toggle_custom(id, on, context),

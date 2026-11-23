@@ -62,8 +62,14 @@ built top to bottom.
   200 % need the system setting changed, which the capture does not do.
   WinUI lays out in device-independent units, so problems here would be
   layout overflow, which the 1196-pixel-wide captures already stress.
-- **High contrast.** Not reviewed. The app draws only standard WinUI
-  controls and theme brushes, apart from the sparkline and the state dots.
+- **High contrast.** Not seen on screen: turning a contrast theme on is a
+  system setting the capture does not change. Under one, the app asks
+  Windows (`SPI_GETHIGHCONTRAST`) and drops its own colours: state text
+  keeps the system text colour, badge fills give way to an outline, and
+  the dots and sparklines are drawn with the text brush, which WinUI maps
+  to the user's contrast colours. Unit tests pin that palette. The check
+  runs at start and on each theme change; if Windows reports no theme
+  change, the app picks up a contrast theme on its next start.
 - **Screen readers.** Names are checked through UI Automation; the app has
   not been listened to with Narrator.
 
@@ -77,3 +83,4 @@ built top to bottom.
 | 2026-11-23 | 68: both themes, both levels, four scenarios | Custom action form hints described a per-user text value while the form starts on a machine-wide number | Yes |
 | 2026-11-23 | Accessibility, seven pages | The expander of every tweak row (22 on Privacy) had no accessible name | Yes |
 | 2026-11-23 | Tweak pages again after the fix | None | |
+| 2026-11-23 | Code review for contrast themes; light captures after the change | Fixed state colours overrode a contrast theme's colours | Yes: the palette defers to the system |

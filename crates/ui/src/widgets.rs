@@ -65,20 +65,31 @@ pub mod glyph {
 }
 
 /// State colours for the current light or dark scheme.
+///
+/// Under a Windows contrast theme the user has picked every colour, so
+/// the palette steps aside: text keeps the system text colour, fills go,
+/// and shapes are drawn in the text colour. State is never told by colour
+/// alone (badges and banners say it in words), so nothing is lost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Palette {
     dark: bool,
+    high_contrast: bool,
 }
 
 impl Palette {
-    /// The palette for `scheme`.
-    pub fn new(scheme: ColorScheme) -> Self {
-        Self { dark: scheme == ColorScheme::Dark }
+    /// The palette for `scheme`, or the system's colours when a contrast
+    /// theme is on.
+    pub fn new(scheme: ColorScheme, high_contrast: bool) -> Self {
+        Self { dark: scheme == ColorScheme::Dark, high_contrast }
     }
 
     /// Text and icon colour for `tone`: Windows' system state colours.
-    /// `None` for neutral, which uses the normal text colour.
-    pub fn ink(self, tone: Tone) -> Option<Color> {
+    /// `None` for neutral, and for everything under a contrast theme,
+    /// which then uses the normal text colour.
+    pub fn ink(self, tone: Tone) -> Option<Brush> {
+        if self.high_contrast {
+            return None;
+        }
         let (dark, light) = match tone {
             Tone::Neutral => return None,
             Tone::Good => ((0x6C, 0xCB, 0x5F), (0x0F, 0x7B, 0x0F)),
@@ -86,11 +97,32 @@ impl Palette {
             Tone::Bad => ((0xFF, 0x99, 0xA4), (0xC4, 0x2B, 0x1C)),
         };
         let (red, green, blue) = if self.dark { dark } else { light };
-        Some(Color::rgb(red, green, blue))
+        Some(Color::rgb(red, green, blue).into())
     }
 
-    /// A faint fill behind text of `tone`.
-    pub fn wash(self, tone: Tone) -> Color {
+    /// The fill of a state shape such as a dot.
+    pub fn shape(self, tone: Tone) -> Brush {
+        if self.high_contrast {
+            return ThemeBrush::PrimaryText.into();
+        }
+        self.ink(tone).unwrap_or(Color::rgb(0x8A, 0x8A, 0x8A).into())
+    }
+
+    /// The outline of a badge: none normally, where the wash marks it out;
+    /// the text colour under a contrast theme, where there is no wash.
+    pub fn outline(self) -> (f64, Brush) {
+        if self.high_contrast {
+            (1.0, ThemeBrush::PrimaryText.into())
+        } else {
+            (0.0, Color::transparent().into())
+        }
+    }
+
+    /// A faint fill behind text of `tone`; nothing under a contrast theme.
+    pub fn wash(self, tone: Tone) -> Brush {
+        if self.high_contrast {
+            return Color::transparent().into();
+        }
         let (red, green, blue) = match (tone, self.dark) {
             (Tone::Neutral, true) => (0xFF, 0xFF, 0xFF),
             (Tone::Neutral, false) => (0x00, 0x00, 0x00),
@@ -101,12 +133,18 @@ impl Palette {
             (Tone::Bad, true) => (0xFF, 0x99, 0xA4),
             (Tone::Bad, false) => (0xC4, 0x2B, 0x1C),
         };
-        Color::argb(if tone == Tone::Neutral { 0x14 } else { 0x26 }, red, green, blue)
+        Color::argb(if tone == Tone::Neutral { 0x14 } else { 0x26 }, red, green, blue).into()
     }
 
     /// The line colour of charts.
-    pub fn chart(self) -> Color {
-        if self.dark { Color::rgb(0x60, 0xCD, 0xFF) } else { Color::rgb(0x00, 0x5F, 0xB8) }
+    pub fn chart(self) -> Brush {
+        if self.high_contrast {
+            ThemeBrush::PrimaryText.into()
+        } else if self.dark {
+            Color::rgb(0x60, 0xCD, 0xFF).into()
+        } else {
+            Color::rgb(0x00, 0x5F, 0xB8).into()
+        }
     }
 }
 
@@ -155,11 +193,10 @@ pub fn toned(text: TextBlock, tone: Tone, palette: Palette) -> TextBlock {
 /// A filled circle in the colour of `tone`: the app's state indicator.
 /// Icons cannot be coloured, a shape can.
 pub fn dot(tone: Tone, palette: Palette, size: f64) -> Ellipse {
-    let colour = palette.ink(tone).unwrap_or(Color::rgb(0x8A, 0x8A, 0x8A));
     Ellipse::new()
         .width(size)
         .height(size)
-        .fill(colour)
+        .fill(palette.shape(tone))
         .vertical_alignment(VerticalAlignment::Center)
 }
 
@@ -185,9 +222,12 @@ pub fn badge(badge: &Badge, palette: Palette) -> View {
         .text(badge.text)
         .font_size(TEXT_CAPTION)
         .font_weight(FontWeight::SEMI_BOLD);
+    let (outline, outline_brush) = palette.outline();
     Border::new()
         .padding(Thickness::new(GAP_SMALL, 2.0, GAP_SMALL, 3.0))
         .corner_radius(4.0)
+        .border_thickness(outline)
+        .border_brush(outline_brush)
         .background(palette.wash(badge.tone))
         .horizontal_alignment(HorizontalAlignment::Left)
         .vertical_alignment(VerticalAlignment::Center)
@@ -252,7 +292,7 @@ pub fn sparkline(
     slots: usize,
     (width, height): (f64, f64),
     (floor, ceiling): (Option<f64>, Option<f64>),
-    colour: Color,
+    colour: Brush,
 ) -> View {
     let known = values.iter().flatten();
     let low = known.clone().copied().fold(f64::INFINITY, f64::min);
@@ -276,4 +316,43 @@ pub fn sparkline(
         Some(KeyedView::new(index.to_string(), line))
     });
     Canvas::new().width(width).height(height).keyed_children(segments)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TONES: [Tone; 4] = [Tone::Neutral, Tone::Good, Tone::Caution, Tone::Bad];
+
+    #[test]
+    fn states_have_their_own_colours_in_both_schemes() {
+        for scheme in [ColorScheme::Light, ColorScheme::Dark] {
+            let palette = Palette::new(scheme, false);
+            assert_eq!(palette.ink(Tone::Neutral), None, "{scheme:?}");
+            let inks: Vec<_> = TONES[1..].iter().map(|&tone| palette.ink(tone)).collect();
+            assert!(inks.iter().all(|ink| matches!(ink, Some(Brush::Solid(_)))), "{inks:?}");
+            assert!(inks[0] != inks[1] && inks[1] != inks[2] && inks[0] != inks[2], "{inks:?}");
+            assert_eq!(palette.outline().0, 0.0);
+        }
+        assert_ne!(
+            Palette::new(ColorScheme::Light, false).chart(),
+            Palette::new(ColorScheme::Dark, false).chart()
+        );
+    }
+
+    #[test]
+    fn a_contrast_theme_gets_the_system_colours_only() {
+        let text = Brush::from(ThemeBrush::PrimaryText);
+        for scheme in [ColorScheme::Light, ColorScheme::Dark] {
+            let palette = Palette::new(scheme, true);
+            for tone in TONES {
+                assert_eq!(palette.ink(tone), None, "(ink of {tone:?}): expected the system text");
+                assert_eq!(palette.shape(tone), text, "(shape of {tone:?})");
+                assert_eq!(palette.wash(tone), Brush::Solid(Color::transparent()), "{tone:?}");
+            }
+            assert_eq!(palette.chart(), text);
+            // Without a wash a badge needs a line around it to read as one.
+            assert_eq!(palette.outline(), (1.0, text));
+        }
+    }
 }

@@ -7,6 +7,7 @@
 
 mod app;
 mod backend;
+mod contrast;
 mod demo;
 mod form;
 mod launch;
