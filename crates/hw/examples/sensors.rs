@@ -1,5 +1,6 @@
 //! Manual check of the driverless providers: probes the machine, samples
-//! twice one second apart (rates need two reads) and prints every sensor.
+//! twice one second apart (rates need two reads) and prints every sensor,
+//! then the system information.
 //!
 //! Run with `cargo run -p syspilot-hw --release --example sensors`.
 
@@ -7,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use syspilot_hw::Hub;
 use syspilot_hw::os;
+use syspilot_hw::sysinfo;
 use windows_sys::Win32::System::ProcessStatus::{
     K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
 };
@@ -90,4 +92,24 @@ fn main() {
     // the providers give their memory back.
     drop(hub);
     println!("private memory after dropping the hub: {} KiB", private_bytes() / 1024);
+
+    let started = Instant::now();
+    let info = sysinfo::collect();
+    let collect_time = started.elapsed();
+    let summary = &info.summary;
+    println!("\n=== system information ===");
+    println!("computer: {}", summary.computer);
+    println!("model:    {}", summary.model);
+    println!("cpu:      {}", summary.cpu);
+    println!("gpus:     {}", summary.gpus.join("; "));
+    println!("memory:   {} bytes", summary.memory_bytes);
+    println!("os:       {}", summary.os);
+    println!("bios:     {}", summary.bios);
+    for section in &info.sections {
+        println!("\n[{}]", section.title);
+        for (label, value) in &section.rows {
+            println!("  {label:<22} {value}");
+        }
+    }
+    println!("\nsysinfo::collect: {collect_time:?}, private memory {} KiB", private_bytes() / 1024);
 }
