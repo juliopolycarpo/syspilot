@@ -12,6 +12,7 @@
 //! needs.
 
 pub mod bus;
+pub mod chips;
 pub mod cpu;
 pub mod hub;
 pub mod os;
