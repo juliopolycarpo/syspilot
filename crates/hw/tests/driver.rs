@@ -17,7 +17,9 @@ use syspilot_hw::bus::{BusKind, BusLocks, SystemBusLocks};
 use syspilot_hw::chips::{Detected, SuperIoProvider, detect};
 use syspilot_hw::cpu::{CpuIdentity, CpuTopology, IntelCpuProvider, SystemClock, Vendor};
 use syspilot_hw::dimm::{DimmProvider, describe_controller};
+use syspilot_hw::driver;
 use syspilot_pawnio::{Error, Executor, PawnIo};
+use syspilot_proto::message::DriverState;
 use syspilot_proto::sensor::SensorKind;
 
 /// Whether the driver tests are enabled; prints the reason when not.
@@ -239,4 +241,109 @@ fn the_intel_provider_reads_plausible_temperatures_and_power() {
         "(cpu.core-max.temp): expected the maximum of the core temperatures"
     );
     assert!(values[package].is_some());
+}
+
+/// The plausible range of a sensor's value, by kind.
+fn plausible_range(kind: SensorKind) -> std::ops::RangeInclusive<f64> {
+    match kind {
+        SensorKind::Temperature => -55.0..=125.0,
+        SensorKind::Voltage => 0.0..=20.0,
+        SensorKind::Fan => 0.0..=30_000.0,
+        SensorKind::Duty => 0.0..=100.0,
+        SensorKind::Power => 0.0..=1000.0,
+        other => panic!("(driver probe): expected a hardware sensor kind | received: {other:?}"),
+    }
+}
+
+#[test]
+fn the_probe_samples_every_sensor_once_a_second_without_a_problem() {
+    let test = "the_probe_samples_every_sensor_once_a_second_without_a_problem";
+    if !enabled(test) {
+        return;
+    }
+    const SECONDS: usize = 10;
+    let mut probe = driver::probe(&modules_dir());
+    eprintln!("state: {:?}", probe.state);
+    for feature in &probe.features {
+        eprintln!(
+            "feature {:<15} {:<12} {}",
+            feature.key,
+            if feature.available { "available" } else { "unavailable" },
+            feature.detail
+        );
+    }
+    for section in &probe.info {
+        eprintln!("info: {}", section.title);
+        for (label, value) in &section.rows {
+            eprintln!("    {label:<22} {value}");
+        }
+    }
+    assert!(
+        matches!(probe.state, DriverState::Ready { .. }),
+        "(driver probe): expected a ready driver | received: {:?}",
+        probe.state
+    );
+    assert_eq!(probe.features.len(), 4, "(driver probe): expected four features");
+    assert!(!probe.providers.is_empty(), "(driver probe): expected at least one provider");
+
+    let sensors: Vec<_> = probe.providers.iter().map(|provider| provider.sensors()).collect();
+    let mut keys: Vec<&str> = sensors.iter().flatten().map(|sensor| sensor.key.as_str()).collect();
+    let declared = keys.len();
+    keys.sort_unstable();
+    keys.dedup();
+    assert_eq!(keys.len(), declared, "(driver probe): expected unique sensor keys");
+
+    // Per provider, per sensor: every value seen in the window.
+    let mut seen: Vec<Vec<Vec<Option<f64>>>> =
+        sensors.iter().map(|specs| vec![Vec::new(); specs.len()]).collect();
+    for second in 0..SECONDS {
+        for (index, provider) in probe.providers.iter_mut().enumerate() {
+            let mut values = Vec::new();
+            provider.sample(&mut values);
+            assert_eq!(
+                values.len(),
+                sensors[index].len(),
+                "(provider {index}, second {second}): expected one value per sensor"
+            );
+            for (sensor_index, value) in values.into_iter().enumerate() {
+                seen[index][sensor_index].push(value);
+            }
+            assert_eq!(
+                provider.last_problem(),
+                None,
+                "(provider {index}, second {second}): expected no problem"
+            );
+        }
+        if second + 1 < SECONDS {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    for (specs, per_sensor) in sensors.iter().zip(&seen) {
+        for (spec, values) in specs.iter().zip(per_sensor) {
+            let present: Vec<f64> = values.iter().copied().flatten().collect();
+            eprintln!(
+                "{:<26} {:<22} {:>2}/{SECONDS} values, min {:>9.2}, max {:>9.2}, last {:?}",
+                spec.key,
+                spec.label,
+                present.len(),
+                present.iter().copied().fold(f64::INFINITY, f64::min),
+                present.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                values.last().copied().flatten()
+            );
+            assert!(
+                !present.is_empty(),
+                "({}): expected at least one value in {SECONDS} seconds | received: none",
+                spec.key
+            );
+            let range = plausible_range(spec.kind);
+            for value in present {
+                assert!(
+                    range.contains(&value),
+                    "({}): expected {range:?} | received: {value}",
+                    spec.key
+                );
+            }
+        }
+    }
 }
