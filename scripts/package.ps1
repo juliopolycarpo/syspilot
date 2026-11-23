@@ -46,8 +46,10 @@ if (Test-Path $stage) {
 New-Item -ItemType Directory -Force $stage | Out-Null
 
 # The release directory holds the runtime files next to cargo's own
-# output. Everything that is not cargo's is the runtime.
-$cargoDirectories = 'build', 'deps', 'examples', 'incremental', '.fingerprint'
+# output. Everything that is not cargo's is the runtime. A developer may
+# have put modules there to try the worker; the package takes them from
+# the fetched directory only.
+$cargoDirectories = 'build', 'deps', 'examples', 'incremental', '.fingerprint', 'pawnio-modules'
 $cargoFiles = '*.d', '*.pdb', '*.rlib', '*.exe', '.cargo-lock'
 Get-ChildItem -Force $release | Where-Object {
     $item = $_

@@ -1,0 +1,56 @@
+name: Release
+
+# A tag such as v0.1.0 builds the package and publishes it as a draft
+# release, to be read over and published by a maintainer.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package:
+    name: Build and publish the package
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the toolchain
+        run: rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check that the tag is the workspace version
+        shell: pwsh
+        run: |
+          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
+            Where-Object name -eq 'syspilot-svc' | Select-Object -ExpandProperty version
+          if ("v$version" -ne $env:GITHUB_REF_NAME) {
+            throw "(tag): expected v$version, the version in Cargo.toml | received: $env:GITHUB_REF_NAME"
+          }
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      # The modules are the PawnIO project's signed LGPL files, pinned by
+      # SHA-256. They go into the package as separate files with their
+      # licence text.
+      - name: Fetch the PawnIO modules
+        run: cargo xtask fetch-modules
+
+      - name: Package
+        shell: pwsh
+        run: ./scripts/package.ps1
+
+      - name: Publish a draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $files = Get-ChildItem dist -File | ForEach-Object FullName
+          gh release create $env:GITHUB_REF_NAME @files --draft --verify-tag --generate-notes --title "SysPilot $($env:GITHUB_REF_NAME.TrimStart('v'))"
