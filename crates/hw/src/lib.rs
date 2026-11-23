@@ -5,7 +5,13 @@
 //! samples them on request. Nothing here samples on its own: the service
 //! calls [`Hub::sample`] only while a subscriber, the logger or a fan curve
 //! needs values.
+//!
+//! The driver-backed providers (CPU package and core sensors, Super I/O,
+//! DIMM temperatures) sit on the [`bus`] layer, which reaches the hardware
+//! only through PawnIO and is read-only apart from the index writes a read
+//! needs.
 
+pub mod bus;
 pub mod hub;
 pub mod os;
 pub mod sysinfo;

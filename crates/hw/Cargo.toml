@@ -13,6 +13,7 @@ publish = false
 workspace = true
 
 [dependencies]
+syspilot-pawnio.workspace = true
 syspilot-proto.workspace = true
 windows-sys = { workspace = true, features = [
     "Wdk_Graphics_Direct3D",
@@ -20,9 +21,11 @@ windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
+    "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Win32_System_Ioctl",
+    "Win32_System_Kernel",
     "Win32_System_Performance",
     "Win32_System_Power",
     "Win32_System_Registry",

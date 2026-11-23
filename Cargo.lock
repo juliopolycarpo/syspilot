@@ -123,6 +123,7 @@ dependencies = [
 name = "syspilot-hw"
 version = "0.1.0"
 dependencies = [
+ "syspilot-pawnio",
  "syspilot-proto",
  "windows-sys",
 ]
