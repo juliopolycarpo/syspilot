@@ -9,9 +9,6 @@ edition = "2024"
 rust-version = "1.100"
 authors = ["Julio Polycarpo"]
 repository = "https://github.com/juliopolycarpo/syspilot"
-homepage = "https://github.com/juliopolycarpo/syspilot"
-# The product name lives here and in `crates/proto/src/product.rs` only.
-description = "SysPilot: Windows tweaks that stay applied, hardware monitoring and fan control with near-zero idle overhead."
 
 [workspace.dependencies]
 syspilot-proto = { path = "crates/proto" }
