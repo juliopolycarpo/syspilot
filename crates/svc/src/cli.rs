@@ -6,7 +6,8 @@ use std::path::PathBuf;
 
 use syspilot_proto::catalog::{Catalog, Reboot, Tweak};
 use syspilot_proto::message::{
-    ActionState, DriverState, EntryStatus, Event, HistoryEvent, Request, ServiceStatus, SystemInfo,
+    ActionState, DriverState, EntryStatus, Event, FanAvailability, FanPhase, FanStatus,
+    HistoryEvent, Request, ServiceStatus, SystemInfo,
 };
 use syspilot_proto::profile::Profile;
 use syspilot_proto::sensor::{Sample, SectionReader, SensorList};
@@ -226,6 +227,7 @@ pub fn render_status(status: &ServiceStatus) -> String {
         }
         out.push('\n');
     }
+    out.push_str(&fans_section(&status.fans));
     if !status.problems.is_empty() {
         out.push_str("Problems\n");
     }
@@ -233,6 +235,53 @@ pub fn render_status(status: &ServiceStatus) -> String {
         let _ = writeln!(out, "  ! {problem}");
     }
     out
+}
+
+/// What the status says about the fans: whether curves are followed, and for
+/// each channel what it is doing. Empty for a build with no fan control and
+/// a board the catalog does not know, which has nothing to say.
+fn fans_section(fans: &FanStatus) -> String {
+    if fans.availability == FanAvailability::NotInBuild && fans.channels.is_empty() {
+        return String::new();
+    }
+    let board = if fans.board.is_empty() { String::new() } else { format!(" ({})", fans.board) };
+    let mut out = format!("Fans{board}\n");
+    let control = match &fans.availability {
+        FanAvailability::NotInBuild => "this build leaves fan control out".to_owned(),
+        FanAvailability::ReadOnly { reason } => format!("read-only: {reason}"),
+        FanAvailability::Controllable => "curves in the profile are followed".to_owned(),
+    };
+    let _ = writeln!(out, "  Control        {control}");
+    for channel in &fans.channels {
+        let state = match channel.phase {
+            FanPhase::Manual => {
+                format!("following its curve, asking {}", percent(channel.target_duty_pct))
+            }
+            FanPhase::FailSafe => {
+                format!(
+                    "full speed because a sensor failed, asking {}",
+                    percent(channel.target_duty_pct)
+                )
+            }
+            FanPhase::ReleasePending => "handing back to the BIOS did not work, retrying".into(),
+            FanPhase::Blocked => "left alone: found in manual mode with no saved setting".into(),
+            FanPhase::Bios if channel.active => "BIOS control, curve waiting for sensors".into(),
+            FanPhase::Bios if !channel.curve.is_empty() => {
+                "BIOS control, curve not followed".into()
+            }
+            FanPhase::Bios => "BIOS control".into(),
+        };
+        let _ = write!(out, "  {:<12}  {} - {state}", channel.channel, channel.label);
+        if let Some(problem) = &channel.problem {
+            let _ = write!(out, " ({problem})");
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn percent(duty: Option<u8>) -> String {
+    duty.map_or_else(|| "an unknown duty".to_owned(), |duty| format!("{duty} %"))
 }
 
 /// One-word state of an entry for the list view. Checks only report, so
@@ -539,7 +588,9 @@ pub fn version() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use syspilot_proto::message::{ActionStatus, Feature, HistoryKind, InfoSection, SystemSummary};
+    use syspilot_proto::message::{
+        ActionStatus, FanChannelStatus, Feature, HistoryKind, InfoSection, SystemSummary,
+    };
     use syspilot_proto::sensor::{DeviceClass, DeviceInfo, SensorInfo, SensorKind};
 
     fn parse_words(line: &str) -> Result<Invocation, String> {
@@ -651,6 +702,84 @@ mod tests {
              Problems\n\
              \x20 ! Settings could not be saved to disk: disk full\n"
         );
+    }
+
+    fn fan_channel(pwm: u8, label: &str, phase: FanPhase, duty: Option<u8>) -> FanChannelStatus {
+        FanChannelStatus {
+            channel: format!("board.pwm{pwm}"),
+            label: label.into(),
+            curve: vec![syspilot_proto::profile::CurvePoint(30, 20)],
+            active: true,
+            target_duty_pct: duty,
+            phase,
+            ..FanChannelStatus::default()
+        }
+    }
+
+    #[test]
+    fn status_view_says_nothing_about_fans_a_build_without_control_cannot_describe() {
+        assert!(!render_status(&status()).contains("Fans"));
+    }
+
+    #[test]
+    fn status_view_lists_each_fan_with_what_it_is_doing() {
+        let mut view = status();
+        let failing = FanChannelStatus {
+            problem: Some("cpu.temp has no reading".into()),
+            ..fan_channel(3, "Case fan", FanPhase::FailSafe, Some(100))
+        };
+        view.fans = FanStatus {
+            availability: FanAvailability::Controllable,
+            board: "ACME B550".into(),
+            channels: vec![
+                fan_channel(1, "CPU fan", FanPhase::Manual, Some(40)),
+                fan_channel(2, "Rear fan", FanPhase::Bios, None),
+                failing,
+            ],
+        };
+        let text = render_status(&view);
+        assert!(
+            text.contains(
+                "Fans (ACME B550)\n  Control        curves in the profile are followed\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("  board.pwm1    CPU fan - following its curve, asking 40 %\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  board.pwm2    Rear fan - BIOS control, curve waiting for sensors\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "Case fan - full speed because a sensor failed, asking 100 % (cpu.temp has no reading)\n"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn status_view_gives_the_reason_a_board_is_read_only() {
+        let mut view = status();
+        view.fans = FanStatus {
+            availability: FanAvailability::ReadOnly {
+                reason: "the board's entry has not been validated".into(),
+            },
+            board: "ACME A320".into(),
+            channels: vec![FanChannelStatus {
+                curve: Vec::new(),
+                active: false,
+                ..fan_channel(1, "CPU fan", FanPhase::Bios, None)
+            }],
+        };
+        let text = render_status(&view);
+        assert!(
+            text.contains("  Control        read-only: the board's entry has not been validated\n"),
+            "{text}"
+        );
+        assert!(text.contains("CPU fan - BIOS control\n"), "{text}");
     }
 
     #[test]
