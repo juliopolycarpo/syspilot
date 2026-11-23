@@ -43,6 +43,24 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
+      # The feature tier. Fan control is off in every release, so the steps
+      # above never compile it. These do, for the crates that carry it, and
+      # run its tests on the replay bus and named fakes only. The driver and
+      # real-worker tests are not compiled or skip themselves with the feature
+      # on, and the service's end-to-end tests are left out (--bins), so no
+      # step here opens the driver, writes a register or installs a service.
+      - name: Lint with fan control
+        run: >
+          cargo clippy -p syspilot-hw -p syspilot-svc -p syspilot-sensors
+          --all-targets --locked
+          --features syspilot-svc/fan-control,syspilot-sensors/fan-control
+          -- -D warnings
+
+      - name: Test with fan control
+        run: |
+          cargo test -p syspilot-hw -p syspilot-sensors -p syspilot-svc --locked --lib --bins --features syspilot-svc/fan-control,syspilot-sensors/fan-control
+          cargo test -p syspilot-hw -p syspilot-sensors -p syspilot-svc --locked --test driver --test worker --features syspilot-svc/fan-control,syspilot-sensors/fan-control
+
       - name: Build release
         run: cargo build --release --workspace --locked
 
