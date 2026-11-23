@@ -1,8 +1,9 @@
-//! Per-user choices about the app itself: level and theme.
+//! Per-user choices about the app itself: level, theme and hidden sensors.
 //!
 //! They live in a small TOML file under the user's local application data.
 //! Nothing in it affects the system, so the app owns it without the service.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::{fs, io};
 
@@ -51,11 +52,19 @@ pub struct Preferences {
     pub advanced_acknowledged: bool,
     /// Colours.
     pub theme: Theme,
+    /// Keys of the sensors the user hid from the Sensors page, e.g. a
+    /// motherboard input nothing is connected to.
+    pub hidden_sensors: BTreeSet<String>,
 }
 
 impl Default for Preferences {
     fn default() -> Self {
-        Self { level: ViewLevel::Simple, advanced_acknowledged: false, theme: Theme::System }
+        Self {
+            level: ViewLevel::Simple,
+            advanced_acknowledged: false,
+            theme: Theme::System,
+            hidden_sensors: BTreeSet::new(),
+        }
     }
 }
 
@@ -112,11 +121,23 @@ mod tests {
             level: ViewLevel::Advanced,
             advanced_acknowledged: true,
             theme: Theme::Dark,
+            hidden_sensors: BTreeSet::from(["board.temp.auxtin1".to_owned()]),
         };
         save(&file, &chosen).unwrap();
         assert_eq!(load(&file), chosen);
         let text = fs::read_to_string(&file).unwrap();
         assert!(text.contains("level = \"advanced\""), "{text}");
+    }
+
+    #[test]
+    fn a_file_from_before_hidden_sensors_hides_nothing() {
+        let scratch = ScratchDirectory::new("older");
+        let file = file_in(&scratch.0, "SysPilot-Test.ui");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "level = \"advanced\"\ntheme = \"dark\"\n").unwrap();
+        let loaded = load(&file);
+        assert_eq!(loaded.level, ViewLevel::Advanced, "(older file): expected its level kept");
+        assert!(loaded.hidden_sensors.is_empty(), "{:?}", loaded.hidden_sensors);
     }
 
     #[test]

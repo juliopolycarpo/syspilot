@@ -11,7 +11,26 @@ use crate::widgets::{self, GAP_MEDIUM, GAP_SMALL, GAP_TIGHT};
 /// Width and height of a row's chart.
 const CHART: (f64, f64) = (180.0, 28.0);
 
-fn reading(app: &App, sensor: &SensorInfo, trends: &Trends) -> KeyedView {
+/// Glyph of the button that hides a reading: an eye struck through.
+const HIDE_GLYPH: &str = "\u{ED1A}";
+
+/// The small button at the end of an Advanced row that hides the reading.
+fn hide_button(sensor: &SensorInfo, context: &ViewContext<App>) -> View {
+    let name = format!("Hide {}", sensor.label);
+    Button::new()
+        .style(ButtonStyle::Subtle)
+        .automation_name(name.clone())
+        .on_click(context.message(Message::HideSensor(sensor.key.clone(), true)))
+        .content(FontIcon::new().glyph(HIDE_GLYPH))
+        .tooltip(name)
+}
+
+fn reading(
+    app: &App,
+    sensor: &SensorInfo,
+    trends: &Trends,
+    context: &ViewContext<App>,
+) -> KeyedView {
     let advanced = app.level() == ViewLevel::Advanced;
     let value = trends.latest(sensor.id);
     let name: View = if advanced {
@@ -37,6 +56,7 @@ fn reading(app: &App, sensor: &SensorInfo, trends: &Trends) -> KeyedView {
             GridLength::Pixel(CHART.0),
             GridLength::Pixel(96.0),
             GridLength::Pixel(if advanced { 150.0 } else { 0.0 }),
+            GridLength::Auto,
         ])
         .column_spacing(GAP_MEDIUM)
         .automation_name(sensor.label.clone())
@@ -54,8 +74,51 @@ fn reading(app: &App, sensor: &SensorInfo, trends: &Trends) -> KeyedView {
                 .horizontal_alignment(HorizontalAlignment::Right)
                 .vertical_alignment(VerticalAlignment::Center)
                 .grid_column(3),
+            widgets::column(4).content(if advanced {
+                hide_button(sensor, context)
+            } else {
+                View::empty()
+            }),
         ));
     KeyedView::new(sensor.key.clone(), row)
+}
+
+/// The readings the user hid, each with a button to show it again. At the
+/// Simple level only their number, since showing one is an Advanced action.
+fn hidden_readings(app: &App, hidden: &[&SensorInfo], context: &ViewContext<App>) -> View {
+    if app.level() == ViewLevel::Simple {
+        return widgets::caption(format!(
+            "{} hidden readings can be shown again at the Advanced level.",
+            hidden.len()
+        ))
+        .into();
+    }
+    let rows = hidden.iter().map(|sensor| {
+        let device = app
+            .snapshot
+            .sensors
+            .devices
+            .get(sensor.device as usize)
+            .map_or(String::new(), |device| device.name.clone());
+        let name = format!("Show {}", sensor.label);
+        let row = Grid::new()
+            .columns([GridLength::Star(1.0), GridLength::Auto])
+            .column_spacing(GAP_MEDIUM)
+            .children((
+                StackPanel::new().children((
+                    widgets::body(&sensor.label),
+                    widgets::caption(format!("{device} · {}", sensor.key)),
+                )),
+                widgets::column(1).content(
+                    Button::new()
+                        .automation_name(name)
+                        .on_click(context.message(Message::HideSensor(sensor.key.clone(), false)))
+                        .content("Show"),
+                ),
+            ));
+        KeyedView::new(sensor.key.clone(), row)
+    });
+    widgets::card().content(StackPanel::new().spacing(GAP_MEDIUM).keyed_children(rows))
 }
 
 /// The one-per-thread and one-per-core readings of a device, folded away
@@ -77,7 +140,7 @@ fn per_unit_readings(
     }
     let unfolded = app.unfolded.contains(&device.name);
     let rows: Vec<KeyedView> = if unfolded {
-        sensors.iter().map(|sensor| reading(app, sensor, trends)).collect()
+        sensors.iter().map(|sensor| reading(app, sensor, trends, context)).collect()
     } else {
         Vec::new()
     };
@@ -150,12 +213,13 @@ pub fn view(app: &App, context: &ViewContext<App>) -> View {
             widgets::dim("The service reports no sensors on this PC."),
         ));
     }
+    let hidden_keys = &app.preferences.hidden_sensors;
     for (index, device) in sensors.devices.iter().enumerate() {
-        let (main, per_unit) = model::device_sensors(sensors, index);
+        let (main, per_unit) = model::device_sensors(sensors, index, hidden_keys);
         if main.is_empty() && per_unit.is_empty() {
             continue;
         }
-        let rows = main.iter().map(|sensor| reading(app, sensor, &trends));
+        let rows = main.iter().map(|sensor| reading(app, sensor, &trends, context));
         let mut group = vec![
             KeyedView::new("name", widgets::strong(&device.name)),
             KeyedView::new(
@@ -171,6 +235,14 @@ pub fn view(app: &App, context: &ViewContext<App>) -> View {
         }
         let group = StackPanel::new().spacing(GAP_TIGHT).keyed_children(group);
         content.push(KeyedView::new(format!("device-{index}"), group));
+    }
+    let hidden = model::hidden_sensors(sensors, hidden_keys);
+    if !hidden.is_empty() {
+        content.push(KeyedView::new(
+            "hidden-heading",
+            widgets::heading(format!("Hidden readings ({})", hidden.len())),
+        ));
+        content.push(KeyedView::new("hidden", hidden_readings(app, &hidden, context)));
     }
     if let Some(status) = &app.snapshot.status {
         content.push(KeyedView::new("access-heading", widgets::heading("Hardware access")));

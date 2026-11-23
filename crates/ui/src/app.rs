@@ -215,6 +215,9 @@ pub enum Message {
     FormText(Field, String),
     /// The per-thread readings of a device were unfolded or folded.
     Unfold(String, bool),
+    /// A sensor, by key, was hidden from the Sensors page (`true`) or
+    /// shown again.
+    HideSensor(String, bool),
     /// A choice of the custom action form changed.
     FormChoice(Choice, Option<usize>),
     /// "Add" on the custom action form.
@@ -647,6 +650,13 @@ impl Component for App {
             Message::FormText(field, text) => self.form.set_text(field, text),
             Message::Unfold(device, true) => _ = self.unfolded.insert(device),
             Message::Unfold(device, false) => _ = self.unfolded.remove(&device),
+            Message::HideSensor(key, hide) => {
+                let hidden = &mut self.preferences.hidden_sensors;
+                let changed = if hide { hidden.insert(key) } else { hidden.remove(&key) };
+                if changed {
+                    self.save_preferences();
+                }
+            }
             Message::FormChoice(choice, index) => {
                 if let Some(index) = index {
                     self.form.set_choice(choice, index);

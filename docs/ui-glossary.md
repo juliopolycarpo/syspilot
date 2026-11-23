@@ -19,6 +19,7 @@ the registry does; the exact values are detail for the Advanced level.
 | History | The record of what SysPilot applied, restored and turned off. | Log |
 | Sensor | One reading of the hardware. | Probe, metric |
 | Sensor log | The CSV files of recorded readings. | History |
+| Hidden reading | A sensor the user took off the Sensors page, for example a motherboard input nothing is connected to. Listed under **Hidden readings** with **Show**; it is still read and logged. Per user, kept with the level and theme. | Disabled, removed, muted |
 | Hardware access | What reading sensors through the PawnIO driver adds. | Driver features, low-level access |
 | Service | The background part that applies settings. | Daemon, agent, engine |
 | Fan channel | One fan output of the motherboard, as the board catalog names it (for example "CPU fan"), with the fan input that reports its speed. Its key is the key of its duty sensor, `board.pwm2`. | Fan header, port, PWM |

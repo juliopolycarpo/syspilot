@@ -3,7 +3,7 @@
 //! Everything here is plain data and pure functions, so the wording and the
 //! state mapping are tested without a window.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
 use syspilot_proto::catalog::{Catalog, Category, Direction, Level, Reboot, Tweak};
 use syspilot_proto::message::{
@@ -563,14 +563,28 @@ pub fn is_raw_board_input(key: &str) -> bool {
     ["board.temp.auxtin", "board.vin", "board.pwm"].iter().any(|raw| key.starts_with(raw))
 }
 
-/// The sensors of one device, split into the ones always shown and the
-/// detail that is folded away: per-unit readings and raw board inputs.
-pub fn device_sensors(sensors: &SensorList, device: usize) -> (Vec<&SensorInfo>, Vec<&SensorInfo>) {
+/// The sensors of one device the user has not hidden, split into the ones
+/// always shown and the detail that is folded away: per-unit readings and
+/// raw board inputs.
+pub fn device_sensors<'a>(
+    sensors: &'a SensorList,
+    device: usize,
+    hidden: &BTreeSet<String>,
+) -> (Vec<&'a SensorInfo>, Vec<&'a SensorInfo>) {
     sensors
         .sensors
         .iter()
-        .filter(|sensor| sensor.device as usize == device)
+        .filter(|sensor| sensor.device as usize == device && !hidden.contains(&sensor.key))
         .partition(|sensor| !is_per_unit_sensor(&sensor.key) && !is_raw_board_input(&sensor.key))
+}
+
+/// The sensors of this PC the user hid, in the service's order. A hidden
+/// key this PC no longer reports is left out: there is nothing to show.
+pub fn hidden_sensors<'a>(
+    sensors: &'a SensorList,
+    hidden: &BTreeSet<String>,
+) -> Vec<&'a SensorInfo> {
+    sensors.sensors.iter().filter(|sensor| hidden.contains(&sensor.key)).collect()
 }
 
 /// Whether a temperature is high enough to colour. A raw board input is
@@ -1141,10 +1155,11 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
                 sensor(3, 0, "cpu.thread1.load"),
             ],
         };
-        let (main, per_unit) = device_sensors(&sensors, 0);
+        let nothing_hidden = BTreeSet::new();
+        let (main, per_unit) = device_sensors(&sensors, 0, &nothing_hidden);
         assert_eq!(main.iter().map(|s| s.id).collect::<Vec<_>>(), [0]);
         assert_eq!(per_unit.iter().map(|s| s.id).collect::<Vec<_>>(), [1, 3]);
-        assert_eq!(device_sensors(&sensors, 1).0.len(), 1);
+        assert_eq!(device_sensors(&sensors, 1, &nothing_hidden).0.len(), 1);
     }
 
     #[test]
@@ -1252,8 +1267,36 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
             devices: Vec::new(),
             sensors: vec![sensor(0, "board.temp.systin"), sensor(1, "board.temp.auxtin1")],
         };
-        let (main, detail) = device_sensors(&sensors, 0);
+        let (main, detail) = device_sensors(&sensors, 0, &BTreeSet::new());
         assert_eq!((main[0].id, detail[0].id), (0, 1));
+    }
+
+    #[test]
+    fn hidden_sensors_leave_their_device_and_are_listed_apart() {
+        let sensor = |id, key: &str| SensorInfo {
+            id,
+            device: 0,
+            key: key.into(),
+            label: key.into(),
+            kind: SensorKind::Temperature,
+            driver: true,
+        };
+        let sensors = SensorList {
+            generation: 1,
+            devices: Vec::new(),
+            sensors: vec![
+                sensor(0, "board.temp.systin"),
+                sensor(1, "board.temp.auxtin1"),
+                sensor(2, "board.temp.auxtin2"),
+            ],
+        };
+        // One key this PC reports, one it does not (another board's).
+        let hidden = BTreeSet::from(["board.temp.auxtin1".to_owned(), "other.temp".to_owned()]);
+        let (main, detail) = device_sensors(&sensors, 0, &hidden);
+        let shown: Vec<u32> = main.iter().chain(&detail).map(|sensor| sensor.id).collect();
+        assert_eq!(shown, [0, 2], "(device sensors): expected the hidden one left out");
+        let listed: Vec<u32> = hidden_sensors(&sensors, &hidden).iter().map(|s| s.id).collect();
+        assert_eq!(listed, [1], "(hidden list): expected only keys this PC reports");
     }
 
     #[test]
