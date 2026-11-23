@@ -104,6 +104,13 @@ impl ReplayMsr {
         self
     }
 
+    /// Makes `register` on `cpu` unreadable again, as if it had not been
+    /// recorded.
+    pub fn remove(&mut self, cpu: LogicalCpu, register: u32) -> &mut Self {
+        self.values.remove(&(cpu, register));
+        self
+    }
+
     /// Handle to the log of every `(cpu, register)` read, in order. Stays
     /// valid after the replay moves into a provider.
     pub fn read_log(&self) -> Arc<Mutex<Vec<(LogicalCpu, u32)>>> {
@@ -782,6 +789,15 @@ mod tests {
         replay.set_sequence(CPU0, 0x611, &[10, 20, 30]);
         let seen: Vec<_> = (0..5).map(|_| replay.read(CPU0, 0x611).unwrap()).collect();
         assert_eq!(seen, [10, 20, 30, 30, 30]);
+    }
+
+    #[test]
+    fn a_removed_msr_is_unreadable_again() {
+        let mut replay = ReplayMsr::new();
+        replay.set(CPU0, 0x19C, 1).set(CPU1, 0x19C, 2);
+        replay.remove(CPU0, 0x19C);
+        assert!(replay.read(CPU0, 0x19C).is_err());
+        assert_eq!(replay.read(CPU1, 0x19C), Ok(2));
     }
 
     #[test]
