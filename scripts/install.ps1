@@ -20,7 +20,8 @@ param(
     # refuses to run from a place a standard user could write to.
     [string] $Destination = (Join-Path $env:ProgramFiles 'SysPilot'),
     # For tests: an instance name starting with SysPilot-Test. A test
-    # instance gets no shortcut and no Installed apps entry.
+    # instance gets its shortcut and Installed apps entry under its own name,
+    # so the same steps run as for the product.
     [string] $Instance = 'SysPilot'
 )
 
@@ -53,27 +54,33 @@ if ($LASTEXITCODE -ne 0) {
 }
 $report
 
-if ($product) {
-    $shortcut = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\SysPilot.lnk'
-    $link = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut)
-    $link.TargetPath = Join-Path $Destination 'syspilot.exe'
-    $link.WorkingDirectory = $Destination
-    $link.Description = 'Keep this PC the way you set it up'
-    $link.Save()
-
-    $version = (& $installed --version).Split(' ')[-1]
-    $size = (Get-ChildItem -Recurse -File $Destination | Measure-Object -Sum Length).Sum
-    $entry = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\SysPilot'
-    New-Item -Force $entry | Out-Null
-    $uninstall = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{0}"' -f (Join-Path $Destination 'uninstall.ps1')
-    Set-ItemProperty $entry -Name DisplayName -Value 'SysPilot'
-    Set-ItemProperty $entry -Name DisplayVersion -Value $version
-    Set-ItemProperty $entry -Name Publisher -Value 'SysPilot contributors'
-    Set-ItemProperty $entry -Name InstallLocation -Value $Destination
-    Set-ItemProperty $entry -Name DisplayIcon -Value (Join-Path $Destination 'syspilot.exe')
-    Set-ItemProperty $entry -Name UninstallString -Value $uninstall
-    Set-ItemProperty $entry -Name EstimatedSize -Type DWord -Value ([int]($size / 1KB))
-    Set-ItemProperty $entry -Name NoModify -Type DWord -Value 1
-    Set-ItemProperty $entry -Name NoRepair -Type DWord -Value 1
-    'SysPilot is in the Start menu.'
+# The shortcut and the Installed apps entry carry the instance name, and a
+# test instance's shortcut and uninstall command name it too.
+$shortcut = Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\$Instance.lnk"
+$link = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut)
+$link.TargetPath = Join-Path $Destination 'syspilot.exe'
+if (-not $product) {
+    $link.Arguments = "--instance $Instance"
 }
+$link.WorkingDirectory = $Destination
+$link.Description = 'Keep this PC the way you set it up'
+$link.Save()
+
+$version = (& $installed --version).Split(' ')[-1]
+$size = (Get-ChildItem -Recurse -File $Destination | Measure-Object -Sum Length).Sum
+$entry = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$Instance"
+New-Item -Force $entry | Out-Null
+$uninstall = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{0}"' -f (Join-Path $Destination 'uninstall.ps1')
+if (-not $product) {
+    $uninstall += " -Instance $Instance"
+}
+Set-ItemProperty $entry -Name DisplayName -Value $Instance
+Set-ItemProperty $entry -Name DisplayVersion -Value $version
+Set-ItemProperty $entry -Name Publisher -Value 'SysPilot contributors'
+Set-ItemProperty $entry -Name InstallLocation -Value $Destination
+Set-ItemProperty $entry -Name DisplayIcon -Value (Join-Path $Destination 'syspilot.exe')
+Set-ItemProperty $entry -Name UninstallString -Value $uninstall
+Set-ItemProperty $entry -Name EstimatedSize -Type DWord -Value ([int]($size / 1KB))
+Set-ItemProperty $entry -Name NoModify -Type DWord -Value 1
+Set-ItemProperty $entry -Name NoRepair -Type DWord -Value 1
+"$Instance is in the Start menu and in Installed apps."

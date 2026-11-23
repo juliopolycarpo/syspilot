@@ -42,15 +42,13 @@ if ($LASTEXITCODE -ne 0) {
 }
 $report
 
-if ($Instance -eq 'SysPilot') {
-    $shortcut = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\SysPilot.lnk'
-    if (Test-Path $shortcut) {
-        Remove-Item -Force $shortcut
-    }
-    $entry = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\SysPilot'
-    if (Test-Path $entry) {
-        Remove-Item -Recurse -Force $entry
-    }
+$shortcut = Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\$Instance.lnk"
+if (Test-Path $shortcut) {
+    Remove-Item -Force $shortcut
+}
+$entry = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$Instance"
+if (Test-Path $entry) {
+    Remove-Item -Recurse -Force $entry
 }
 
 # This script is inside the folder it removes; PowerShell has read it
