@@ -15,6 +15,7 @@ pub mod backoff;
 pub mod bus;
 pub mod chips;
 pub mod cpu;
+pub mod dimm;
 pub mod hub;
 pub mod os;
 pub mod sysinfo;

@@ -11,10 +11,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use syspilot_hw::Provider;
-use syspilot_hw::bus::pawn::{PawnMsr, PawnSuperIo};
+use syspilot_hw::bus::pawn::{PawnMsr, PawnSmbus, PawnSuperIo};
 use syspilot_hw::bus::{BusKind, BusLocks, SystemBusLocks};
 use syspilot_hw::chips::{Detected, SuperIoProvider, detect};
 use syspilot_hw::cpu::{CpuIdentity, CpuTopology, IntelCpuProvider, SystemClock, Vendor};
+use syspilot_hw::dimm::{DimmProvider, describe_controller};
 use syspilot_pawnio::{Error, Executor, PawnIo};
 use syspilot_proto::sensor::SensorKind;
 
@@ -111,6 +112,53 @@ fn the_super_io_provider_reads_plausible_board_sensors() {
         }
     }
     assert!(plausible_temperatures > 0, "(super io provider): expected at least one temperature");
+    assert_eq!(provider.last_problem(), None);
+}
+
+#[test]
+fn the_dimm_scan_reports_what_the_platform_smbus_holds() {
+    let test = "the_dimm_scan_reports_what_the_platform_smbus_holds";
+    if !enabled(test) {
+        return;
+    }
+    let Some(module) = load_module(test, "SmbusI801.bin") else { return };
+    // The controller's identity is informational: three cells the module
+    // fills with what it found at load time.
+    let mut identity = [0u64; 3];
+    module.execute("ioctl_identity", &[], &mut identity).unwrap_or_else(|error| {
+        panic!("(dimm scan): expected ioctl_identity to answer | received: {error}")
+    });
+    let controller = describe_controller(identity);
+    eprintln!("controller: {controller} (raw {identity:#x?})");
+    let locks: Arc<dyn BusLocks> = Arc::new(SystemBusLocks::new());
+    let probed = DimmProvider::probe(Box::new(PawnSmbus::new(module)), locks, &controller)
+        .unwrap_or_else(|error| panic!("(dimm scan): expected a scan | received: {error}"));
+    eprintln!("summary: {}", probed.summary);
+    for section in &probed.info {
+        eprintln!("{}", section.title);
+        for (label, value) in &section.rows {
+            eprintln!("    {label:<22} {value}");
+        }
+    }
+    assert_eq!(probed.modules, probed.info.len(), "one section per module");
+    let Some(mut provider) = probed.provider else {
+        eprintln!("no DIMM temperature sensor on this bus; nothing to sample");
+        return;
+    };
+    let sensors = provider.sensors();
+    let mut values = Vec::new();
+    provider.sample(&mut values);
+    assert_eq!(values.len(), sensors.len(), "one value per sensor");
+    for (sensor, value) in sensors.iter().zip(&values) {
+        eprintln!("{:<22} {:<14} {:?}", sensor.key, sensor.device, value);
+        let temperature = value
+            .unwrap_or_else(|| panic!("({}): expected a temperature | received: None", sensor.key));
+        assert!(
+            (5.0..=95.0).contains(&temperature),
+            "({}): expected 5..=95 degrees C | received: {temperature}",
+            sensor.key
+        );
+    }
     assert_eq!(provider.last_problem(), None);
 }
 
