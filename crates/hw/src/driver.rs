@@ -192,6 +192,10 @@ pub struct DriverProbe {
     pub providers: Vec<Box<dyn Provider>>,
     /// One section per memory module found.
     pub info: Vec<InfoSection>,
+    /// The first supported Super I/O chip the scan found, readable or not.
+    /// Fan control decides on it ([`crate::fan::layout`]); nothing here
+    /// writes to it.
+    pub super_io_chip: Option<Detected>,
 }
 
 /// Probes the real machine with the modules in `modules_dir`.
@@ -222,6 +226,7 @@ pub fn probe_with(platform: &dyn Platform) -> DriverProbe {
     let mut features = Vec::with_capacity(5);
     let mut providers = Vec::new();
     let mut info = Vec::new();
+    let mut super_io_chip = None;
     for (key, title, outcome) in outcomes {
         features.push(Feature {
             key: key.to_owned(),
@@ -231,6 +236,7 @@ pub fn probe_with(platform: &dyn Platform) -> DriverProbe {
         });
         providers.extend(outcome.providers);
         info.extend(outcome.info);
+        super_io_chip = super_io_chip.or(outcome.chip);
     }
     features.push(Feature {
         key: FAN_CONTROL.to_owned(),
@@ -238,7 +244,7 @@ pub fn probe_with(platform: &dyn Platform) -> DriverProbe {
         available: false,
         detail: "Not part of this version".to_owned(),
     });
-    DriverProbe { state, features, providers, info }
+    DriverProbe { state, features, providers, info, super_io_chip }
 }
 
 /// What opening the driver says about its state.
@@ -276,6 +282,8 @@ struct Outcome {
     detail: String,
     providers: Vec<Box<dyn Provider>>,
     info: Vec<InfoSection>,
+    /// The Super I/O chip, for the board feature.
+    chip: Option<Detected>,
 }
 
 impl Outcome {
@@ -285,6 +293,7 @@ impl Outcome {
             detail: detail.to_owned(),
             providers: Vec::new(),
             info: Vec::new(),
+            chip: None,
         }
     }
 
@@ -294,7 +303,13 @@ impl Outcome {
             detail: detail.to_owned(),
             providers: vec![Box::new(provider)],
             info: Vec::new(),
+            chip: None,
         }
+    }
+
+    fn with_chip(mut self, chip: &Detected) -> Self {
+        self.chip = Some(chip.clone());
+        self
     }
 }
 
@@ -391,16 +406,17 @@ fn probe_board(platform: &dyn Platform) -> Outcome {
     // provider gets a handle of its own.
     let io = match platform.super_io() {
         Ok(io) => io,
-        Err(error) => return Outcome::unavailable(&error.plain()),
+        Err(error) => return Outcome::unavailable(&error.plain()).with_chip(chip),
     };
     match SuperIoProvider::open(chip, io, locks) {
         Ok(provider) => {
             let detail = provider.summary().to_owned();
-            Outcome::found(provider, &detail)
+            Outcome::found(provider, &detail).with_chip(chip)
         }
         Err(error) => Outcome::unavailable(&format!(
             "The motherboard's sensor chip could not be read: {error}"
-        )),
+        ))
+        .with_chip(chip),
     }
 }
 
@@ -1126,6 +1142,25 @@ mod tests {
     }
 
     // -- motherboard --------------------------------------------------------
+
+    #[test]
+    fn the_probe_hands_over_the_chip_it_found_for_the_fan_decision() {
+        let probe = probe_with(&ReplayPlatform::reference());
+        let Some(Detected::Nuvoton { chip, .. }) = &probe.super_io_chip else {
+            panic!(
+                "(super io chip): expected the reference machine's Nuvoton chip | received: {:?}",
+                probe.super_io_chip
+            );
+        };
+        assert_eq!(chip.name(), "NCT6779D");
+
+        // No driver, no scan, no chip.
+        let missing = ReplayPlatform {
+            driver: Err(Error::DriverAbsent { win32: 2 }),
+            ..ReplayPlatform::reference()
+        };
+        assert_eq!(probe_with(&missing).super_io_chip, None);
+    }
 
     #[test]
     fn a_super_io_chip_this_reader_does_not_know_is_reported_not_read() {
