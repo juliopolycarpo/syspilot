@@ -63,6 +63,17 @@ can write the profile is LocalSystem.
 - The service command line is quoted.
 - The catalog is compiled in. There is no catalog file to tamper with.
 
+### The sensor worker
+
+- The service starts `syspilot-sensors.exe` by its full path next to its own
+  executable. Nothing is searched for, so the worker is as hard to replace as
+  the service.
+- The worker takes no arguments and no instructions beyond "one more sample".
+  It is given nothing but its standard streams, so a client cannot reach it,
+  and what it sends back is decoded with the same bounded decoder as the pipe.
+- A worker that stops answering is dropped after 750 ms and terminated. It
+  cannot stall enforcement.
+
 ### Commands
 
 - A command's program must be an absolute path or start with a `%Variable%\`
@@ -83,8 +94,13 @@ can write the profile is LocalSystem.
 
 ### The driver
 
-- SysPilot talks to PawnIO only through its documented device interface and
-  loads only the modules it pins by SHA-256.
+- SysPilot talks to PawnIO only through its documented device interface.
+- The modules it loads are the PawnIO project's own. The build fetches them
+  pinned by SHA-256, a release puts them in `pawnio-modules` next to the
+  executables (under `Program Files`, where standard users cannot write), and
+  the driver itself refuses any module not signed with the PawnIO key.
+- Only the sensor worker opens the driver. The service does not, and the app
+  cannot.
 - Version 1 performs no hardware writes: no fan duty, no MSR, no SMBus device
   registers. Fan control is compiled out unless the `fan-control` feature is
   enabled, and that feature is off in release builds.

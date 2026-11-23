@@ -184,3 +184,19 @@ and the service executable carries no hardware code.
 about 1.2 s before the first values appear after the app opens. The service
 still waits for the worker's report when it starts one; making that wait
 asynchronous is left for later.
+
+## 17. What a build downloads, and where it puts it
+
+**Decision.** Beyond crates, a build fetches two things, both pinned and
+neither committed:
+
+| What | Fetched by | Lands in |
+| ---- | ---------- | -------- |
+| Windows App SDK runtime 2.4.0 and the WebView2 projection (NuGet packages) | the app's build script, through `windows-reactor-setup` | `%LOCALAPPDATA%\windows-reactor-setup` (a per-user cache), then copied next to `syspilot.exe` in `target` |
+| The PawnIO.Modules release, checked by SHA-256 | `cargo xtask fetch-modules` | `pawnio-modules\` in the repository root (ignored by git) |
+
+**Why.** The runtime ships with the app so that nothing has to be installed
+on the user's machine (decision 15); the modules are someone else's signed
+LGPL files (decision 13). Listing them here is the whole inventory: building
+SysPilot installs no program, driver, service or system-wide component.
+Deleting the two directories undoes it.

@@ -1,6 +1,6 @@
 # Third-party components
 
-## Linked into the service
+## Linked into the service and the sensor worker
 
 | Crate                                         | Licence             | Used for                          |
 | --------------------------------------------- | ------------------- | --------------------------------- |

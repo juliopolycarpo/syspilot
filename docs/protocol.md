@@ -122,6 +122,21 @@ never sees half a sample.
 client holds, the IDs mean something else and the client must fetch `Sensors`
 again.
 
+## Sensor worker
+
+The service and `syspilot-sensors.exe` talk over the worker's standard input
+and output (`proto::worker`). This is internal: both always come from the same
+build, so it carries no version.
+
+| Direction         | Content                                                        |
+| ----------------- | -------------------------------------------------------------- |
+| Worker to service | Once, first: a `Probed` frame with the driver state, the features, the system inventory and the sensor list. |
+| Service to worker | The byte `s` for each sample wanted. Any other byte is ignored. |
+| Worker to service | One `Sample` frame per `s`: one optional value per sensor, in the order of the sensor list. |
+
+Frames use the pipe's framing. The end of the worker's input tells it to exit.
+The service waits up to 20 s for `Probed` and 750 ms for each `Sample`.
+
 ## Compatibility rules
 
 - Enums are externally tagged and only ever grow at the end. postcard encodes a
