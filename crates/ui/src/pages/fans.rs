@@ -130,7 +130,9 @@ fn channel_card(app: &App, channel: &FanChannelStatus, trends: &Trends) -> View 
             widgets::toned(widgets::body(problem), Tone::Bad, app.palette),
         ));
     }
-    text.push(KeyedView::new("limits", widgets::caption(model::fan_limits_text(channel))));
+    if let Some(limits) = model::fan_limits_text(channel) {
+        text.push(KeyedView::new("limits", widgets::caption(limits)));
+    }
 
     widgets::card().content(
         Grid::new()

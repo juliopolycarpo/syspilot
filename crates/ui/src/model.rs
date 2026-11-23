@@ -739,19 +739,20 @@ pub fn fan_problem_text(channel: &FanChannelStatus) -> Option<String> {
     Some(format!("Problem: {}", with_full_stop(problem)))
 }
 
-/// What a channel's curve is driven by and how low it may go.
-pub fn fan_limits_text(channel: &FanChannelStatus) -> String {
-    let sources = if channel.sources.is_empty() {
-        "No temperature sensor is set.".to_owned()
-    } else {
-        format!("Driven by the hottest of {}.", channel.sources.join(", "))
-    };
-    if channel.min_duty_pct == 0 {
+/// What a channel's curve is driven by and how low it may go. `None` for a
+/// channel without a curve: it has no sensor, and its lowest duty only
+/// matters once a curve drives it, so the line would be noise.
+pub fn fan_limits_text(channel: &FanChannelStatus) -> Option<String> {
+    if channel.sources.is_empty() {
+        return None;
+    }
+    let sources = format!("Driven by the hottest of {}.", channel.sources.join(", "));
+    Some(if channel.min_duty_pct == 0 {
         sources
     } else {
         // A no-break space keeps "30" and "%" on one line.
         format!("{sources} Never below {}\u{a0}%.", channel.min_duty_pct)
-    }
+    })
 }
 
 /// The live numbers of one fan channel.
@@ -1447,13 +1448,19 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
     #[test]
     fn limits_name_the_sources_and_the_lowest_duty() {
         assert_eq!(
-            fan_limits_text(&channel(FanPhase::Manual)),
-            "Driven by the hottest of cpu.package.temp, board.temp1. Never below 30\u{a0}%."
+            fan_limits_text(&channel(FanPhase::Manual)).as_deref(),
+            Some("Driven by the hottest of cpu.package.temp, board.temp1. Never below 30\u{a0}%.")
         );
+        let mut no_floor = channel(FanPhase::Manual);
+        no_floor.min_duty_pct = 0;
+        assert_eq!(
+            fan_limits_text(&no_floor).as_deref(),
+            Some("Driven by the hottest of cpu.package.temp, board.temp1.")
+        );
+        // A fan without a curve gets no line at all, even with a floor.
         let mut bare = channel(FanPhase::Bios);
         bare.sources.clear();
-        bare.min_duty_pct = 0;
-        assert_eq!(fan_limits_text(&bare), "No temperature sensor is set.");
+        assert_eq!(fan_limits_text(&bare), None, "(limits of a fan without a curve)");
     }
 
     /// A sensor list and trends standing in for the shared-memory samples.
