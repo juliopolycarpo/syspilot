@@ -25,10 +25,9 @@ Microsoft sources: an archived post by a Microsoft engineer, [Image File
 Execution Options](https://learn.microsoft.com/archive/blogs/junfeng/image-file-execution-options)
 (2004), and the [GFlags flag table](https://learn.microsoft.com/windows-hardware/drivers/debugger/gflags-flag-table),
 which lists the global flags that can be set per image. Neither mentions
-`PerfOptions`. The post lists the values a 2004 program read from the key and
-says it could not find documentation for some of them, so it is no proof that
-the list is complete. The Sysinternals-era Regmon trace it quotes predates
-`PerfOptions`.
+`PerfOptions`. The post lists the values that a 2004 Regmon trace of a small
+program showed being read, and it says its author could not find documentation
+for some of them, so it does not settle what later Windows versions read.
 
 ## Values
 
