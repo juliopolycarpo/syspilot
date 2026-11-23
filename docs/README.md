@@ -11,6 +11,7 @@
 | [Decisions](decisions.md)                             | Choices that were not obvious, with their reasons.            |
 | [Research: PawnIO](research/pawnio.md)                | The driver interface SysPilot talks to.                       |
 | [Research: UI toolkits](research/ui-toolkits.md)      | Why the app is built with windows-reactor (WinUI 3).          |
+| [Research: reference machine](research/reference-machine.md) | What the hardware providers found on the development machine, and what they did not. |
 
 Code-level documentation lives in the crates as rustdoc:
 `cargo doc --workspace --no-deps --open`.
