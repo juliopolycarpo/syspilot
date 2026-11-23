@@ -16,7 +16,14 @@
 [CmdletBinding()]
 param(
     # Assemble from an existing release build instead of building.
-    [switch] $SkipBuild
+    [switch] $SkipBuild,
+    # Thumbprint of a code-signing certificate in the current user's or the
+    # machine's store. When given, the three executables and the two
+    # scripts in the package are signed with it before the zip is made.
+    [string] $SigningThumbprint,
+    # Timestamp server for the signatures, so that they outlive the
+    # certificate. Empty for none.
+    [string] $TimestampServer = 'http://timestamp.digicert.com'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -76,6 +83,28 @@ if (Test-Path $modules) {
     Copy-Item -Recurse $modules (Join-Path $stage 'pawnio-modules')
 } else {
     Write-Warning 'No pawnio-modules directory: the package will not read driver-backed sensors. Run `cargo xtask fetch-modules` first.'
+}
+
+if ($SigningThumbprint) {
+    $certificate = Get-ChildItem Cert:\CurrentUser\My, Cert:\LocalMachine\My -CodeSigningCert |
+        Where-Object Thumbprint -eq $SigningThumbprint | Select-Object -First 1
+    if (-not $certificate) {
+        throw "(signing): expected a code-signing certificate with thumbprint $SigningThumbprint in a personal store | received: none"
+    }
+    # Only SysPilot's own files. The runtime and the PawnIO modules carry
+    # their makers' signatures and must stay byte for byte as they came.
+    foreach ($file in $executables + 'install.ps1', 'uninstall.ps1') {
+        $arguments = @{ FilePath = Join-Path $stage $file; Certificate = $certificate; HashAlgorithm = 'SHA256' }
+        if ($TimestampServer) {
+            $arguments.TimestampServer = $TimestampServer
+        }
+        $signature = Set-AuthenticodeSignature @arguments
+        # A certificate nobody trusts yet still signs; anything else failed.
+        if ($signature.Status -notin 'Valid', 'UnknownError') {
+            throw "(signing): expected $file to be signed | received: $($signature.Status), $($signature.StatusMessage)"
+        }
+        '{0}: signed ({1})' -f $file, $signature.Status
+    }
 }
 
 $archive = Join-Path $repository "dist\$name.zip"
