@@ -110,6 +110,9 @@ version = "0.1.0"
 [[package]]
 name = "syspilot-hw"
 version = "0.1.0"
+dependencies = [
+ "syspilot-proto",
+]
 
 [[package]]
 name = "syspilot-pawnio"
