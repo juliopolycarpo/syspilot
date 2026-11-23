@@ -9,7 +9,6 @@
 //!   across processes, then take the busiest engine of the adapter.
 //! * Dedicated memory in use is `\GPU Adapter Memory(*)\Dedicated Usage`.
 
-use std::collections::HashSet;
 use std::ptr;
 
 use syspilot_proto::sensor::{DeviceClass, SensorKind};
@@ -24,7 +23,7 @@ use windows_sys::Wdk::Graphics::Direct3D::{
 use windows_sys::Win32::Foundation::{LUID, STATUS_BUFFER_TOO_SMALL};
 
 use super::pdh::{CounterId, Query};
-use super::text::clean_utf16;
+use super::text::{clean_utf16, number_repeated_names};
 use crate::hub::{Provider, SensorSpec};
 
 const ENGINE_COUNTER: &str = r"\GPU Engine(*)\Utilization Percentage";
@@ -105,20 +104,6 @@ fn take_luid(text: &str) -> Option<(Luid, &str)> {
 /// Whether the adapter is a software rasteriser that has no sensors.
 fn is_software_adapter(type_flags: u32, name: &str) -> bool {
     type_flags & ADAPTER_TYPE_SOFTWARE_DEVICE != 0 || name == BASIC_RENDER_DRIVER
-}
-
-/// Makes names unique by numbering repeats: two identical cards become
-/// `X` and `X (2)`, so the hub does not merge them into one device.
-fn disambiguate_names(names: &mut [String]) {
-    let mut seen: HashSet<String> = HashSet::new();
-    for name in names.iter_mut() {
-        let base = name.clone();
-        let mut number = 2;
-        while !seen.insert(name.clone()) {
-            *name = format!("{base} ({number})");
-            number += 1;
-        }
-    }
 }
 
 /// An open adapter handle from `D3DKMTEnumAdapters2`, closed on drop.
@@ -495,7 +480,7 @@ pub fn probe() -> Vec<Box<dyn Provider>> {
         usage.as_ref().map_or((false, false), |u| (u.engine.is_some(), u.memory.is_some()));
 
     let mut names: Vec<String> = hardware.iter().map(|a| a.name.clone()).collect();
-    disambiguate_names(&mut names);
+    number_repeated_names(&mut names);
     let mut adapters = Vec::new();
     for (adapter, name) in hardware.into_iter().zip(names) {
         let max_fan_rpm = max_fan_rpm(&adapter.handle);
@@ -596,14 +581,6 @@ mod tests {
         assert!(is_software_adapter(ADAPTER_TYPE_SOFTWARE_DEVICE, "Anything"));
         assert!(is_software_adapter(0, "Microsoft Basic Render Driver"));
         assert!(!is_software_adapter(0b11, "Radeon RX 550/550 Series"), "render + display only");
-    }
-
-    #[test]
-    fn identical_adapter_names_are_numbered() {
-        let mut names =
-            vec!["RTX".to_owned(), "RTX".to_owned(), "Radeon".to_owned(), "RTX".to_owned()];
-        disambiguate_names(&mut names);
-        assert_eq!(names, ["RTX", "RTX (2)", "Radeon", "RTX (3)"]);
     }
 
     #[test]

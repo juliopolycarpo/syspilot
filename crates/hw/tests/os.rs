@@ -13,12 +13,6 @@ use syspilot_hw::os;
 use syspilot_hw::{Provider, SensorSpec};
 use syspilot_proto::sensor::{DeviceClass, SensorKind};
 
-type Probe = fn() -> Vec<Box<dyn Provider>>;
-
-/// Every module's probe, by name, so a failure says which provider broke.
-const PROBES: &[(&str, Probe)] =
-    &[("cpu", os::cpu::probe), ("memory", os::memory::probe), ("gpu", os::gpu::probe)];
-
 /// Samples taken per provider, and the wait between them. Rates need two
 /// reads at least `MIN_INTERVAL` (50 ms) apart, and PDH counters need two
 /// collections, so the wait cannot be skipped; 3 x 500 ms keeps the whole
@@ -59,7 +53,8 @@ struct Probed {
 
 fn probe_everything() -> Vec<Probed> {
     let mut probed = Vec::new();
-    for &(name, probe) in PROBES {
+    // By module name, so a failure says which provider broke.
+    for &(name, probe) in os::PROBES {
         for provider in probe() {
             let specs = provider.sensors();
             probed.push(Probed { name, provider, specs });
@@ -82,10 +77,11 @@ fn probing_twice_gives_the_same_sensor_set() {
 }
 
 #[test]
-fn os_probe_matches_the_per_module_probes() {
+fn os_probe_builds_every_module_provider() {
     let all: usize = os::probe().iter().map(|provider| provider.sensors().len()).sum();
     let per_module: usize = probe_everything().iter().map(|p| p.specs.len()).sum();
     assert_eq!(all, per_module, "os::probe sensors vs sum of module probes");
+    assert!(all > 0, "os::probe: expected at least the CPU and memory sensors | received none");
 }
 
 #[test]
@@ -165,7 +161,7 @@ fn providers_declare_valid_keys_and_report_plausible_values_over_three_samples()
         // Rates have no value on the first sample and must have one on the
         // second and third.
         for (index, spec) in p.specs.iter().enumerate() {
-            if is_always_available_rate(&spec.key) {
+            if is_declared_rate(&spec.key) {
                 assert_eq!(
                     rounds[0][index], None,
                     "{}: first sample of a rate must be None",
@@ -179,11 +175,45 @@ fn providers_declare_valid_keys_and_report_plausible_values_over_three_samples()
                     );
                 }
             }
+            // A sensor that is declared because it answered at probe time
+            // answers from the first sample on.
+            if is_declared_instant(&spec.key) {
+                for (round, values) in rounds.iter().enumerate() {
+                    assert!(
+                        values[index].is_some(),
+                        "{} sample {round}: expected a value | received: None",
+                        spec.key
+                    );
+                }
+            }
         }
     }
 }
 
-/// Rate sensors that every machine can compute from the second sample on.
-fn is_always_available_rate(key: &str) -> bool {
-    key == "cpu.load"
+/// `disk<N>.<suffix>` with a numeric `N`.
+fn is_disk_key(key: &str, suffixes: &[&str]) -> bool {
+    let Some(rest) = key.strip_prefix("disk") else { return false };
+    let Some((number, suffix)) = rest.split_once('.') else { return false };
+    !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) && suffixes.contains(&suffix)
+}
+
+/// Rate sensors that are computed from the second sample on once declared.
+fn is_declared_rate(key: &str) -> bool {
+    key == "cpu.load" || is_disk_key(key, &["read", "write"])
+}
+
+/// Sensors with a value on every sample once declared: disk health is read
+/// at probe time, and a volume is only declared if it could be read.
+fn is_declared_instant(key: &str) -> bool {
+    key.starts_with("memory.") || key.starts_with("volume.") || is_disk_key(key, &["temp", "life"])
+}
+
+#[test]
+fn disk_and_volume_key_matchers_accept_only_their_own_keys() {
+    assert!(is_disk_key("disk0.read", &["read"]));
+    assert!(is_disk_key("disk12.life", &["temp", "life"]));
+    assert!(!is_disk_key("disk.read", &["read"]), "missing drive number");
+    assert!(!is_disk_key("disk1.write", &["read"]), "other suffix");
+    assert!(!is_disk_key("diskx.read", &["read"]), "non-numeric drive number");
+    assert!(!is_disk_key("net0.down", &["down"]));
 }

@@ -1,6 +1,8 @@
 //! Text cleanup for strings that come from firmware, drivers and the
 //! registry.
 
+use std::collections::HashSet;
+
 /// Normalises a device or vendor string for display: control characters and
 /// anything after the first NUL are dropped, runs of whitespace collapse to
 /// one space, and the ends are trimmed.
@@ -30,9 +32,39 @@ pub(crate) fn clean_utf16(units: &[u16]) -> String {
     clean_text(&String::from_utf16_lossy(&units[..end]))
 }
 
+/// Makes device names unique by numbering repeats: two identical cards
+/// become `X` and `X (2)`. The hub groups sensors by device name, so without
+/// this two identical drives would collapse into one device.
+pub(crate) fn number_repeated_names(names: &mut [String]) {
+    let mut seen: HashSet<String> = HashSet::new();
+    for name in names.iter_mut() {
+        let base = name.clone();
+        let mut number = 2;
+        while !seen.insert(name.clone()) {
+            *name = format!("{base} ({number})");
+            number += 1;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_names_are_numbered_and_unique_names_untouched() {
+        let mut names =
+            vec!["RTX".to_owned(), "RTX".to_owned(), "Radeon".to_owned(), "RTX".to_owned()];
+        number_repeated_names(&mut names);
+        assert_eq!(names, ["RTX", "RTX (2)", "Radeon", "RTX (3)"]);
+    }
+
+    #[test]
+    fn numbering_does_not_collide_with_a_name_that_already_ends_in_a_number() {
+        let mut names = vec!["Disk (2)".to_owned(), "Disk".to_owned(), "Disk".to_owned()];
+        number_repeated_names(&mut names);
+        assert_eq!(names, ["Disk (2)", "Disk", "Disk (3)"]);
+    }
 
     #[test]
     fn padding_and_runs_of_spaces_are_removed() {

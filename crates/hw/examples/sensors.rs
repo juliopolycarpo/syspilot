@@ -5,14 +5,12 @@
 
 use std::time::{Duration, Instant};
 
+use syspilot_hw::Hub;
 use syspilot_hw::os;
-use syspilot_hw::{Hub, Provider};
 use windows_sys::Win32::System::ProcessStatus::{
     K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
 };
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
-
-type Probe = fn() -> Vec<Box<dyn Provider>>;
 
 /// Private (committed, not shared) bytes of this process.
 fn private_bytes() -> usize {
@@ -46,11 +44,9 @@ fn main() {
     println!("private memory at start: {} KiB", private_bytes() / 1024);
 
     // Probe each provider on its own to see where the time goes.
-    let probes: [(&str, Probe); 3] =
-        [("cpu", os::cpu::probe), ("memory", os::memory::probe), ("gpu", os::gpu::probe)];
     let mut providers = Vec::new();
     let started = Instant::now();
-    for (name, probe) in probes {
+    for &(name, probe) in os::PROBES {
         let provider_started = Instant::now();
         let found = probe();
         println!(

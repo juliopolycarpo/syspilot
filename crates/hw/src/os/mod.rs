@@ -12,15 +12,26 @@ pub mod memory;
 pub(crate) mod pdh;
 pub(crate) mod rate;
 pub(crate) mod registry;
+pub mod storage;
 pub(crate) mod text;
+pub mod volumes;
 
 use crate::hub::Provider;
 
+/// A module's probe: its providers, or none if the machine lacks the hardware.
+pub type ProbeFn = fn() -> Vec<Box<dyn Provider>>;
+
+/// Every module's probe by module name, in the order [`probe`] runs them.
+/// Exposed so tools can time or test one module at a time.
+pub const PROBES: &[(&str, ProbeFn)] = &[
+    ("cpu", cpu::probe),
+    ("memory", memory::probe),
+    ("gpu", gpu::probe),
+    ("storage", storage::probe),
+    ("volumes", volumes::probe),
+];
+
 /// Constructs every provider that finds hardware on this machine.
 pub fn probe() -> Vec<Box<dyn Provider>> {
-    let mut providers = Vec::new();
-    providers.extend(cpu::probe());
-    providers.extend(memory::probe());
-    providers.extend(gpu::probe());
-    providers
+    PROBES.iter().flat_map(|(_, probe)| probe()).collect()
 }
