@@ -69,7 +69,6 @@ Executable size is checked in CI.
 | Date       | Build                                        | Private memory | Threads | Executable |
 | ---------- | -------------------------------------------- | -------------- | ------- | ---------- |
 | 2026-11-23 | release, 58 tweaks loaded, no sensor providers | 1.6 MB       | 5       | 1.31 MB    |
-
 | 2026-11-23 | release, with the Windows sensor providers   | 1.8 MB idle, 1.9 MB while sampling | 5 | 1.40 MB |
 
 Measured on a console run. The second row is after a status request, a sensor
