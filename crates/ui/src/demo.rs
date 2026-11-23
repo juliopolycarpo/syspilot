@@ -90,7 +90,7 @@ const DEVICES: [(&str, DeviceClass); 6] = [
     ("Ethernet", DeviceClass::Network),
 ];
 
-const WAVES: [Wave; 19] = [
+const WAVES: [Wave; 22] = [
     wave(0, "cpu0.load", "Total load", SensorKind::Load, false, (18.0, 14.0, 23.0)),
     wave(0, "cpu0.package.temp", "Package", SensorKind::Temperature, true, (52.0, 9.0, 31.0)),
     wave(0, "cpu0.package.power", "Package power", SensorKind::Power, true, (38.0, 22.0, 23.0)),
@@ -115,6 +115,11 @@ const WAVES: [Wave; 19] = [
     wave(4, "board.fan1", "CPU fan", SensorKind::Fan, true, (910.0, 160.0, 31.0)),
     wave(4, "board.fan2", "Rear fan", SensorKind::Fan, true, (640.0, 60.0, 43.0)),
     wave(4, "board.temp1", "Motherboard", SensorKind::Temperature, true, (36.0, 1.5, 71.0)),
+    // Raw inputs as a real chip reports them, including one nothing is
+    // wired to: the app must fold these away and not call 103 °C hot.
+    wave(4, "board.temp.auxtin1", "AUXTIN1", SensorKind::Temperature, true, (103.0, 0.0, 1.0)),
+    wave(4, "board.vin0", "VIN0", SensorKind::Voltage, true, (1.2, 0.01, 17.0)),
+    wave(4, "board.pwm2", "Fan 2 duty", SensorKind::Duty, true, (42.0, 4.0, 43.0)),
     wave(5, "net0.down", "Download", SensorKind::Throughput, false, (0.6 * MIB, 0.6 * MIB, 9.0)),
     wave(5, "net0.up", "Upload", SensorKind::Throughput, false, (0.05 * MIB, 0.05 * MIB, 5.0)),
 ];
