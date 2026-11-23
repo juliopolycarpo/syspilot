@@ -19,6 +19,7 @@
 
 use std::fmt;
 
+use crate::os::bytes::{read_u8, read_u16, read_u32};
 use crate::os::text::clean_text;
 
 /// Smallest possible structure: the header alone.
@@ -155,6 +156,10 @@ pub enum SmbiosError {
     TruncatedStructure { offset: usize, length: u8, available: usize },
     /// The table ends inside a structure's string set.
     UnterminatedStrings { offset: usize },
+    /// A firmware-table buffer is shorter than its own header.
+    FirmwareHeader { available: usize },
+    /// A firmware-table header declares more table bytes than the buffer has.
+    FirmwareLength { declared: usize, available: usize },
 }
 
 impl fmt::Display for SmbiosError {
@@ -176,11 +181,47 @@ impl fmt::Display for SmbiosError {
                 f,
                 "(smbios): expected a string set ending in two NUL bytes for the structure at offset {offset} | received: end of table"
             ),
+            Self::FirmwareHeader { available } => write!(
+                f,
+                "(smbios): expected firmware table header of {FIRMWARE_HEADER_BYTES} bytes | received: {available} bytes"
+            ),
+            Self::FirmwareLength { declared, available } => write!(
+                f,
+                "(smbios): expected {declared} bytes of table data after the {FIRMWARE_HEADER_BYTES}-byte header | received: {available}"
+            ),
         }
     }
 }
 
 impl std::error::Error for SmbiosError {}
+
+/// Size of the `RAW_SMBIOS_TABLE` header that `GetSystemFirmwareTable`
+/// puts before the structures: `Used20CallingMethod`, major and minor
+/// version, DMI revision (one byte each), then the data length (`u32`).
+const FIRMWARE_HEADER_BYTES: usize = 8;
+
+/// The SMBIOS structures inside a `GetSystemFirmwareTable('RSMB')` reply,
+/// with the version the firmware declares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirmwareTable<'a> {
+    pub major: u8,
+    pub minor: u8,
+    /// The structure table itself, ready for [`parse`].
+    pub data: &'a [u8],
+}
+
+/// Separates the `RAW_SMBIOS_TABLE` header from the structure table.
+pub fn split_firmware_table(buffer: &[u8]) -> Result<FirmwareTable<'_>, SmbiosError> {
+    let Some(header) = buffer.get(..FIRMWARE_HEADER_BYTES) else {
+        return Err(SmbiosError::FirmwareHeader { available: buffer.len() });
+    };
+    let declared = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
+    let available = buffer.len() - FIRMWARE_HEADER_BYTES;
+    let Some(data) = buffer[FIRMWARE_HEADER_BYTES..].get(..declared) else {
+        return Err(SmbiosError::FirmwareLength { declared, available });
+    };
+    Ok(FirmwareTable { major: header[1], minor: header[2], data })
+}
 
 /// One structure of the table, with typed access to its fields.
 struct Structure<'a> {
@@ -192,17 +233,15 @@ struct Structure<'a> {
 
 impl Structure<'_> {
     fn u8_at(&self, offset: usize) -> Option<u8> {
-        self.formatted.get(offset).copied()
+        read_u8(self.formatted, offset)
     }
 
     fn u16_at(&self, offset: usize) -> Option<u16> {
-        let bytes = self.formatted.get(offset..offset.checked_add(2)?)?;
-        Some(u16::from_le_bytes(bytes.try_into().ok()?))
+        read_u16(self.formatted, offset)
     }
 
     fn u32_at(&self, offset: usize) -> Option<u32> {
-        let bytes = self.formatted.get(offset..offset.checked_add(4)?)?;
-        Some(u32::from_le_bytes(bytes.try_into().ok()?))
+        read_u32(self.formatted, offset)
     }
 
     /// The string whose index is stored at `offset`. `None` for index 0, an
@@ -988,6 +1027,69 @@ mod tests {
                 .collect();
             let _ = parse(&garbage);
         }
+    }
+
+    // ---- firmware table wrapper ---------------------------------------------------------
+
+    /// What `GetSystemFirmwareTable` returns: the 8-byte header, then the table.
+    fn firmware_buffer(major: u8, minor: u8, data: &[u8]) -> Vec<u8> {
+        let mut buffer = vec![0, major, minor, 0];
+        buffer.extend((data.len() as u32).to_le_bytes());
+        buffer.extend(data);
+        buffer
+    }
+
+    #[test]
+    fn firmware_buffer_is_split_into_version_and_table() {
+        let buffer = firmware_buffer(3, 0, FIXTURE);
+        let table = split_firmware_table(&buffer).unwrap();
+        assert_eq!((table.major, table.minor), (3, 0));
+        assert_eq!(table.data, FIXTURE);
+    }
+
+    #[test]
+    fn firmware_buffer_ignores_padding_after_the_declared_length() {
+        let mut buffer = firmware_buffer(2, 8, FIXTURE);
+        buffer.extend([0xAA; 7]);
+        assert_eq!(split_firmware_table(&buffer).unwrap().data, FIXTURE);
+    }
+
+    #[test]
+    fn firmware_buffer_shorter_than_its_header_is_a_typed_error() {
+        let error = split_firmware_table(&[0, 3, 0]).unwrap_err();
+        assert_eq!(error, SmbiosError::FirmwareHeader { available: 3 });
+        assert_eq!(
+            error.to_string(),
+            "(smbios): expected firmware table header of 8 bytes | received: 3 bytes"
+        );
+    }
+
+    #[test]
+    fn firmware_buffer_cut_inside_the_table_is_a_typed_error() {
+        let buffer = firmware_buffer(3, 0, FIXTURE);
+        let error = split_firmware_table(&buffer[..buffer.len() - 1]).unwrap_err();
+        assert_eq!(
+            error,
+            SmbiosError::FirmwareLength { declared: FIXTURE.len(), available: FIXTURE.len() - 1 }
+        );
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "(smbios): expected {} bytes of table data after the 8-byte header | received: {}",
+                FIXTURE.len(),
+                FIXTURE.len() - 1
+            )
+        );
+    }
+
+    #[test]
+    fn firmware_buffer_declaring_a_huge_length_does_not_overflow() {
+        let mut buffer = vec![0, 3, 0, 0];
+        buffer.extend(u32::MAX.to_le_bytes());
+        assert!(matches!(
+            split_firmware_table(&buffer),
+            Err(SmbiosError::FirmwareLength { declared, available: 0 }) if declared == u32::MAX as usize
+        ));
     }
 
     // ---- names and placeholders ---------------------------------------------------------

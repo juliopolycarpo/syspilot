@@ -3,6 +3,11 @@
 //! Every reader returns `None` when the field does not fit in the buffer, so
 //! a short or damaged reply never panics and never reads past its end.
 
+/// The byte at `offset`.
+pub(crate) fn read_u8(bytes: &[u8], offset: usize) -> Option<u8> {
+    bytes.get(offset).copied()
+}
+
 /// The little-endian `u16` at `offset`.
 pub(crate) fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
     Some(u16::from_le_bytes(bytes.get(offset..offset.checked_add(2)?)?.try_into().ok()?))
@@ -26,6 +31,7 @@ mod tests {
 
     #[test]
     fn fields_are_read_little_endian_at_their_offset() {
+        assert_eq!(read_u8(&BYTES, 7), Some(0x08));
         assert_eq!(read_u16(&BYTES, 1), Some(0x0302));
         assert_eq!(read_u32(&BYTES, 2), Some(0x0605_0403));
         assert_eq!(read_u64(&BYTES, 0), Some(0x0807_0605_0403_0201));
@@ -33,6 +39,7 @@ mod tests {
 
     #[test]
     fn field_that_does_not_fit_is_none() {
+        assert_eq!(read_u8(&BYTES, 8), None);
         assert_eq!(read_u16(&BYTES, 7), None);
         assert_eq!(read_u32(&BYTES, 5), None);
         assert_eq!(read_u64(&BYTES, 1), None);
