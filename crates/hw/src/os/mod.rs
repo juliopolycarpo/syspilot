@@ -7,6 +7,7 @@
 //! timer: every read happens inside [`Provider::sample`].
 
 pub mod cpu;
+pub mod gpu;
 pub mod memory;
 pub(crate) mod pdh;
 pub(crate) mod rate;
@@ -20,5 +21,6 @@ pub fn probe() -> Vec<Box<dyn Provider>> {
     let mut providers = Vec::new();
     providers.extend(cpu::probe());
     providers.extend(memory::probe());
+    providers.extend(gpu::probe());
     providers
 }

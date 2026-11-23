@@ -46,7 +46,8 @@ fn main() {
     println!("private memory at start: {} KiB", private_bytes() / 1024);
 
     // Probe each provider on its own to see where the time goes.
-    let probes: [(&str, Probe); 2] = [("cpu", os::cpu::probe), ("memory", os::memory::probe)];
+    let probes: [(&str, Probe); 3] =
+        [("cpu", os::cpu::probe), ("memory", os::memory::probe), ("gpu", os::gpu::probe)];
     let mut providers = Vec::new();
     let started = Instant::now();
     for (name, probe) in probes {

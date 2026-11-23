@@ -16,7 +16,8 @@ use syspilot_proto::sensor::{DeviceClass, SensorKind};
 type Probe = fn() -> Vec<Box<dyn Provider>>;
 
 /// Every module's probe, by name, so a failure says which provider broke.
-const PROBES: &[(&str, Probe)] = &[("cpu", os::cpu::probe), ("memory", os::memory::probe)];
+const PROBES: &[(&str, Probe)] =
+    &[("cpu", os::cpu::probe), ("memory", os::memory::probe), ("gpu", os::gpu::probe)];
 
 /// Samples taken per provider, and the wait between them. Rates need two
 /// reads at least `MIN_INTERVAL` (50 ms) apart, and PDH counters need two
