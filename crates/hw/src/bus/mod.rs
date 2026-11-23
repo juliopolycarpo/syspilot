@@ -55,6 +55,21 @@ pub trait Smn: Send {
     fn read(&mut self, address: u32) -> Result<u32, BusError>;
 }
 
+/// The SMN addresses [`pawn::PawnSmn`] reads: the thermal block that holds
+/// the reported temperature (`0x59800`) and the per-CCD temperatures
+/// (`0x59954` to `0x59B38` over all supported models).
+///
+/// `AMDFamily17` does not restrict `ioctl_read_smn`: it writes whatever
+/// address it is given to the PCI index register. Reading an SMN register
+/// can have side effects (some clear on read), so this layer allows only
+/// the registers a temperature needs.
+pub const SMN_THERMAL_BLOCK: std::ops::RangeInclusive<u32> = 0x0005_9800..=0x0005_9BFF;
+
+/// Whether `address` is inside [`SMN_THERMAL_BLOCK`].
+pub fn is_permitted_smn_address(address: u32) -> bool {
+    SMN_THERMAL_BLOCK.contains(&address)
+}
+
 /// Which register/value port pair the Super I/O chip answers on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SuperIoSlot {

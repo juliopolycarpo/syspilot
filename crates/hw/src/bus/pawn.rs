@@ -14,8 +14,8 @@ use windows_sys::Win32::System::SystemInformation::GROUP_AFFINITY;
 use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadGroupAffinity};
 
 use super::{
-    BusError, LogicalCpu, Msr, SPD_PAGE_SELECT_ADDRESSES, Smbus, Smn, SuperIo, SuperIoSlot, Unlock,
-    is_permitted_bank,
+    BusError, LogicalCpu, Msr, SMN_THERMAL_BLOCK, SPD_PAGE_SELECT_ADDRESSES, Smbus, Smn, SuperIo,
+    SuperIoSlot, Unlock, is_permitted_bank, is_permitted_smn_address,
 };
 
 /// Pins the calling thread to one logical processor and restores the
@@ -85,6 +85,17 @@ impl PawnSmn {
 
 impl Smn for PawnSmn {
     fn read(&mut self, address: u32) -> Result<u32, BusError> {
+        if !is_permitted_smn_address(address) {
+            return Err(BusError::rejected(
+                "ioctl_read_smn",
+                format!(
+                    "an address in the thermal block {:#x}..={:#x}",
+                    SMN_THERMAL_BLOCK.start(),
+                    SMN_THERMAL_BLOCK.end()
+                ),
+                format!("{address:#x}"),
+            ));
+        }
         let value = self.module.execute_scalar("ioctl_read_smn", &[u64::from(address)])?;
         u32::try_from(value).map_err(|_| {
             BusError::rejected(
@@ -471,6 +482,35 @@ mod tests {
              address 0x59800"
         );
         assert_eq!(scripted.calls()[0], call("ioctl_read_smn", &[0x0005_9800], 1));
+    }
+
+    #[test]
+    fn smn_reads_outside_the_thermal_block_never_reach_the_driver() {
+        let (scripted, module) = scripted();
+        let mut smn = PawnSmn::new(module);
+        for address in [0x0005_97FF, 0x0005_9C00, 0x0000_0000, 0x0003_0000, u32::MAX] {
+            let error = smn.read(address).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "(ioctl_read_smn): expected an address in the thermal block \
+                     0x59800..=0x59bff | received: {address:#x}"
+                )
+            );
+        }
+        assert_eq!(scripted.calls(), vec![], "no call was made");
+    }
+
+    #[test]
+    fn the_thermal_block_covers_every_ccd_register_the_k10temp_layouts_use() {
+        // Tctl, and the last CCD register of the widest layout (family 0x1A
+        // models 0x00..=0x1F: offset 0x1F0, 16 CCDs; family 0x19 model 0x60:
+        // offset 0x308, 12 slots).
+        for address in
+            [0x59800, 0x59800 + 0x154, 0x59800 + 0x1F0 + 15 * 4, 0x59800 + 0x308 + 11 * 4]
+        {
+            assert!(is_permitted_smn_address(address), "{address:#x}");
+        }
     }
 
     #[test]
