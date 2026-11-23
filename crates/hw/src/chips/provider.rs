@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use syspilot_proto::sensor::{DeviceClass, SensorKind};
 
+use crate::backoff::Backoff;
 use crate::bus::{BusError, BusKind, BusLocks, SuperIo, SuperIoSlot, Unlock};
 use crate::hub::{Provider, SensorSpec};
 
@@ -74,10 +75,7 @@ pub struct SuperIoProvider {
     locks: Arc<dyn BusLocks>,
     chip: Box<dyn MonitorChip>,
     channels: Vec<Channel>,
-    /// Consecutive samples that ended in a bus error.
-    failures: u32,
-    /// Samples still to skip before touching the bus again.
-    skip: u32,
+    backoff: Backoff,
     last_problem: Option<String>,
 }
 
@@ -138,8 +136,7 @@ impl SuperIoProvider {
             locks,
             chip,
             channels,
-            failures: 0,
-            skip: 0,
+            backoff: Backoff::new(MAXIMUM_BACKOFF_SAMPLES),
             last_problem: None,
         })
     }
@@ -202,14 +199,13 @@ impl Provider for SuperIoProvider {
     }
 
     fn sample(&mut self, out: &mut Vec<Option<f64>>) {
-        if self.skip > 0 {
-            self.skip -= 1;
+        if self.backoff.skip_this_sample() {
             out.extend(std::iter::repeat_n(None, self.channels.len()));
             return;
         }
         match self.read_once() {
             Ok(values) => {
-                self.failures = 0;
+                self.backoff.record_success();
                 self.last_problem = None;
                 out.extend(values);
             }
@@ -217,8 +213,7 @@ impl Provider for SuperIoProvider {
                 // Another program holding the bus is routine and says nothing
                 // about the chip; anything else is a reason to back off.
                 if !error.is_contended() {
-                    self.failures = self.failures.saturating_add(1);
-                    self.skip = (1u32 << (self.failures - 1).min(3)).min(MAXIMUM_BACKOFF_SAMPLES);
+                    self.backoff.record_failure();
                 }
                 self.last_problem = Some(error.to_string());
                 out.extend(std::iter::repeat_n(None, self.channels.len()));
@@ -285,6 +280,10 @@ mod tests {
     impl FaultSwitch {
         fn trip(&self) {
             self.0.store(true, Ordering::SeqCst);
+        }
+
+        fn clear(&self) {
+            self.0.store(false, Ordering::SeqCst);
         }
     }
 
@@ -472,11 +471,11 @@ mod tests {
         let mut pauses = Vec::new();
         for _ in 0..6 {
             // Sit out the pause, then fail once more.
-            while provider.skip > 0 {
+            while provider.backoff.pending_skips() > 0 {
                 sampled(&mut provider);
             }
             sampled(&mut provider);
-            pauses.push(provider.skip);
+            pauses.push(provider.backoff.pending_skips());
         }
         assert_eq!(pauses, [1, 2, 4, 8, 8, 8]);
         assert_eq!(locks.live_guards(), 0);
@@ -484,10 +483,17 @@ mod tests {
 
     #[test]
     fn a_successful_sample_resets_the_backoff() {
-        let Opened { mut provider, .. } = open_reference();
-        provider.failures = 3;
+        let Opened { mut provider, fault, .. } = open_reference();
+        fault.trip();
         sampled(&mut provider);
-        assert_eq!((provider.failures, provider.skip), (0, 0));
+        assert_eq!(provider.backoff.failures(), 1);
+        fault.clear();
+        while provider.backoff.pending_skips() > 0 {
+            sampled(&mut provider);
+        }
+        let values = sampled(&mut provider);
+        assert!(values.iter().any(Option::is_some), "the bus recovered: {values:?}");
+        assert_eq!((provider.backoff.failures(), provider.backoff.pending_skips()), (0, 0));
     }
 
     /// A chip reader with scripted answers.

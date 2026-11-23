@@ -11,6 +11,7 @@
 //! only through PawnIO and is read-only apart from the index writes a read
 //! needs.
 
+pub mod backoff;
 pub mod bus;
 pub mod chips;
 pub mod cpu;
