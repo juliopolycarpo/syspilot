@@ -25,7 +25,7 @@ use syspilot_pawnio::Error as DriverError;
 
 use super::{
     BusError, Fixture, LogicalCpu, Msr, SPD_PAGE_SELECT_ADDRESSES, Smbus, Smn, SuperIo,
-    SuperIoSlot, Unlock,
+    SuperIoSlot, Unlock, is_permitted_bank,
 };
 
 /// A fixture shared between a recorder and the code that saves it.
@@ -264,6 +264,21 @@ pub fn superio_hwm_key(slot: SuperIoSlot, bank: u8, index: u8) -> String {
     format!("superio.{}.hwm.{bank:#x}.{index:#x}", slot_name(slot))
 }
 
+/// Fixture key of the unlock sequence the chip on `slot` answers to. The
+/// value is [`unlock_code`] of that sequence, or `0` when nothing answers.
+/// A slot without this entry answers to every sequence.
+pub fn superio_unlock_key(slot: SuperIoSlot) -> String {
+    format!("superio.{}.unlock", slot_name(slot))
+}
+
+/// The fixture value of an unlock sequence.
+pub fn unlock_code(unlock: Unlock) -> u64 {
+    match unlock {
+        Unlock::WinbondNuvoton => 1,
+        Unlock::Ite => 2,
+    }
+}
+
 /// A write a [`ReplaySuperIo`] accepted, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SuperIoWrite {
@@ -345,6 +360,17 @@ impl ReplaySuperIo {
         })
     }
 
+    /// Whether a chip is in configuration mode: the unlock sequence was
+    /// written and it is the one the chip on this slot answers to. A chip
+    /// ignores a sequence that is not its own, so writing one changes nothing.
+    fn chip_in_config_mode(&self) -> bool {
+        let (Some(entered), Some(slot)) = (self.config_mode, self.slot) else { return false };
+        match self.fixture.get(&superio_unlock_key(slot)) {
+            None => true,
+            Some(code) => code == unlock_code(entered),
+        }
+    }
+
     fn require_config_mode(&self, operation: &'static str) -> Result<SuperIoSlot, BusError> {
         let slot = self.slot(operation)?;
         if self.config_mode.is_none() {
@@ -381,13 +407,15 @@ impl ReplaySuperIo {
 
 impl SuperIo for ReplaySuperIo {
     fn select_slot(&mut self, slot: SuperIoSlot) -> Result<(), BusError> {
-        if self.config_mode.is_some() {
+        if self.chip_in_config_mode() {
             return Err(BusError::rejected(
                 "replay superio select_slot",
                 "configuration mode left before another slot is selected",
                 "still in configuration mode",
             ));
         }
+        // An unlock sequence no chip answered to leaves nothing behind.
+        self.config_mode = None;
         self.slot = Some(slot);
         self.ranges_discovered = false;
         self.bank_select_armed = false;
@@ -399,7 +427,7 @@ impl SuperIo for ReplaySuperIo {
     fn enter_config_mode(&mut self, unlock: Unlock) -> Result<(), BusError> {
         self.bank_select_armed = false;
         self.slot("enter_config_mode")?;
-        if self.config_mode.is_some() {
+        if self.chip_in_config_mode() {
             return Err(BusError::rejected(
                 "replay superio enter_config_mode",
                 "configuration mode not yet entered",
@@ -443,6 +471,10 @@ impl SuperIo for ReplaySuperIo {
     fn config_read(&mut self, register: u8) -> Result<u8, BusError> {
         self.bank_select_armed = false;
         let slot = self.require_config_mode("config_read")?;
+        if !self.chip_in_config_mode() {
+            // No chip is listening: the data port floats high.
+            return Ok(0xFF);
+        }
         self.recorded(superio_config_key(slot, self.logical_device, register))
     }
 
@@ -477,6 +509,13 @@ impl SuperIo for ReplaySuperIo {
                 "the data port written without the bank-select index",
             ));
         }
+        if !is_permitted_bank(bank) {
+            return Err(BusError::rejected(
+                "replay superio hwm_write_bank",
+                "a bank number 0..=0x0f, or 0x80 for the high byte of 16-bit registers",
+                format!("bank {bank:#x}"),
+            ));
+        }
         self.hwm_bank = bank;
         self.log(SuperIoWrite::HwmBank { base, bank });
         Ok(())
@@ -502,6 +541,8 @@ pub struct RecordingSuperIo<S> {
     inner: S,
     fixture: SharedFixture,
     slot: SuperIoSlot,
+    /// The unlock sequence last written, to attribute a chip ID to it.
+    unlock: Option<Unlock>,
     logical_device: u8,
     hwm_index: u8,
     hwm_bank: u8,
@@ -515,6 +556,7 @@ impl<S: SuperIo> RecordingSuperIo<S> {
             inner,
             fixture,
             slot: SuperIoSlot::Primary,
+            unlock: None,
             logical_device: 0,
             hwm_index: 0,
             hwm_bank: 0,
@@ -529,16 +571,25 @@ impl<S: SuperIo> SuperIo for RecordingSuperIo<S> {
         self.slot = slot;
         self.hwm_bank = 0;
         self.bank_select_armed = false;
+        // Until a chip ID is read on this slot, nothing is known to answer.
+        if let Ok(mut fixture) = self.fixture.lock() {
+            let key = superio_unlock_key(slot);
+            if fixture.get(&key).is_none() {
+                fixture.set(key, 0);
+            }
+        }
         Ok(())
     }
 
     fn enter_config_mode(&mut self, unlock: Unlock) -> Result<(), BusError> {
         self.bank_select_armed = false;
+        self.unlock = Some(unlock);
         self.inner.enter_config_mode(unlock)
     }
 
     fn exit_config_mode(&mut self, unlock: Unlock) -> Result<(), BusError> {
         self.bank_select_armed = false;
+        self.unlock = None;
         self.inner.exit_config_mode(unlock)
     }
 
@@ -557,6 +608,11 @@ impl<S: SuperIo> SuperIo for RecordingSuperIo<S> {
             superio_config_key(self.slot, self.logical_device, register),
             u64::from(value),
         );
+        // A chip ID (register 0x20) other than "nothing there" tells which
+        // unlock sequence the chip on this slot answers to.
+        if let (0x20, Some(unlock), 0x01..=0xFE) = (register, self.unlock, value) {
+            record(&self.fixture, superio_unlock_key(self.slot), unlock_code(unlock));
+        }
         Ok(value)
     }
 
@@ -858,6 +914,7 @@ mod tests {
     fn chip_fixture() -> Fixture {
         let mut fixture = Fixture::new();
         let primary = SuperIoSlot::Primary;
+        fixture.set(superio_unlock_key(primary), unlock_code(Unlock::WinbondNuvoton));
         fixture.set(superio_config_key(primary, 0, 0x20), 0xC5);
         fixture.set(superio_config_key(primary, 0, 0x21), 0x60);
         fixture.set(superio_config_key(primary, 0x0B, 0x60), 0x02);
@@ -921,6 +978,23 @@ mod tests {
         chip.hwm_write_bank(0x0290, 0).unwrap();
         chip.hwm_set_index(0x0290, 0x73).unwrap();
         assert_eq!(chip.hwm_read_data(0x0290), Ok(0x2B));
+    }
+
+    #[test]
+    fn the_replay_accepts_the_high_byte_bank_and_refuses_other_values() {
+        let mut chip = unlocked_replay();
+        chip.discover_io_ranges().unwrap();
+        for refused in [0x10, 0x81, 0xFF] {
+            chip.hwm_set_index(0x0290, 0x4E).unwrap();
+            let error = chip.hwm_write_bank(0x0290, refused).unwrap_err();
+            assert!(error.to_string().contains(&format!("bank {refused:#x}")), "{error}");
+        }
+        chip.hwm_set_index(0x0290, 0x4E).unwrap();
+        chip.hwm_write_bank(0x0290, 0x80).unwrap();
+        assert_eq!(
+            chip.write_log().lock().unwrap().last(),
+            Some(&SuperIoWrite::HwmBank { base: 0x0290, bank: 0x80 })
+        );
     }
 
     #[test]
@@ -1008,6 +1082,65 @@ mod tests {
         assert_eq!(*fixture.lock().unwrap(), chip_fixture());
     }
 
+    #[test]
+    fn a_chip_ignores_an_unlock_sequence_that_is_not_its_own() {
+        let mut chip = ReplaySuperIo::new(chip_fixture());
+        chip.select_slot(SuperIoSlot::Primary).unwrap();
+        // The chip on this slot answers to the Winbond sequence only.
+        chip.enter_config_mode(Unlock::Ite).unwrap();
+        assert_eq!(chip.config_read(0x20), Ok(0xFF), "nothing listens: the data port floats high");
+        // It never entered configuration mode, so another slot can be selected
+        // without a leave sequence.
+        chip.select_slot(SuperIoSlot::Secondary).unwrap();
+    }
+
+    #[test]
+    fn recording_attributes_the_chip_id_to_the_sequence_that_got_an_answer() {
+        let mut upstream = chip_fixture();
+        upstream.set(superio_unlock_key(SuperIoSlot::Secondary), 0);
+        upstream.set(superio_config_key(SuperIoSlot::Secondary, 0, 0x20), 0xFF);
+        let recorded: SharedFixture = Arc::default();
+        let mut recorder = RecordingSuperIo::new(ReplaySuperIo::new(upstream), recorded.clone());
+
+        recorder.select_slot(SuperIoSlot::Secondary).unwrap();
+        recorder.enter_config_mode(Unlock::WinbondNuvoton).unwrap();
+        assert_eq!(recorder.config_read(0x20), Ok(0xFF));
+        recorder.exit_config_mode(Unlock::WinbondNuvoton).unwrap();
+
+        recorder.select_slot(SuperIoSlot::Primary).unwrap();
+        recorder.enter_config_mode(Unlock::WinbondNuvoton).unwrap();
+        assert_eq!(recorder.config_read(0x20), Ok(0xC5));
+        recorder.exit_config_mode(Unlock::WinbondNuvoton).unwrap();
+
+        let recorded = recorded.lock().unwrap();
+        assert_eq!(
+            recorded.get(&superio_unlock_key(SuperIoSlot::Secondary)),
+            Some(0),
+            "an empty slot is recorded as unanswered"
+        );
+        assert_eq!(
+            recorded.get(&superio_unlock_key(SuperIoSlot::Primary)),
+            Some(unlock_code(Unlock::WinbondNuvoton))
+        );
+    }
+
+    #[test]
+    fn recording_an_ite_chip_attributes_it_to_the_ite_sequence() {
+        let mut upstream = Fixture::new();
+        upstream.set(superio_unlock_key(SuperIoSlot::Primary), unlock_code(Unlock::Ite));
+        upstream.set(superio_config_key(SuperIoSlot::Primary, 0, 0x20), 0x86);
+        let recorded: SharedFixture = Arc::default();
+        let mut recorder = RecordingSuperIo::new(ReplaySuperIo::new(upstream), recorded.clone());
+        recorder.select_slot(SuperIoSlot::Primary).unwrap();
+        recorder.enter_config_mode(Unlock::Ite).unwrap();
+        assert_eq!(recorder.config_read(0x20), Ok(0x86));
+        recorder.exit_config_mode(Unlock::Ite).unwrap();
+        assert_eq!(
+            recorded.lock().unwrap().get(&superio_unlock_key(SuperIoSlot::Primary)),
+            Some(unlock_code(Unlock::Ite))
+        );
+    }
+
     // -- SMBus -------------------------------------------------------------
 
     fn dimm_fixture() -> Fixture {
@@ -1087,6 +1220,9 @@ mod tests {
             "superio.secondary.cfg.0x4.0x61"
         );
         assert_eq!(superio_hwm_key(SuperIoSlot::Primary, 1, 0x20), "superio.primary.hwm.0x1.0x20");
+        assert_eq!(superio_unlock_key(SuperIoSlot::Secondary), "superio.secondary.unlock");
+        assert_eq!(unlock_code(Unlock::WinbondNuvoton), 1);
+        assert_eq!(unlock_code(Unlock::Ite), 2);
         assert_eq!(
             smbus_byte_key(0x18, 1, 5),
             "smbus.byte.0x18.0.0x5",

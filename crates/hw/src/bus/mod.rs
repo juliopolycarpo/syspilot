@@ -145,6 +145,19 @@ pub trait SuperIo: Send {
     fn hwm_read_data(&mut self, base: u16) -> Result<u8, BusError>;
 }
 
+/// Whether `bank` is a value the hardware monitor's bank-select register may
+/// be given.
+///
+/// Bits 3:0 choose one of the register banks `0..=0xF`. Bit 7 (`HBACS` in
+/// the Nuvoton datasheets) selects the high byte of the registers that exist
+/// as a 16-bit pair, which is how the vendor ID at register `0x4F` reads as
+/// `0x5C` (bank `0x80`) and `0xA3` (bank `0`). No other bit is ever set, so
+/// no other value is allowed: both [`pawn::PawnSuperIo`] and
+/// [`replay::ReplaySuperIo`] refuse everything else.
+pub fn is_permitted_bank(bank: u8) -> bool {
+    bank <= 0x0F || bank == 0x80
+}
+
 /// An SMBus host controller. Callers hold the [`BusKind::Smbus`] guard.
 ///
 /// There is no general write: a write on an SMBus can reconfigure any chip

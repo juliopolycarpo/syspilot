@@ -15,6 +15,7 @@ use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadGroupAffi
 
 use super::{
     BusError, LogicalCpu, Msr, SPD_PAGE_SELECT_ADDRESSES, Smbus, Smn, SuperIo, SuperIoSlot, Unlock,
+    is_permitted_bank,
 };
 
 /// Pins the calling thread to one logical processor and restores the
@@ -107,8 +108,6 @@ pub struct PawnSuperIo {
 
 /// Index of the Nuvoton bank-select register in the hardware monitor.
 const NUVOTON_BANK_SELECT_INDEX: u8 = 0x4E;
-/// Highest bank number any supported chip uses.
-const HIGHEST_BANK: u8 = 0x0F;
 /// Logical-device-select configuration register.
 const LOGICAL_DEVICE_SELECT_REGISTER: u64 = 0x07;
 /// ITE leaves configuration mode by writing this value to register `0x02`.
@@ -231,10 +230,10 @@ impl SuperIo for PawnSuperIo {
                 "no matching bank-select index was set",
             ));
         }
-        if bank > HIGHEST_BANK {
+        if !is_permitted_bank(bank) {
             return Err(BusError::rejected(
                 "hwm_write_bank",
-                format!("a bank number up to {HIGHEST_BANK:#x}"),
+                "a bank number 0..=0x0f, or 0x80 for the high byte of 16-bit registers",
                 format!("bank {bank:#x}"),
             ));
         }
@@ -559,12 +558,26 @@ mod tests {
     }
 
     #[test]
-    fn a_bank_above_the_highest_chip_bank_is_refused() {
-        let (_scripted, module) = scripted();
+    fn only_banks_0_to_0x0f_and_the_high_byte_select_are_written() {
+        let (scripted, module) = scripted();
         let mut chip = PawnSuperIo::new(module);
         chip.select_slot(SuperIoSlot::Primary).unwrap();
-        chip.hwm_set_index(0x0290, 0x4E).unwrap();
-        assert!(chip.hwm_write_bank(0x0290, 0x10).is_err());
+        for refused in [0x10, 0x40, 0x81, 0xFF] {
+            chip.hwm_set_index(0x0290, 0x4E).unwrap();
+            let error = chip.hwm_write_bank(0x0290, refused).unwrap_err();
+            assert!(error.to_string().contains(&format!("bank {refused:#x}")), "{error}");
+        }
+        for accepted in [0x00, 0x0F, 0x80] {
+            chip.hwm_set_index(0x0290, 0x4E).unwrap();
+            chip.hwm_write_bank(0x0290, accepted).unwrap();
+        }
+        let data_port_writes: Vec<_> = scripted
+            .calls()
+            .into_iter()
+            .filter(|c| c.function == "ioctl_pio_outb" && c.input[0] == 0x0296)
+            .map(|c| c.input[1])
+            .collect();
+        assert_eq!(data_port_writes, [0x00, 0x0F, 0x80], "refused banks reach no port");
     }
 
     #[test]
