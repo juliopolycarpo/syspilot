@@ -11,8 +11,10 @@ to no cost when nobody is looking.
 
 ![The Home page: what is on, what needs attention and the machine right now](docs/images/home.png)
 
-> **Status: first release in preparation.** The service, the catalog, the
-> sensors, the app and the command line work and are tested end to end.
+> **Status: [0.1.0](https://github.com/juliopolycarpo/syspilot/releases/tag/v0.1.0),
+> a pre-release.** The service, the catalog, the sensors, the app and the
+> command line work and are tested end to end. The executables are not
+> signed yet, so Windows may warn on first run.
 > Hardware sensors have been checked on one machine so far
 > ([what was found](docs/research/reference-machine.md)); expect gaps on
 > others and please report them. See [the roadmap](#roadmap).
@@ -201,7 +203,8 @@ everything they create. See [CONTRIBUTING.md](CONTRIBUTING.md).
 - [x] Desktop app with Simple and Advanced levels
 - [x] Sensor logging to CSV from the app
 - [x] Package, install and uninstall scripts
-- [ ] First release; code signing
+- [x] First release (0.1.0, a pre-release)
+- [ ] Code signing
 - [ ] Sensors verified on more machines (AMD processors, memory modules, more Super I/O chips)
 - [x] Fan control core: curve engine, board catalog and fail-safes, compiled out of releases and tested against recordings only ([what must be validated first](docs/research/fan-control.md))
 - [x] Fan curves in the service and the app (a Fans page, curves read from the profile), behind the same feature and replay-tested only
