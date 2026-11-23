@@ -110,6 +110,7 @@ dependencies = [
  "serde",
  "syspilot-proto",
  "toml",
+ "windows-sys",
 ]
 
 [[package]]

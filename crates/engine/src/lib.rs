@@ -13,6 +13,7 @@ pub mod fake;
 pub mod ops;
 pub mod os;
 pub mod store;
+pub mod win;
 
 pub use enforcer::{Enforcer, EnforcerConfig, Entry, StateStore, TriggerEvent};
 pub use ops::{Target, WatchSpec};
