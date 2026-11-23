@@ -130,6 +130,9 @@ dependencies = [
 [[package]]
 name = "syspilot-pawnio"
 version = "0.1.0"
+dependencies = [
+ "windows-sys",
+]
 
 [[package]]
 name = "syspilot-proto"
