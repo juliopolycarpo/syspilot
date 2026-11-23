@@ -49,18 +49,21 @@ Adding a dependency to `crates/svc` requires an entry in
 
 ## Measuring
 
-Private memory and thread count of a running instance:
+With an instance running, no app open and logging off:
 
 ```powershell
-Get-Process syspilot-svc |
-  Select-Object Id, @{n='PrivateMB'; e={[math]::Round($_.PrivateMemorySize64/1MB, 2)}},
-                @{n='Threads'; e={$_.Threads.Count}}
+./scripts/measure-overhead.ps1 -Instance SysPilot-Test.dev -Seconds 60
 ```
 
-Wake-ups: record a trace with Windows Performance Recorder (`wpr -start
-GeneralProfile`), leave the machine idle for a few minutes, stop it, and look
-at the context-switch count for `syspilot-svc.exe` in Windows Performance
-Analyzer. Idle should show none.
+It reports private memory, threads, the processor time and context switches
+the service used during the window, the executable's size, and whether a
+sensor worker is running (there should be none). A handful of context
+switches a minute is the process's own housekeeping; a wake-up per second
+would show as sixty.
+
+For a closer look, record a trace with Windows Performance Recorder (`wpr
+-start GeneralProfile`), leave the machine idle for a few minutes, stop it,
+and look at `syspilot-svc.exe` in Windows Performance Analyzer.
 
 Executable size is checked in CI.
 
@@ -70,6 +73,7 @@ Executable size is checked in CI.
 | ---------- | -------------------------------------------- | -------------- | ------- | ---------- |
 | 2026-11-23 | release, 58 tweaks loaded, no sensor providers | 1.6 MB       | 5       | 1.31 MB    |
 | 2026-11-23 | release, with the Windows sensor providers   | 1.8 MB idle, 1.9 MB while sampling | 5 | 1.40 MB |
+| 2026-11-23 | release, after a status request and a sensor listing, then 60 s idle | 1.5 MB; 0 ms of processor time, 4 context switches | 4 | 1.41 MB |
 
 Measured on a console run. The second row is after a status request, a sensor
 listing and a session of the app: the service itself does not grow. The sensor
