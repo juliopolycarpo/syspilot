@@ -7,5 +7,6 @@
 //! needs values.
 
 pub mod hub;
+pub mod os;
 
 pub use hub::{FakeProvider, Hub, Provider, SensorSpec};

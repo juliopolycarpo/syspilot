@@ -124,6 +124,7 @@ name = "syspilot-hw"
 version = "0.1.0"
 dependencies = [
  "syspilot-proto",
+ "windows-sys",
 ]
 
 [[package]]
