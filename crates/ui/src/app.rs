@@ -836,7 +836,7 @@ impl App {
             ),
             Some(Dialog::ClearHistory) => (
                 "Clear the history?".to_owned(),
-                "The record of what SysPilot applied, restored and reverted is deleted. Your settings stay as they are.".to_owned(),
+                "The record of what SysPilot applied, restored and turned off is cleared. Your settings stay as they are.".to_owned(),
                 "Clear",
             ),
             None => (String::new(), String::new(), ""),
