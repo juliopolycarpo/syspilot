@@ -12,4 +12,32 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+# Lets the service drive fans. Off until fan control has been validated on
+# real hardware for at least one catalogued board.
+fan-control = []
+
+# The resident process is budgeted: adding a dependency here needs an entry
+# in docs/decisions.md with its size impact.
 [dependencies]
+syspilot-proto.workspace = true
+syspilot-engine.workspace = true
+syspilot-hw.workspace = true
+serde.workspace = true
+toml.workspace = true
+postcard.workspace = true
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_EventLog",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Registry",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Services",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }

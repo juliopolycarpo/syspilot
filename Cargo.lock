@@ -137,6 +137,15 @@ dependencies = [
 [[package]]
 name = "syspilot-svc"
 version = "0.1.0"
+dependencies = [
+ "postcard",
+ "serde",
+ "syspilot-engine",
+ "syspilot-hw",
+ "syspilot-proto",
+ "toml",
+ "windows-sys",
+]
 
 [[package]]
 name = "syspilot-ui"
