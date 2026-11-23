@@ -358,12 +358,25 @@ pub fn render_history(events: &[HistoryEvent]) -> String {
     out
 }
 
-/// Formats a reading with at most one decimal and its unit.
+/// Formats a reading with at most one decimal and its unit. Byte counts
+/// and rates are scaled to the largest binary prefix that keeps the number
+/// at 1 or above, so memory reads "13.9 GB" and not fourteen digits.
 fn reading(value: Option<f64>, unit: &str) -> String {
-    match value {
-        None => "-".into(),
-        Some(value) if value.abs() >= 100.0 => format!("{value:.0} {unit}"),
-        Some(value) => format!("{value:.1} {unit}"),
+    let Some(mut value) = value else { return "-".into() };
+    let mut prefix = "";
+    if unit.starts_with('B') {
+        for larger in ["K", "M", "G", "T"] {
+            if value.abs() < 1024.0 {
+                break;
+            }
+            value /= 1024.0;
+            prefix = larger;
+        }
+    }
+    if value.abs() >= 100.0 || (unit.starts_with('B') && prefix.is_empty()) {
+        format!("{value:.0} {prefix}{unit}")
+    } else {
+        format!("{value:.1} {prefix}{unit}")
     }
 }
 
@@ -806,6 +819,18 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "Enabled", data =
         .join("\n");
         assert_eq!(render_sensors(&list, &samples), expected);
         assert_eq!(render_sensors(&SensorList::default(), &[]), "No sensors were found.\n");
+    }
+
+    #[test]
+    fn byte_readings_are_scaled_and_other_units_are_not() {
+        assert_eq!(reading(Some(14_913_462_272.0), "B"), "13.9 GB");
+        assert_eq!(reading(Some(968_900_608.0), "B"), "924 MB");
+        assert_eq!(reading(Some(170.0), "B/s"), "170 B/s");
+        assert_eq!(reading(Some(0.0), "B/s"), "0 B/s");
+        assert_eq!(reading(Some(3_500_000.0), "B/s"), "3.3 MB/s");
+        assert_eq!(reading(Some(2045.0), "MHz"), "2045 MHz");
+        assert_eq!(reading(Some(41.0), "°C"), "41.0 °C");
+        assert_eq!(reading(None, "B"), "-");
     }
 
     #[test]
