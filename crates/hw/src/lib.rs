@@ -8,5 +8,6 @@
 
 pub mod hub;
 pub mod os;
+pub mod sysinfo;
 
 pub use hub::{FakeProvider, Hub, Provider, SensorSpec};
