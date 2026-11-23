@@ -10,8 +10,8 @@ use std::process::{Child, Command, Output, Stdio};
 use std::ptr;
 use std::time::{Duration, Instant};
 
-use syspilot_engine::os::{Hive, RegValue, Registry, reg_type};
-use syspilot_engine::win::{WinRegistry, process_user_sid};
+use syspilot_engine::os::{Hive, RegValue, Registry, Sessions, reg_type};
+use syspilot_engine::win::{WinRegistry, WinSessions, process_user_sid};
 use syspilot_proto::message::{ErrorCode, Request};
 use syspilot_proto::profile::Profile;
 use syspilot_proto::{Client, ClientError, Instance};
@@ -323,7 +323,17 @@ fn installed_service_enforces_restores_and_uninstalls_without_a_trace() {
     let profile = ProfileFile::write("service", &profile_text);
     succeed(&instance, &["apply", profile.path()]);
     assert_eq!(machine.read("Kept"), Some(dword(1)));
-    assert_eq!(user.read("Kept"), Some(dword(1)), "the signed-in user's hive was not written");
+    // Per-user settings reach users with an interactive session. A test run
+    // from a service session (continuous integration) has none; the
+    // setting then waits for a logon and is reported as not verifiable.
+    let own_sid = process_user_sid().expect("the test user has a SID");
+    if WinSessions.interactive_user_sids().contains(&own_sid) {
+        assert_eq!(user.read("Kept"), Some(dword(1)), "the signed-in user's hive was not written");
+    } else {
+        assert_eq!(user.read("Kept"), None, "a hive without a session was written");
+        let list = succeed(&instance, &["list"]);
+        assert!(list.contains("custom.keep-user     on (not verifiable)"), "{list}");
+    }
     wait_until("the command to have run", || command.read("FromCommand") == Some(dword(5)));
 
     // Installing again updates the registration and keeps it running.
