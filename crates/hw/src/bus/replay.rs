@@ -20,6 +20,7 @@
 //!   acknowledge.
 //! - [`ReplayMsr`], [`ReplaySmn`]: reads only; an unrecorded register is an
 //!   error, never a zero.
+//! - [`ReplayPchThermal`]: scripted raw readings of the chipset temperature.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -31,7 +32,8 @@ use super::SPD_PAGE_SELECT_ADDRESSES;
 #[cfg(feature = "fan-control")]
 use super::is_permitted_fan_register;
 use super::{
-    BusError, Fixture, LogicalCpu, Msr, Smbus, Smn, SuperIo, SuperIoSlot, Unlock, is_permitted_bank,
+    BusError, Fixture, LogicalCpu, Msr, PchReading, PchRoute, PchThermal, Smbus, Smn, SuperIo,
+    SuperIoSlot, Unlock, is_permitted_bank,
 };
 
 /// A fixture shared between a recorder and the code that saves it.
@@ -874,6 +876,44 @@ impl<B: Smbus> Smbus for RecordingSmbus<B> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// PCH thermal
+// ---------------------------------------------------------------------------
+
+/// Serves scripted raw readings of the chipset temperature register, in
+/// order; the last reply repeats. Read only, like the real module: there is
+/// nothing to write.
+pub struct ReplayPchThermal {
+    route: PchRoute,
+    replies: VecDeque<Result<u32, BusError>>,
+}
+
+impl ReplayPchThermal {
+    /// A register that reads each of `raws` in turn, then the last one forever.
+    pub fn new(route: PchRoute, raws: &[u32]) -> Self {
+        Self::from_replies(route, raws.iter().map(|&raw| Ok(raw)).collect())
+    }
+
+    /// A register whose reads give `replies` in turn, the last one forever.
+    pub fn from_replies(route: PchRoute, replies: Vec<Result<u32, BusError>>) -> Self {
+        Self { route, replies: replies.into() }
+    }
+}
+
+impl PchThermal for ReplayPchThermal {
+    fn read_raw(&mut self) -> Result<PchReading, BusError> {
+        let reply = if self.replies.len() > 1 {
+            self.replies.pop_front()
+        } else {
+            self.replies.front().cloned()
+        };
+        let raw = reply.ok_or_else(|| {
+            BusError::rejected("replay pch thermal", "a scripted reading", "an empty script")
+        })??;
+        Ok(PchReading { raw, route: self.route })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1402,5 +1442,22 @@ mod tests {
         );
         assert_eq!(smbus_byte_key(0x50, 1, 5), "smbus.byte.0x50.1.0x5");
         assert_eq!(smbus_word_key(0x18, 5), "smbus.word.0x18.0x5");
+    }
+
+    #[test]
+    fn the_pch_replay_serves_each_reading_once_then_repeats_the_last() {
+        let mut replay = ReplayPchThermal::new(PchRoute::PciBar0, &[0xC8, 0xCA]);
+        let raws: Vec<u32> = (0..3).map(|_| replay.read_raw().unwrap().raw).collect();
+        assert_eq!(raws, [0xC8, 0xCA, 0xCA]);
+        assert_eq!(replay.read_raw().unwrap().route, PchRoute::PciBar0);
+    }
+
+    #[test]
+    fn an_empty_pch_replay_is_an_error_not_a_zero() {
+        let mut replay = ReplayPchThermal::new(PchRoute::FixedPwrm, &[]);
+        assert_eq!(
+            replay.read_raw().unwrap_err().to_string(),
+            "(replay pch thermal): expected a scripted reading | received: an empty script"
+        );
     }
 }

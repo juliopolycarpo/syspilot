@@ -3,7 +3,7 @@
 //! Each type wraps an [`Executor`] that already holds the right module
 //! (`IntelMSR` or `AMDFamily17` for [`PawnMsr`], `AMDFamily17` for
 //! [`PawnSmn`], `LpcIO` for [`PawnSuperIo`], `SmbusI801` or `SmbusPIIX4` for
-//! [`PawnSmbus`]). Tests drive them with a scripted executor and assert the
+//! [`PawnSmbus`], `IntelPCHThermal` for [`PawnPchThermal`]). Tests drive them with a scripted executor and assert the
 //! exact driver calls, which is how the "reads only" rule is checked at the
 //! lowest level.
 
@@ -18,8 +18,8 @@ use super::SPD_PAGE_SELECT_ADDRESSES;
 #[cfg(feature = "fan-control")]
 use super::is_permitted_fan_register;
 use super::{
-    BusError, LogicalCpu, Msr, SMN_THERMAL_BLOCK, Smbus, Smn, SuperIo, SuperIoSlot, Unlock,
-    is_permitted_bank, is_permitted_smn_address,
+    BusError, LogicalCpu, Msr, PchReading, PchRoute, PchThermal, SMN_THERMAL_BLOCK, Smbus, Smn,
+    SuperIo, SuperIoSlot, Unlock, is_permitted_bank, is_permitted_smn_address,
 };
 
 /// Pins the calling thread to one logical processor and restores the
@@ -384,6 +384,47 @@ impl Smbus for PawnSmbus {
             BusError::rejected("select_spd_page", "page 0 or 1", format!("page {page}"))
         })?;
         self.write_page_select(target)
+    }
+}
+
+/// `ioctl_read_raw` of `IntelPCHThermal` as a [`PchThermal`].
+///
+/// The module has no write function, so this is the only call the type makes.
+pub struct PawnPchThermal {
+    module: Arc<dyn Executor>,
+}
+
+/// `ioctl_read_raw` has a fixed signature: no input cells and two output
+/// cells, the raw register and the route.
+const PCH_READ_OUTPUT_CELLS: usize = 2;
+
+impl PawnPchThermal {
+    /// Wraps a handle holding `IntelPCHThermal`.
+    pub fn new(module: Arc<dyn Executor>) -> Self {
+        Self { module }
+    }
+}
+
+impl PchThermal for PawnPchThermal {
+    fn read_raw(&mut self) -> Result<PchReading, BusError> {
+        let mut cells = [0u64; PCH_READ_OUTPUT_CELLS];
+        self.module.execute("ioctl_read_raw", &[], &mut cells)?;
+        let [raw, route] = cells;
+        let route = PchRoute::from_cell(route).ok_or_else(|| {
+            BusError::rejected(
+                "ioctl_read_raw",
+                "route 1 (PCI thermal BAR0) or 2 (fixed PWRM window)",
+                format!("route {route}"),
+            )
+        })?;
+        let raw = u32::try_from(raw).map_err(|_| {
+            BusError::rejected(
+                "ioctl_read_raw",
+                "a register value that fits 32 bits",
+                format!("{raw:#x}"),
+            )
+        })?;
+        Ok(PchReading { raw, route })
     }
 }
 
@@ -844,5 +885,46 @@ mod tests {
         scripted.reply_err(DriverError::NoSuchDevice { function: "ioctl_smbus_xfer".into() });
         let mut bus = PawnSmbus::new(module);
         assert!(bus.read_byte_data(0x57, 0).unwrap_err().is_no_device());
+    }
+
+    #[test]
+    fn a_pch_read_is_one_call_with_no_input_and_names_the_route() {
+        let (scripted, module) = scripted();
+        scripted.reply_ok(&[0x00C8, 1]).reply_ok(&[0x8000_0231, 2]);
+        let mut sensor = PawnPchThermal::new(module);
+        assert_eq!(sensor.read_raw(), Ok(PchReading { raw: 0x00C8, route: PchRoute::PciBar0 }));
+        assert_eq!(
+            sensor.read_raw(),
+            Ok(PchReading { raw: 0x8000_0231, route: PchRoute::FixedPwrm })
+        );
+        // The module has no write function; the only call is the raw read.
+        assert_eq!(
+            scripted.calls(),
+            [call("ioctl_read_raw", &[], 2), call("ioctl_read_raw", &[], 2)]
+        );
+    }
+
+    #[test]
+    fn a_pch_read_with_an_unknown_route_or_a_wide_register_is_rejected() {
+        let (scripted, module) = scripted();
+        scripted.reply_ok(&[0x00C8, 3]).reply_ok(&[0x1_0000_0000, 2]);
+        let mut sensor = PawnPchThermal::new(module);
+        assert_eq!(
+            sensor.read_raw().unwrap_err().to_string(),
+            "(ioctl_read_raw): expected route 1 (PCI thermal BAR0) or 2 (fixed PWRM window) | \
+             received: route 3"
+        );
+        assert_eq!(
+            sensor.read_raw().unwrap_err().to_string(),
+            "(ioctl_read_raw): expected a register value that fits 32 bits | received: 0x100000000"
+        );
+    }
+
+    #[test]
+    fn a_pch_read_that_the_module_declines_keeps_the_driver_error() {
+        let (scripted, module) = scripted();
+        scripted.reply_err(DriverError::NotReady { function: "ioctl_read_raw".into() });
+        let mut sensor = PawnPchThermal::new(module);
+        assert!(matches!(sensor.read_raw(), Err(BusError::Driver(DriverError::NotReady { .. }))));
     }
 }

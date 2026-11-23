@@ -7,7 +7,7 @@
 //! needs values.
 //!
 //! The driver-backed providers (CPU package and core sensors, Super I/O,
-//! DIMM temperatures) sit on the [`bus`] layer, which reaches the hardware
+//! DIMM temperatures, chipset temperature) sit on the [`bus`] layer, which reaches the hardware
 //! only through PawnIO and is read-only apart from the index writes a read
 //! needs.
 
@@ -20,6 +20,7 @@ pub mod driver;
 pub mod fan;
 pub mod hub;
 pub mod os;
+pub mod pch;
 pub mod sysinfo;
 
 pub use hub::{FakeProvider, Hub, Provider, SensorSpec};

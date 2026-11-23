@@ -265,6 +265,47 @@ pub trait Smbus: Send {
     fn select_spd_page(&mut self, page: u8) -> Result<(), BusError>;
 }
 
+/// The register layout the `IntelPCHThermal` module mapped at load time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PchRoute {
+    /// BAR0 of the PCI thermal function: a 16-bit register, 0.5 °C steps and a
+    /// -50 °C offset.
+    PciBar0,
+    /// The fixed power-management window of recent client chipsets: a valid
+    /// bit and an integer temperature.
+    FixedPwrm,
+}
+
+impl PchRoute {
+    /// The route the module reports in cell 1 of `ioctl_read_raw` (and cell 0
+    /// of `ioctl_identity`): 1 for the PCI thermal BAR0, 2 for the fixed
+    /// window.
+    pub fn from_cell(cell: u64) -> Option<Self> {
+        match cell {
+            1 => Some(Self::PciBar0),
+            2 => Some(Self::FixedPwrm),
+            _ => None,
+        }
+    }
+}
+
+/// One raw read of the chipset temperature register.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PchReading {
+    /// The register as the module read it: 16 bits on [`PchRoute::PciBar0`],
+    /// 32 on [`PchRoute::FixedPwrm`]. Not yet validated or converted.
+    pub raw: u32,
+    /// How to interpret [`PchReading::raw`].
+    pub route: PchRoute,
+}
+
+/// The Intel chipset (PCH) temperature register. Read only: the module this
+/// sits on has no write function.
+pub trait PchThermal: Send {
+    /// Reads the temperature register once.
+    fn read_raw(&mut self) -> Result<PchReading, BusError>;
+}
+
 /// The SPD page-select addresses (`SPA0`, `SPA1`).
 #[cfg(feature = "spd-paging")]
 pub const SPD_PAGE_SELECT_ADDRESSES: [u8; 2] = [0x36, 0x37];
