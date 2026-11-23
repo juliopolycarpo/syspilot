@@ -79,8 +79,19 @@ pub struct Host<S> {
     /// The driver state the open providers were probed under.
     probed_driver: Option<DriverState>,
     logger_problem: Option<String>,
+    /// Requests that need a look at the machine that is still under way.
+    /// They are answered when it ends; the loop does not wait for it.
+    waiting: Vec<(Request, bool, Reply)>,
+    /// Whether the hardware said "later" to something since the last check.
+    look_pending: bool,
     started: Instant,
 }
+
+/// Where a request's answer goes.
+type Reply = SyncSender<Response>;
+
+/// How often a look at the machine that is under way is checked on.
+const LOOK_POLL: Duration = Duration::from_millis(25);
 
 fn unix_millis() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_millis() as u64)
@@ -104,6 +115,8 @@ impl<S: StateStore + Clone + 'static> Host<S> {
             next_sample: None,
             probed_driver: None,
             logger_problem: None,
+            waiting: Vec::new(),
+            look_pending: false,
             started: Instant::now(),
         })
     }
@@ -135,6 +148,9 @@ impl<S: StateStore + Clone + 'static> Host<S> {
     fn shut_down(&mut self) {
         self.broadcast(ClientEvent::Stopping, false);
         self.subscribers.clear();
+        // Dropping the parked requests fails them for their clients.
+        self.waiting.clear();
+        self.parts.hardware.release();
         self.parts.logger.close();
         self.stop_sampling();
         // The pipe outlives the loop until the process exits; requests
@@ -146,13 +162,7 @@ impl<S: StateStore + Clone + 'static> Host<S> {
         match event {
             Event::Stop => return Flow::Stop,
             Event::Request { request, elevated, reply } => {
-                let (response, effects) = self.respond(*request, elevated);
-                // The client may have gone; that is its business.
-                let _ = reply.send(response);
-                self.after_effects(effects);
-                if effects.stop {
-                    return Flow::Stop;
-                }
+                return self.answer_or_park(*request, elevated, reply);
             }
             Event::Subscribe { id, sensors, sink } => {
                 self.subscribers.push(Subscriber { id, sensors, sink });
@@ -178,6 +188,41 @@ impl<S: StateStore + Clone + 'static> Host<S> {
             Event::Resume => self.trigger(&TriggerEvent::Resume),
         }
         Flow::Continue
+    }
+
+    /// Answers a request, unless it needs a look at the machine that is
+    /// still under way: then it is parked and answered when the look ends.
+    /// The client waits either way, but the loop stays free to enforce.
+    fn answer_or_park(&mut self, request: Request, elevated: bool, reply: Reply) -> Flow {
+        let must_wait = match request {
+            Request::Status | Request::SystemInfo => self.parts.hardware.report_pending(),
+            Request::Sensors => self.hub.is_none() && self.parts.hardware.providers_pending(),
+            _ => false,
+        };
+        if must_wait {
+            self.look_pending = true;
+            self.waiting.push((request, elevated, reply));
+            return Flow::Continue;
+        }
+        let (response, effects) = self.respond(request, elevated);
+        // The client may have gone; that is its business.
+        let _ = reply.send(response);
+        self.after_effects(effects);
+        if effects.stop { Flow::Stop } else { Flow::Continue }
+    }
+
+    /// Takes up what was put off for a look at the machine. Whatever still
+    /// has to wait says so again and is checked at the next poll.
+    fn resume_after_look(&mut self) {
+        self.look_pending = false;
+        for (request, elevated, reply) in std::mem::take(&mut self.waiting) {
+            // None of the requests that can be parked stops the service.
+            let _ = self.answer_or_park(request, elevated, reply);
+        }
+        self.settle();
+        if !self.look_pending {
+            self.parts.hardware.release();
+        }
     }
 
     /// Runs an enforcement trigger and reports what it changed.
@@ -228,7 +273,11 @@ impl<S: StateStore + Clone + 'static> Host<S> {
         let report = self.parts.hardware.driver();
         // A driver that appeared or went away changes which sensors exist.
         if self.hub.is_some() && self.probed_driver.as_ref() != Some(&report.state) {
-            self.open_hub();
+            // Reopened by `settle`, at once or when the look has ended; a
+            // client that asks for the list in between waits for it.
+            self.hub = None;
+            self.stop_sampling();
+            self.settle();
             self.broadcast(ClientEvent::SensorsChanged, false);
         }
         let mut problems = self.core.problems();
@@ -276,6 +325,11 @@ impl<S: StateStore + Clone + 'static> Host<S> {
             || self.subscribers.iter().any(|subscriber| subscriber.sensors);
         if wants_values {
             if self.hub.is_none() {
+                if self.parts.hardware.providers_pending() {
+                    // Taken up again by `resume_after_look`.
+                    self.look_pending = true;
+                    return;
+                }
                 self.open_hub();
             }
             if self.next_sample.is_none() {
@@ -301,6 +355,9 @@ impl<S: StateStore + Clone + 'static> Host<S> {
 
     /// Does whatever has become due: retries, resumed watches, a sample.
     fn run_due(&mut self, now: Instant) {
+        if self.look_pending {
+            self.resume_after_look();
+        }
         if self.core.enforcer().time_until_deadline() == Some(Duration::ZERO) {
             self.trigger(&TriggerEvent::Timer);
         }
@@ -350,6 +407,7 @@ impl<S: StateStore + Clone + 'static> Host<S> {
             self.core.enforcer().time_until_deadline(),
             self.watches.next_resume().map(until),
             self.next_sample.map(until),
+            self.look_pending.then_some(LOOK_POLL),
         ]
         .into_iter()
         .flatten()
@@ -552,6 +610,45 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
         drop(client);
         enable_scratch(&mut host.client());
         assert_eq!(observer.next_event().unwrap(), ClientEvent::ProfileChanged);
+    }
+
+    #[test]
+    fn a_look_at_the_machine_parks_its_requests_but_not_enforcement() {
+        let host = RunningHost::start();
+        host.hardware.set_looking(true);
+        let (answered, answers) = std::sync::mpsc::channel();
+        let asking: Vec<_> = [Request::Status, Request::Sensors, Request::SystemInfo]
+            .into_iter()
+            .map(|request| {
+                let (mut client, answered) = (host.client(), answered.clone());
+                std::thread::spawn(move || {
+                    let response = client.request(&request).unwrap();
+                    answered.send(std::mem::discriminant(&response)).unwrap();
+                })
+            })
+            .collect();
+
+        // Meanwhile the loop serves everything else, including a sensor
+        // subscriber that cannot get values yet.
+        let _sensors = host.subscribe(true);
+        let mut client = host.client();
+        enable_scratch(&mut client);
+        assert_eq!(host.value(), Some(dword(1)));
+        assert!(client.states().unwrap()[0].enabled);
+        assert_eq!(
+            answers.try_recv().ok(),
+            None,
+            "(host): expected hardware requests to wait for the look | received: an answer"
+        );
+        assert_eq!(host.hardware.probes(), 0, "no provider is opened during the look");
+
+        host.hardware.set_looking(false);
+        for thread in asking {
+            thread.join().unwrap();
+        }
+        assert_eq!(answers.try_iter().count(), 3, "every parked request was answered");
+        let status = client.status().unwrap();
+        assert!(status.sampling, "the subscriber's sampling started once the look ended");
     }
 
     #[test]

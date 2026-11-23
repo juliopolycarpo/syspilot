@@ -32,6 +32,22 @@ pub trait Hardware {
 
     /// Collects the hardware and software inventory.
     fn system_info(&mut self) -> SystemInfo;
+
+    /// Whether [`Hardware::driver`] and [`Hardware::system_info`] would have
+    /// to wait for a look at the machine. Asking starts that look without
+    /// waiting, so the event loop can do other work and ask again.
+    fn report_pending(&mut self) -> bool {
+        false
+    }
+
+    /// The same for [`Hardware::providers`].
+    fn providers_pending(&mut self) -> bool {
+        false
+    }
+
+    /// Lets go of what a finished look kept ready for
+    /// [`Hardware::providers`], when nobody wanted the providers after all.
+    fn release(&mut self) {}
 }
 
 #[cfg(test)]
@@ -40,7 +56,7 @@ pub use fake::FakeHardware;
 #[cfg(test)]
 mod fake {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::{Arc, Mutex, PoisonError};
     use syspilot_hw::{FakeProvider, SensorSpec};
     use syspilot_proto::message::SystemSummary;
@@ -52,6 +68,8 @@ mod fake {
     pub struct FakeHardware {
         driver: Arc<Mutex<DriverState>>,
         probes: Arc<AtomicU32>,
+        /// While set, a look at the machine is "under way".
+        looking: Arc<AtomicBool>,
     }
 
     impl Default for FakeHardware {
@@ -59,6 +77,7 @@ mod fake {
             Self {
                 driver: Arc::new(Mutex::new(DriverState::Missing)),
                 probes: Arc::new(AtomicU32::new(0)),
+                looking: Arc::new(AtomicBool::new(false)),
             }
         }
     }
@@ -67,6 +86,12 @@ mod fake {
         /// Changes what driver detection reports from now on.
         pub fn set_driver(&self, state: DriverState) {
             *self.driver.lock().unwrap_or_else(PoisonError::into_inner) = state;
+        }
+
+        /// Makes every question about the machine answer "later" (`true`)
+        /// or lets the look end (`false`).
+        pub fn set_looking(&self, looking: bool) {
+            self.looking.store(looking, Ordering::Relaxed);
         }
 
         /// How many times the providers were opened.
@@ -141,6 +166,14 @@ mod fake {
                 summary: SystemSummary { computer: "FAKE-PC".into(), ..SystemSummary::default() },
                 sections: vec![],
             }
+        }
+
+        fn report_pending(&mut self) -> bool {
+            self.looking.load(Ordering::Relaxed)
+        }
+
+        fn providers_pending(&mut self) -> bool {
+            self.looking.load(Ordering::Relaxed)
         }
     }
 }

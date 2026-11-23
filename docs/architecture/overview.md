@@ -99,6 +99,11 @@ read-only shared-memory section. The app reads the section directly, so a
 live graph costs no pipe traffic. When the last interested party leaves, the
 worker is told to exit and sampling stops.
 
+The event loop never waits for a worker to probe the machine, which takes
+over a second. A request that needs the result (`Status`, `Sensors`,
+`SystemInfo`) is parked and answered when the report arrives; drift is
+handled in the meantime.
+
 The split keeps the resident service small (see the
 [overhead budget](overhead.md)) and keeps its event loop out of reach of a
 bus or driver that stalls: a worker that does not answer within 750 ms is

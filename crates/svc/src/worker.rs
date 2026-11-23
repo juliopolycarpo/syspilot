@@ -289,12 +289,78 @@ pub struct WorkerHardware {
     installed_driver: fn() -> Option<String>,
     /// The last report, with the installed driver version it was made under.
     report: Option<(Option<String>, Probed)>,
+    /// A worker that was started without waiting and has not reported yet.
+    probing: Option<(Worker, Instant)>,
+    /// A worker that has reported and can become the next providers.
+    ready: Option<(Worker, Probed)>,
+    /// The last worker started without waiting failed. Kept until
+    /// [`Hardware::providers`] is asked, so that it answers "none" instead
+    /// of trying again while the caller waits.
+    failed: bool,
 }
 
 impl WorkerHardware {
     /// Hardware read by workers from `spawner`.
     pub fn new(spawner: Arc<dyn WorkerSpawner>, installed_driver: fn() -> Option<String>) -> Self {
-        Self { spawner, restart_delay: RESTART_DELAY, installed_driver, report: None }
+        Self {
+            spawner,
+            restart_delay: RESTART_DELAY,
+            installed_driver,
+            report: None,
+            probing: None,
+            ready: None,
+            failed: false,
+        }
+    }
+
+    /// Whether the stored report still describes the machine.
+    fn report_is_current(&self) -> bool {
+        let installed = (self.installed_driver)();
+        self.report.as_ref().is_some_and(|(seen, _)| *seen == installed)
+    }
+
+    /// Looks whether the worker started by [`Self::probe_without_waiting`]
+    /// has reported. Returns whether it is still being waited for.
+    fn still_probing(&mut self) -> bool {
+        let Some((mut worker, since)) = self.probing.take() else { return false };
+        match worker.probed_by_now() {
+            Some(Some(probed)) => {
+                self.remember(Ok(probed.clone()));
+                self.ready = Some((worker, probed));
+            }
+            Some(None) => {
+                self.fail("(sensor worker): expected a report | received: the worker ended")
+            }
+            None if since.elapsed() > PROBE_TIMEOUT => {
+                self.fail("(sensor worker): expected a report in time | received: nothing");
+            }
+            None => {
+                self.probing = Some((worker, since));
+                return true;
+            }
+        }
+        false
+    }
+
+    fn fail(&mut self, problem: &str) {
+        self.remember(Err(problem.to_owned()));
+        self.failed = true;
+    }
+
+    /// Starts a worker and returns at once. Returns whether one is now on
+    /// its way; `false` means it could not be started, which is remembered
+    /// like any failed look.
+    fn probe_without_waiting(&mut self) -> bool {
+        match self.spawner.spawn() {
+            Ok(link) => {
+                self.probing = Some((Worker::start(link), Instant::now()));
+                true
+            }
+            Err(error) => {
+                self.fail(&format!("The sensor worker could not be started: {error}"));
+                false
+            }
+        }
     }
 
     /// The real machine.
@@ -328,9 +394,7 @@ impl WorkerHardware {
     /// The current report, made by a short-lived worker if there is none
     /// or the installed driver changed since.
     fn report(&mut self) -> &Probed {
-        let installed = (self.installed_driver)();
-        let current = self.report.as_ref().is_some_and(|(seen, _)| *seen == installed);
-        if !current {
+        if !self.report_is_current() {
             // The worker is dropped right after reporting, which ends it.
             let outcome = self.start().map(|(_worker, probed)| probed);
             self.remember(outcome);
@@ -346,8 +410,32 @@ impl Hardware for WorkerHardware {
         DriverReport { state: report.driver.clone(), features: report.features.clone() }
     }
 
+    fn report_pending(&mut self) -> bool {
+        self.still_probing() || (!self.report_is_current() && self.probe_without_waiting())
+    }
+
+    fn providers_pending(&mut self) -> bool {
+        if self.still_probing() {
+            return true;
+        }
+        self.ready.is_none() && !self.failed && self.probe_without_waiting()
+    }
+
+    fn release(&mut self) {
+        // Dropping the worker ends it.
+        self.ready = None;
+    }
+
     fn providers(&mut self) -> Vec<Box<dyn Provider>> {
-        match self.start() {
+        if std::mem::take(&mut self.failed) {
+            return Vec::new();
+        }
+        // A worker that already reported, or else one that is waited for.
+        let started = match self.ready.take() {
+            Some(ready) => Ok(ready),
+            None => self.start(),
+        };
+        match started {
             Ok((worker, probed)) => {
                 let provider = WorkerProvider::new(
                     worker,
@@ -554,6 +642,47 @@ mod tests {
             "(worker provider): expected a failed worker not to be waited for again | waited: {:?}",
             before.elapsed()
         );
+    }
+
+    /// Asks until the look has ended, as the event loop does.
+    fn wait_until(mut pending: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while pending() {
+            assert!(
+                Instant::now() < deadline,
+                "(worker hardware): expected the look to end | received: still pending after 5 s"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn a_look_without_waiting_serves_the_report_and_then_the_providers() {
+        let (mut hardware, started) = hardware(Behaviour::Works);
+        wait_until(|| hardware.report_pending());
+        assert_eq!(hardware.system_info().summary.computer, "FAKE-PC");
+        assert!(!hardware.providers_pending(), "the worker that reported is ready to be used");
+
+        let mut providers = hardware.providers();
+        let mut values = Vec::new();
+        providers[0].sample(&mut values);
+        assert_eq!(values, FAKE_VALUES);
+        assert_eq!(started.load(Ordering::Relaxed), 1, "one worker did all of it");
+
+        // With that worker handed out, the next providers need a new one.
+        wait_until(|| hardware.providers_pending());
+        hardware.release();
+        assert!(!hardware.report_pending(), "the report itself is still current");
+        assert_eq!(started.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn a_look_that_cannot_start_is_not_pending_and_gives_no_providers() {
+        let (mut hardware, _started) = hardware(Behaviour::FailsToStart);
+        assert!(!hardware.providers_pending());
+        assert!(hardware.providers().is_empty());
+        assert!(!hardware.report_pending(), "the failure is the report until the driver changes");
+        assert_eq!(hardware.driver().state, DriverState::Missing);
     }
 
     #[test]
