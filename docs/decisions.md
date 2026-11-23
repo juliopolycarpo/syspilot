@@ -166,3 +166,21 @@ review need an interactive desktop.
 
 **Licence.** The toolkit no longer dictates one (Slint's free option was
 GPLv3). The app and the service stay GPL-3.0-or-later by choice.
+
+## 16. Sensors are read by a worker process
+
+**Decision.** The service does not read hardware. A separate executable,
+`syspilot-sensors.exe`, does it while values are wanted and exits afterwards.
+
+**Why.** Measured on the reference machine: adding the first Windows
+performance counter costs 6.7 MB of private memory, which is not returned when
+the counter is closed, and takes 1.1 s. In the service that would break the
+5 MB budget for good after the app was opened once, and would stall the event
+loop that enforces settings. In a worker both costs end with the worker. It
+also means a hung SMBus transaction or driver call cannot hang the service,
+and the service executable carries no hardware code.
+
+**Cost.** A second executable to ship, a small protocol between the two, and
+about 1.2 s before the first values appear after the app opens. The service
+still waits for the worker's report when it starts one; making that wait
+asynchronous is left for later.

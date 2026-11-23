@@ -9,12 +9,12 @@ use syspilot_proto::Instance;
 use crate::catalog;
 use crate::core::Core;
 use crate::events::EventQueue;
-use crate::hardware::MachineHardware;
 use crate::host::{Host, HostParts};
 use crate::logger::SensorLogger;
 use crate::pipe;
 use crate::privilege::is_process_elevated;
 use crate::storage::{DataDir, FileStore};
+use crate::worker::WorkerHardware;
 
 /// What a command that needs administrator rights says without them.
 pub const NEEDS_ELEVATION: &str =
@@ -70,7 +70,7 @@ pub fn serve(
         instance: instance.clone(),
         console,
         os_build: build,
-        hardware: Box::new(MachineHardware::new()),
+        hardware: Box::new(WorkerHardware::machine()),
         logger: SensorLogger::new(data.logs(), logging),
         log_dir: data.logs().display().to_string(),
     };

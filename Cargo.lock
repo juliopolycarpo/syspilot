@@ -146,6 +146,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "syspilot-sensors"
+version = "0.1.0"
+dependencies = [
+ "syspilot-hw",
+ "syspilot-pawnio",
+ "syspilot-proto",
+]
+
+[[package]]
 name = "syspilot-svc"
 version = "0.1.0"
 dependencies = [
@@ -153,6 +162,7 @@ dependencies = [
  "serde",
  "syspilot-engine",
  "syspilot-hw",
+ "syspilot-pawnio",
  "syspilot-proto",
  "toml",
  "windows-sys",

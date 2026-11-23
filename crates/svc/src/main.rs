@@ -17,6 +17,7 @@ mod runtime;
 mod service;
 mod storage;
 mod watch;
+mod worker;
 
 use std::process::ExitCode;
 

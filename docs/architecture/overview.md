@@ -30,7 +30,8 @@ exists today, and the seams the app plugs into.
 | `engine` | `proto`            | The enforcement state machine and its Win32 backends.             |
 | `pawnio` | —                  | The PawnIO device interface.                                      |
 | `hw`     | `proto`, `pawnio`  | Sensor providers and the hub that samples them.                   |
-| `svc`    | all of the above   | Event loop, pipe server, installer, command line.                 |
+| `sensors`| `proto`, `hw`, `pawnio` | The sensor worker: reads hardware on the service's behalf.   |
+| `svc`    | `proto`, `engine`, `hw`, `pawnio` | Event loop, pipe server, installer, command line. Uses `hw` only for the hub, `pawnio` only to see whether the driver is installed. |
 | `ui`     | `proto`            | The desktop app. It links none of the privileged code.            |
 
 `proto` is the only crate both sides link. If a change does not touch `proto`,
@@ -89,13 +90,21 @@ The catalog is not on disk. It is compiled into the service.
 ### Sensors
 
 Sensor providers implement one trait (`hw::Provider`) and are grouped by a
-`Hub`. The service opens them only while a client subscribed to sensor values
-or the logger needs them, samples once per second, and publishes the values to
-a read-only shared-memory section. The app reads the section directly, so a
+`Hub`. They do not run in the service. While a client subscribed to sensor
+values or the logger needs them, the service runs the *sensor worker*
+(`syspilot-sensors.exe`, crate `sensors`), which probes the machine, reports
+what it found and then answers one sample request per second over its
+standard streams (`proto::worker`). The service publishes the values to a
+read-only shared-memory section. The app reads the section directly, so a
 live graph costs no pipe traffic. When the last interested party leaves, the
-providers are dropped and sampling stops.
+worker is told to exit and sampling stops.
 
-Whether the PawnIO driver is present is checked on every status request, so
+The split keeps the resident service small (see the
+[overhead budget](overhead.md)) and keeps its event loop out of reach of a
+bus or driver that stalls: a worker that does not answer within 750 ms is
+dropped and its sensors read nothing until the next time they are opened.
+
+Whether the PawnIO driver is installed is checked on every status request, so
 installing it while the service runs is picked up without a restart.
 
 ## Instances

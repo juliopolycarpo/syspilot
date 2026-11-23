@@ -27,9 +27,14 @@ all the time.
 - **Notifications instead of polling.** Drift is detected by
   `RegNotifyChangeKeyValue`. The kernel wakes the service when a watched key
   changes and at no other time.
-- **Sensors on demand.** Providers are opened when a client subscribes to
-  sensor values and dropped when the last one leaves. With the app closed and
-  logging off, no sensor is read.
+- **Sensors on demand, in another process.** The service never reads hardware
+  itself. When a client subscribes to sensor values it starts a *sensor
+  worker* (`syspilot-sensors.exe`, next to the service), asks it for a
+  sample once a second and lets it exit when the last subscriber leaves. With
+  the app closed and logging off, no sensor is read and no worker exists.
+  The reason is measured: the first use of the Windows performance counters
+  costs 6.7 MB of private memory that is never returned, and takes over a
+  second. In a worker that cost ends with the worker.
 - **Bounded reaction to noise.** A key that changes constantly is paused; a
   value something else keeps rewriting becomes contested with an exponential
   back-off. Neither can turn into a busy loop.
@@ -65,5 +70,9 @@ Executable size is checked in CI.
 | ---------- | -------------------------------------------- | -------------- | ------- | ---------- |
 | 2026-11-23 | release, 58 tweaks loaded, no sensor providers | 1.6 MB       | 5       | 1.31 MB    |
 
-Measured on a console run a few seconds after one status request. This
-predates the sensor providers and is repeated when they land.
+| 2026-11-23 | release, with the Windows sensor providers   | 1.8 MB idle, 1.9 MB while sampling | 5 | 1.40 MB |
+
+Measured on a console run. The second row is after a status request, a sensor
+listing and a session of the app: the service itself does not grow. The sensor
+worker, which exists only while values are wanted, uses 8.5 to 8.8 MB; its
+executable is 0.42 MB and has no size budget.
