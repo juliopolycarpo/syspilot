@@ -4,7 +4,7 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use syspilot_proto::catalog::{Catalog, Tweak};
+use syspilot_proto::catalog::{Catalog, Reboot, Tweak};
 use syspilot_proto::message::{
     ActionState, DriverState, EntryStatus, Event, HistoryEvent, Request, ServiceStatus, SystemInfo,
 };
@@ -310,7 +310,11 @@ pub fn render_tweak(tweak: &Tweak, status: Option<&EntryStatus>) -> String {
     }
     field("Risk", tweak.risk.as_deref().unwrap_or(""));
     field("Side effects", &tweak.side_effects);
-    field("Restart", &format!("{:?}", tweak.reboot).to_lowercase());
+    match tweak.reboot {
+        Reboot::None => {}
+        Reboot::SignOut => field("Takes effect", "after you sign out and back in"),
+        Reboot::Restart => field("Takes effect", "after a restart"),
+    }
     if let Some(build) = tweak.min_build {
         field("Needs build", &build.to_string());
     }
@@ -386,7 +390,10 @@ pub fn render_info(info: &SystemInfo) -> String {
     let summary = &info.summary;
     let mut out = String::new();
     let gpus = summary.gpus.join(", ");
-    let memory = format!("{:.1} GiB", summary.memory_bytes as f64 / f64::from(1u32 << 30));
+    let memory = match summary.memory_bytes {
+        0 => String::new(),
+        bytes => format!("{:.1} GiB", bytes as f64 / f64::from(1u32 << 30)),
+    };
     for (name, value) in [
         ("Computer", summary.computer.as_str()),
         ("Model", &summary.model),
@@ -736,6 +743,12 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "Enabled", data =
         assert!(text.contains("Settings\n  "), "{text}");
         assert!(text.ends_with("    now: 1\n"), "{text}");
         assert!(!text.contains("Risk"), "empty fields are left out: {text}");
+        assert!(!text.contains("Takes effect"), "no restart is not worth a line: {text}");
+
+        let mut needs_restart = tweak.clone();
+        needs_restart.reboot = Reboot::Restart;
+        let text = render_tweak(&needs_restart, None);
+        assert!(text.contains("  Takes effect after a restart\n"), "{text}");
     }
 
     #[test]
@@ -793,6 +806,11 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "Enabled", data =
         .join("\n");
         assert_eq!(render_sensors(&list, &samples), expected);
         assert_eq!(render_sensors(&SensorList::default(), &[]), "No sensors were found.\n");
+    }
+
+    #[test]
+    fn info_view_of_an_empty_inventory_is_empty() {
+        assert_eq!(render_info(&SystemInfo::default()), "");
     }
 
     #[test]
