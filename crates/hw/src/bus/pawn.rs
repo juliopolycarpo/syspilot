@@ -261,6 +261,12 @@ const SMBUS_WRITE: u64 = 0;
 const PROTOCOL_BYTE: u64 = 1;
 const PROTOCOL_BYTE_DATA: u64 = 2;
 const PROTOCOL_WORD_DATA: u64 = 3;
+/// `ioctl_smbus_xfer` has a fixed signature: nine input cells (address,
+/// direction, command, protocol, five data cells) and five output cells. The
+/// driver rejects any other size with `STATUS_INVALID_PARAMETER` before it
+/// touches the bus.
+const XFER_INPUT_CELLS: usize = 9;
+const XFER_OUTPUT_CELLS: usize = 5;
 
 impl PawnSmbus {
     /// Wraps a handle holding `SmbusI801` or `SmbusPIIX4`.
@@ -268,35 +274,72 @@ impl PawnSmbus {
         Self { module }
     }
 
+    /// One transfer; the cells after `protocol` carry no data for the
+    /// protocols this layer uses.
+    fn transfer(
+        &self,
+        address: u8,
+        direction: u64,
+        command: u8,
+        protocol: u64,
+    ) -> Result<[u64; XFER_OUTPUT_CELLS], BusError> {
+        // Every write SysPilot makes on an SMBus goes through this function,
+        // so this is the one place that keeps it aimed at the SPD page-select
+        // devices: a write to any other address could reconfigure a clock
+        // generator or a voltage regulator.
+        assert!(
+            direction == SMBUS_READ || SPD_PAGE_SELECT_ADDRESSES.contains(&address),
+            "(smbus write): expected target 0x36 or 0x37 | received: {address:#04x}"
+        );
+        let mut request = [0u64; XFER_INPUT_CELLS];
+        request[..4].copy_from_slice(&[
+            u64::from(address),
+            direction,
+            u64::from(command),
+            protocol,
+        ]);
+        let mut reply = [0u64; XFER_OUTPUT_CELLS];
+        self.module.execute("ioctl_smbus_xfer", &request, &mut reply)?;
+        Ok(reply)
+    }
+
     fn read(&self, address: u8, command: u8, protocol: u64) -> Result<u64, BusError> {
-        let request = [u64::from(address), SMBUS_READ, u64::from(command), protocol];
-        Ok(self.module.execute_scalar("ioctl_smbus_xfer", &request)?)
+        Ok(self.transfer(address, SMBUS_READ, command, protocol)?[0])
     }
 }
 
 impl Smbus for PawnSmbus {
     fn read_byte_data(&mut self, address: u8, command: u8) -> Result<u8, BusError> {
-        Ok(self.read(address, command, PROTOCOL_BYTE_DATA)? as u8)
+        let value = self.read(address, command, PROTOCOL_BYTE_DATA)?;
+        u8::try_from(value).map_err(|_| {
+            BusError::rejected(
+                "ioctl_smbus_xfer byte read",
+                "a value that fits one byte",
+                format!("{value:#x}"),
+            )
+        })
     }
 
     fn read_word_data(&mut self, address: u8, command: u8) -> Result<u16, BusError> {
-        Ok(self.read(address, command, PROTOCOL_WORD_DATA)? as u16)
+        let value = self.read(address, command, PROTOCOL_WORD_DATA)?;
+        u16::try_from(value).map_err(|_| {
+            BusError::rejected(
+                "ioctl_smbus_xfer word read",
+                "a value that fits one word",
+                format!("{value:#x}"),
+            )
+        })
     }
 
     fn select_spd_page(&mut self, page: u8) -> Result<(), BusError> {
         let target = *SPD_PAGE_SELECT_ADDRESSES.get(usize::from(page)).ok_or_else(|| {
             BusError::rejected("select_spd_page", "page 0 or 1", format!("page {page}"))
         })?;
-        // The one SMBus write SysPilot makes. Asserted here, next to the
-        // call, so that no future change can aim it at another device.
-        assert!(
-            SPD_PAGE_SELECT_ADDRESSES.contains(&target),
-            "(smbus write): expected target 0x36 or 0x37 | received: {target:#04x}"
-        );
         // "Write byte" with value 0: the data byte is ignored by the page
-        // select device, which acts on its own address.
-        let request = [u64::from(target), SMBUS_WRITE, 0, PROTOCOL_BYTE];
-        Ok(self.module.execute("ioctl_smbus_xfer", &request, &mut [])?)
+        // select device, which acts on its own address. This is the one
+        // SMBus write SysPilot makes.
+        self.transfer(target, SMBUS_WRITE, 0, PROTOCOL_BYTE)?;
+        Ok(())
     }
 }
 
@@ -594,7 +637,7 @@ mod tests {
     }
 
     #[test]
-    fn smbus_reads_use_byte_data_and_word_data_protocols() {
+    fn smbus_reads_use_byte_data_and_word_data_protocols_in_the_fixed_signature() {
         let (scripted, module) = scripted();
         scripted.reply_ok(&[0x0C]).reply_ok(&[0xC001]);
         let mut bus = PawnSmbus::new(module);
@@ -603,9 +646,27 @@ mod tests {
         assert_eq!(
             scripted.calls(),
             [
-                call("ioctl_smbus_xfer", &[0x50, 1, 2, 2], 1),
-                call("ioctl_smbus_xfer", &[0x18, 1, 5, 3], 1),
-            ]
+                call("ioctl_smbus_xfer", &[0x50, 1, 2, 2, 0, 0, 0, 0, 0], 5),
+                call("ioctl_smbus_xfer", &[0x18, 1, 5, 3, 0, 0, 0, 0, 0], 5),
+            ],
+            "nine input cells and five output cells, as the module's signature requires"
+        );
+    }
+
+    #[test]
+    fn a_read_value_wider_than_its_protocol_is_rejected() {
+        let (scripted, module) = scripted();
+        scripted.reply_ok(&[0x100]).reply_ok(&[0x1_0000]);
+        let mut bus = PawnSmbus::new(module);
+        let byte = bus.read_byte_data(0x50, 0).unwrap_err();
+        assert_eq!(
+            byte.to_string(),
+            "(ioctl_smbus_xfer byte read): expected a value that fits one byte | received: 0x100"
+        );
+        let word = bus.read_word_data(0x18, 5).unwrap_err();
+        assert_eq!(
+            word.to_string(),
+            "(ioctl_smbus_xfer word read): expected a value that fits one word | received: 0x10000"
         );
     }
 
@@ -618,14 +679,24 @@ mod tests {
         assert_eq!(
             scripted.calls(),
             [
-                call("ioctl_smbus_xfer", &[0x36, 0, 0, 1], 0),
-                call("ioctl_smbus_xfer", &[0x37, 0, 0, 1], 0),
+                call("ioctl_smbus_xfer", &[0x36, 0, 0, 1, 0, 0, 0, 0, 0], 5),
+                call("ioctl_smbus_xfer", &[0x37, 0, 0, 1, 0, 0, 0, 0, 0], 5),
             ]
         );
         for page in [2, 7, 0x36, 0xFF] {
             assert!(bus.select_spd_page(page).is_err(), "page {page} must be refused");
         }
         assert_eq!(scripted.calls().len(), 2, "refused pages must not reach the driver");
+    }
+
+    #[test]
+    #[should_panic(expected = "(smbus write): expected target 0x36 or 0x37 | received: 0x50")]
+    fn a_write_to_a_device_address_trips_the_assertion_before_the_driver() {
+        let (scripted, module) = scripted();
+        let bus = PawnSmbus::new(module);
+        // Only reachable from inside this module: the trait has no such method.
+        let _ = bus.transfer(0x50, SMBUS_WRITE, 0, PROTOCOL_BYTE);
+        assert!(scripted.calls().is_empty());
     }
 
     #[test]
