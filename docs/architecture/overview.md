@@ -30,7 +30,7 @@ exists today, and the seams the app plugs into.
 | `engine` | `proto`            | The enforcement state machine and its Win32 backends.             |
 | `pawnio` | —                  | The PawnIO device interface.                                      |
 | `hw`     | `proto`, `pawnio`  | Sensor providers and the hub that samples them.                   |
-| `sensors`| `proto`, `hw`, `pawnio` | The sensor worker: reads hardware on the service's behalf.   |
+| `sensors`| `proto`, `hw`, `pawnio` | The sensor worker: reads hardware on the service's behalf and, with the `fan-control` feature, follows fan curves. |
 | `svc`    | `proto`, `engine`, `hw`, `pawnio` | Event loop, pipe server, installer, command line. Uses `hw` only for the hub, `pawnio` only to see whether the driver is installed. |
 | `ui`     | `proto`            | The desktop app. It links none of the privileged code.            |
 
@@ -112,6 +112,31 @@ background after 5 s (doubling up to a minute if that one fails too).
 
 Whether the PawnIO driver is installed is checked on every status request, so
 installing it while the service runs is picked up without a restart.
+
+### Fans
+
+Fan curves run in the worker, next to the registers, and only in a build with
+the `fan-control` feature (both `syspilot-svc` and `syspilot-sensors`; releases
+have neither). The service never touches a fan register. It does three things:
+
+- It hands the profile's enabled curves to the live worker, and to each worker
+  that replaces it, and forwards sleep and wake. With no enabled curve it
+  mentions nothing, keeps no worker running for the fans and the process stays
+  as idle as before. A board the worker found read-only keeps none either.
+- It merges the board's layout (from the worker's probe), the profile's curves
+  and the controller's reports into `ServiceStatus.fans`, and tells subscribers
+  when a channel's phase, problem or rounded target changes.
+- It gives the worker a directory in its protected data directory
+  (`state\`) for the saved BIOS registers, which survive a crash.
+
+The worker decides whether control is allowed (the board catalog compiled
+into it, the SMBIOS name, the Super I/O chip, PawnIO), opens a fan bus only
+from a validated entry, steps the curves from the samples and by itself every
+two seconds if the service stalls, and hands the fans back to the BIOS when
+its input closes, on a panic, on sleep and on a new plan. The reasoning is in
+decision 18, the registers and the rules in the
+[research note](../research/fan-control.md) and the profile format in
+[fan curves](../fan-curves.md).
 
 ## Instances
 

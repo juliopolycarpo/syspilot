@@ -20,7 +20,7 @@ The first frame on a connection must be `Hello { protocol }`. The service
 answers `Hello(Welcome { protocol, version, elevated })`, or
 `Error(ProtocolMismatch)` if the versions differ. `PROTOCOL_VERSION` is bumped
 whenever a message changes shape; there is no negotiation, the app and the
-service are released together.
+service are released together. Version 2 added `ServiceStatus.fans`.
 
 `elevated` tells the client how the service sees it. It is computed once per
 connection from the client's token and does not change afterwards.
@@ -92,6 +92,35 @@ A subscriber that does not read is dropped when 64 events are waiting for it.
 Subscribing with `sensors: true` is what makes the service sample. When the
 last such subscriber disconnects, sampling stops.
 
+### Fans in the status
+
+`Status` carries `fan_control` (whether this service accepts curves) and
+`fans`, a `FanStatus`:
+
+| Field          | Content                                                                 |
+| -------------- | ----------------------------------------------------------------------- |
+| `availability` | `NotInBuild` (no `fan-control` feature, as in every release), `ReadOnly { reason }` (the reason is in words for the user: PawnIO missing, board unknown, entry not validated) or `Controllable`. |
+| `board`        | The board as the catalog names it, or its SMBIOS name; empty when unknown. |
+| `channels`     | The board entry's channels, plus any profile curve on a channel the entry does not list. Empty for a board that is not in the catalog. |
+
+Each channel is a `FanChannelStatus`:
+
+| Field             | Content                                                            |
+| ----------------- | ------------------------------------------------------------------ |
+| `channel`         | The key of its duty sensor, `board.pwm<N>`. A profile curve names the channel by it. |
+| `label`           | The header's name from the catalog entry.                          |
+| `tach_sensor`     | The key of its tachometer sensor, e.g. `board.fan2`, if the entry names one. |
+| `min_duty_pct`    | The lowest duty the entry allows.                                  |
+| `curve`, `sources`| The profile's curve and the sensor keys that drive it; empty if none. |
+| `active`          | The profile enables the curve and the board is `Controllable`.     |
+| `target_duty_pct` | The duty last asked for; `None` while the BIOS holds the channel.  |
+| `phase`           | `Bios`, `Manual` (following the curve), `FailSafe` (a source failed, held at 100 %), `ReleasePending` (handing back failed, retried) or `Blocked` (found in manual mode with no saved original, left alone). |
+| `problem`         | The last thing that went wrong with the channel, if still so.      |
+
+`StatusChanged` is sent when a channel's phase or problem changes or its
+target moves by five points. Clients re-read `Status`; the sensor values of
+the fan (`board.fanN`, `board.pwmN`) travel in the section like any other.
+
 ## Sensor section
 
 | Property | Value                                                    |
@@ -130,12 +159,19 @@ build, so it carries no version.
 
 | Direction         | Content                                                        |
 | ----------------- | -------------------------------------------------------------- |
-| Worker to service | Once, first: a `Probed` frame with the driver state, the features, the system inventory and the sensor list. |
-| Service to worker | The byte `s` for each sample wanted. Any other byte is ignored. |
+| Worker to service | Once, first: a `Probed` frame with the driver state, the features, the system inventory, the sensor list and the `FanStatus` the board allows (channels, availability and reason, no curves yet). |
+| Service to worker | The byte `s` for each sample wanted. Any other byte is ignored by an older worker. |
 | Worker to service | One `Sample` frame per `s`: one optional value per sensor, in the order of the sensor list. |
+| Service to worker | The byte `f` followed by a `FanPlan` frame (the state directory and the enabled curves). It replaces any earlier plan; an empty one hands every channel back to the BIOS. Sent only when the curves changed and to each new worker, and never when the profile has no enabled curve. |
+| Service to worker | The byte `z` when the machine is about to sleep: every channel goes back to the BIOS and nothing is written until `r`, the byte for the wake. |
+| Worker to service | A `Fans` frame, a `FanRuntime` per channel (phase, target duty, problem), whenever something in it changed. It may arrive between a `Sample` and the next one; the service keeps the latest. |
 
-Frames use the pipe's framing. The end of the worker's input tells it to exit.
-The service waits up to 20 s for `Probed` and 750 ms for each `Sample`.
+Frames use the pipe's framing. The end of the worker's input tells it to exit,
+and with fan control it first hands every channel back to the BIOS. A plan
+that does not decode ends the worker the same way. The service waits up to 20 s
+for `Probed` and 750 ms for each `Sample`. While a session holds a channel and
+no request comes for two seconds, the worker reads the sensors and steps by
+itself.
 
 ## Compatibility rules
 

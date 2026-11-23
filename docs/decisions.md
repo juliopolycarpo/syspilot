@@ -200,3 +200,38 @@ on the user's machine (decision 15); the modules are someone else's signed
 LGPL files (decision 13). Listing them here is the whole inventory: building
 SysPilot installs no program, driver, service or system-wide component.
 Deleting the two directories undoes it.
+
+## 18. Fan curves run in the worker, behind a feature
+
+**Decision.** The curves of a profile are followed by the sensor worker, not by
+the service, and only in a build with the `fan-control` cargo feature, which
+is off by default and in every release. The feature exists in each executable
+that takes part: `syspilot-sensors/fan-control` for the worker that writes
+and `syspilot-svc/fan-control` for the service that accepts curves, which
+also enables `syspilot-hw/fan-control`. The service sends the enabled curves
+and forwards sleep and wake. The worker decides whether a board may be
+controlled, steps the curves from its own sensor samples and hands every fan
+back to the BIOS when its input closes. This builds on decision 12; it does
+not lift it. No board is validated, so no build writes to a fan.
+
+**Why.** The worker already sits next to the registers and reads the
+sensors, so a step needs no round trip. The end of its input, which is what a
+stopped or crashed service looks like, is a dead-man's switch that the service
+itself could not provide: a crashed service cannot restore anything, a worker
+whose pipe closed can. The worker can also step by itself if the service
+stalls, and the panic hook that restores the fans belongs to the process that
+holds the controller (the release profile aborts on panic). The service
+stays free of hardware code, as decision 16 asked, and idle: with no enabled
+curve it keeps no worker, samples nothing and sends nothing.
+
+**Cost.** The control loop lives in the process the service may replace when
+it misses a sample, so a replaced worker has to give the fans back in the
+two seconds it gets before it is killed, and a killed one leaves the chip at
+its last duty until the next session restores the saved registers from a file.
+That file, `fan-originals.toml` in the protected state directory, is the one
+record of the BIOS mode, so it is written atomically before the first write
+and never overwritten when it does not parse. A hung hardware read in the
+worker is not covered by its two-second step. A build that follows curves
+needs both features, and a worker built without it reports the board as not
+controllable, so a half-enabled build shows "not in this build" and writes
+nothing. Protocol version 2 adds the fan status.

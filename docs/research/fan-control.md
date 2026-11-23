@@ -93,6 +93,65 @@ leaves bank 0 selected, also when a step fails.
   manual mode with no stored original is never recorded as the BIOS mode: it
   is raised to its minimum if below and left blocked.
 
+## How it is wired (decision 18)
+
+The curves of a profile run in the sensor worker, next to the registers, and
+not in the service. Both ends need the `fan-control` feature:
+`syspilot-sensors/fan-control` for the worker that writes and
+`syspilot-svc/fan-control` for the service that accepts curves. A release has
+neither.
+
+- **Whether control is allowed** is decided once, in the worker's probe, by
+  `fan::layout::assess`: PawnIO usable, the baseboard's name read from
+  SMBIOS, the Super I/O chip the probe found, then the catalog compiled into
+  the binary (`BoardCatalog::shipped`). The first thing that fails is the
+  reason shown, in words: PawnIO is not installed, the board's name could not
+  be read, the sensor chip has no fan control, the board is not in the
+  catalog, its entry has not been validated. Only a validated entry for the
+  detected chip yields a `ControlGrant`, and the worker opens a fan bus only
+  from one. The reference board's entry stays `validated = false`.
+- **The plan** is the profile's enabled curves, sent by the service to the
+  live worker (`FANS_REQUEST` and a `FanPlan` frame) when they change and to
+  every worker that replaces it. With no enabled curve the service sends
+  nothing, keeps no worker alive for the fans and the worker holds no
+  session. A board that cannot follow curves keeps no worker either.
+- **The session** (`fan/session.rs`) opens the fan bus, puts each curve on its
+  channel, runs crash recovery before the first step and then steps from the
+  sensor samples: once per request, and by itself every two seconds if the
+  service stops asking. A curve for a channel the entry does not list is that
+  channel's problem and the BIOS keeps it; the others run. The entry's
+  minimum duty is a floor that a profile can raise and never lower.
+- **The original registers** are kept in `fan-originals.toml` in the
+  service's state directory (`FileOriginalStore`): written to a temporary
+  file, flushed and renamed over the old one, before the first write to a
+  channel, and removed once the restore is confirmed. A file that does not
+  parse is never overwritten, which leaves the channel alone.
+- **What happens at each event**:
+
+  | Event | What the worker does |
+  |---|---|
+  | A source sensor is missing, fails or reads implausibly | Drives that channel to 100 % at once; takes control again after a run of good readings |
+  | The service closes the pipe (stop, crash, uninstall) | Restores every channel before it exits |
+  | The service stops asking for samples | Steps by itself every two seconds |
+  | The plan changes | Restores the channels, then opens a session for the new curves |
+  | The plan has no enabled curve | Restores the channels and holds no session |
+  | The machine sleeps | Restores every channel at once and writes nothing until it wakes |
+  | The machine wakes | Takes control again after a run of good readings |
+  | A panic in the worker | The panic hook restores from the controller (the release profile aborts) |
+  | The worker is killed | Nothing runs. The chip keeps the last duty written, which is never below the minimum, until the next session restores the BIOS mode from the saved registers |
+  | A restore fails | The record is kept and the restore is retried on every step |
+
+- **What the status says**: `ServiceStatus.fans` joins the board's channels,
+  the profile's curves and the controller's report: for each channel the
+  curve, whether it is followed, the duty asked for, the phase and the last
+  problem. The reason for a read-only board is in `FanAvailability`. A worker
+  that ends takes its report with it, so the status reads "the BIOS holds the
+  channel".
+- **Tests** use the replay bus, named fakes for the store, the access and the
+  worker, and `FakeHardware` in the service. With the feature on, the tests
+  that would open the driver or start the real worker (`crates/hw/tests/driver.rs`,
+  `crates/sensors/tests/worker.rs`) do not run, and nothing starts a service.
+
 ## Verified by replay only
 
 Everything. In detail, the replay bus checked:
@@ -103,7 +162,11 @@ Everything. In detail, the replay bus checked:
   on every path, including failures, and that a held mutex stops an
   operation before any write;
 - the controller over a replayed chip: take control, sensor failure to
-  100 %, stop, drop and a restart after a simulated crash.
+  100 %, stop, drop and a restart after a simulated crash;
+- the session and the worker loop over a replayed NCT6779D: curves following
+  samples, a sensor missing from a sample, suspend and resume, a new plan, a
+  worker that steps by itself, and the restore when the input closes. The
+  service side was checked with fake workers that speak the protocol.
 
 The replay bus returns what the test fixture holds. It cannot tell whether
 the real chip behaves as the Linux driver describes.
@@ -111,14 +174,15 @@ the real chip behaves as the Linux driver describes.
 ## Not done
 
 - The datasheet cross-check above.
-- Wiring into the service and the UI. Nothing in `syspilot-svc` or
-  `syspilot-ui` calls this code.
-- A durable `OriginalStore`. The service must persist the record to disk
-  before the first write, or a crash with a lost journal leaves the channel
-  blocked.
-- The service must hold the ISA guard for every sequence (the channel does
-  that itself), call `install_panic_release` once and call `suspend` and
-  `resume` from its power notifications.
+- Running it on a real board. The wiring above has only been exercised on
+  the replay bus and with fakes; the checklist below is still open.
+- A curve editor. Curves are written in the profile file and the app shows
+  them ([the profile format](../fan-curves.md)).
+- A hung hardware read in the worker is not covered by the two-second step:
+  the step needs the read to return. The service gives up on a worker that
+  misses a sample and replaces it, and the replaced worker is killed if it
+  does not leave in two seconds; its registers are then restored by the next
+  session, not at once.
 - Chips of other families (ITE IT87xx, other Nuvoton parts). They have no
   write path, and the board catalog refuses a validated entry for them.
 
@@ -139,8 +203,9 @@ On the real board, with a case fan in reach and a way to stop the test
    automatic modes only.
 5. Restoring returns BIOS control: after a stop the fan follows the BIOS
    curve again and the two registers read as before the first write.
-6. A killed service process leaves the fans at or above the minimum duty and
-   the next start restores the BIOS mode.
+6. A killed service process or worker leaves the fans at or above the minimum
+   duty and the next start restores the BIOS mode (the saved registers are in
+   `fan-originals.toml`).
 7. Suspend and resume: the controller releases before sleep and takes
    control again only after sensors read correctly.
 8. Sensor failure: unplug or block a sensor reading and confirm the fans go
