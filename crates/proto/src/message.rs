@@ -5,9 +5,12 @@
 //! each, until it sends [`Request::Subscribe`]: from then on the service
 //! pushes [`Response::Event`] frames and the client sends nothing more.
 //!
-//! Requests are either read-only (open to any local interactive user) or
-//! mutating (the client must be an elevated administrator). See
-//! [`Request::is_mutating`].
+//! Requests come in two privilege levels. Open requests (status, catalog,
+//! states, sensors) are available to any local authenticated user.
+//! Everything that changes configuration or system state, and everything
+//! that reveals the profile (which holds user-defined command lines),
+//! requires the client to be an elevated administrator. See
+//! [`Request::requires_elevation`].
 
 use serde::{Deserialize, Serialize};
 
@@ -29,9 +32,11 @@ pub enum Request {
     Catalog,
     /// Current state of every catalog tweak and custom action.
     States,
-    /// The stored profile.
+    /// The stored profile. Requires elevation: the profile is readable by
+    /// administrators only, on disk and here.
     Profile,
-    /// The most recent enforcement events, newest first.
+    /// The most recent enforcement events, newest first. Requires
+    /// elevation: details can quote custom command lines.
     History {
         /// Most events to return.
         limit: u32,
@@ -78,30 +83,36 @@ pub enum Request {
     SetFans(Vec<FanCurve>),
     /// Deletes the enforcement history. Mutating.
     ClearHistory,
+    /// Stops an instance running in console mode. A Windows service refuses
+    /// it: services are stopped through the service control manager.
+    /// Mutating.
+    Shutdown,
 }
 
 impl Request {
-    /// Whether the request changes configuration or system state, and
-    /// therefore requires an elevated administrator on the client side.
-    pub fn is_mutating(&self) -> bool {
+    /// Whether the client must be an elevated administrator: true for
+    /// every request that changes configuration or system state, and for
+    /// those that reveal the profile.
+    pub fn requires_elevation(&self) -> bool {
         match self {
             Self::Hello { .. }
             | Self::Status
             | Self::Catalog
             | Self::States
-            | Self::Profile
-            | Self::History { .. }
             | Self::Sensors
             | Self::SystemInfo
             | Self::Subscribe { .. } => false,
-            Self::SetTweak { .. }
+            Self::Profile
+            | Self::History { .. }
+            | Self::SetTweak { .. }
             | Self::PutCustom(_)
             | Self::RemoveCustom { .. }
             | Self::Reapply { .. }
             | Self::SetProfile(_)
             | Self::SetLogging(_)
             | Self::SetFans(_)
-            | Self::ClearHistory => true,
+            | Self::ClearHistory
+            | Self::Shutdown => true,
         }
     }
 }
@@ -192,6 +203,9 @@ pub enum Event {
     SensorsChanged,
     /// Driver or feature availability changed.
     StatusChanged,
+    /// A new sensor sample is in the shared-memory section. Sent only to
+    /// subscribers that asked for sensors.
+    Sampled,
     /// The service is stopping.
     Stopping,
 }
@@ -347,6 +361,12 @@ pub struct ServiceStatus {
     pub os_build: u32,
     /// Directory sensor logs are written to.
     pub log_dir: String,
+    /// Whether this build can drive fans. Off until fan control has been
+    /// validated on real hardware.
+    pub fan_control: bool,
+    /// Things the user should know about, e.g. a profile that could not be
+    /// read. Empty when all is well.
+    pub problems: Vec<String>,
 }
 
 /// Answer to [`Request::SystemInfo`].
@@ -437,6 +457,7 @@ mod tests {
             Request::SetLogging(LoggingConfig::default()),
             Request::SetFans(vec![]),
             Request::ClearHistory,
+            Request::Shutdown,
         ];
         for request in requests {
             assert_eq!(round_trip(&request), request);
@@ -444,21 +465,21 @@ mod tests {
     }
 
     #[test]
-    fn read_only_requests_are_exactly_the_non_mutating_ones() {
-        let read_only = [
+    fn only_requests_that_neither_change_nor_reveal_configuration_are_open() {
+        let open = [
             Request::Hello { protocol: 1 },
             Request::Status,
             Request::Catalog,
             Request::States,
-            Request::Profile,
-            Request::History { limit: 1 },
             Request::Sensors,
             Request::SystemInfo,
             Request::Subscribe { sensors: false },
         ];
-        assert!(read_only.iter().all(|request| !request.is_mutating()));
+        assert!(open.iter().all(|request| !request.requires_elevation()));
 
-        let mutating = [
+        let privileged = [
+            Request::Profile,
+            Request::History { limit: 1 },
             Request::SetTweak { id: String::new(), enabled: false },
             Request::PutCustom(custom_action()),
             Request::RemoveCustom { id: String::new() },
@@ -467,8 +488,9 @@ mod tests {
             Request::SetLogging(LoggingConfig::default()),
             Request::SetFans(vec![]),
             Request::ClearHistory,
+            Request::Shutdown,
         ];
-        assert!(mutating.iter().all(Request::is_mutating));
+        assert!(privileged.iter().all(Request::requires_elevation));
     }
 
     #[test]
