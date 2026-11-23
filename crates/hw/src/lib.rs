@@ -16,6 +16,7 @@ pub mod bus;
 pub mod chips;
 pub mod cpu;
 pub mod dimm;
+pub mod driver;
 pub mod hub;
 pub mod os;
 pub mod sysinfo;
