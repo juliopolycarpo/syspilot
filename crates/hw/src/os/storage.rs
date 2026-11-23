@@ -2,13 +2,21 @@
 //!
 //! Drives are opened as `\\.\PhysicalDriveN` with **zero desired access**,
 //! which is enough for every query used here (`IOCTL_STORAGE_QUERY_PROPERTY`,
-//! `IOCTL_DISK_PERFORMANCE`, `IOCTL_DISK_GET_DRIVE_GEOMETRY_EX`) and means a
-//! drive is never opened for reading data or writing.
+//! `IOCTL_STORAGE_PREDICT_FAILURE`, `IOCTL_DISK_PERFORMANCE`,
+//! `IOCTL_DISK_GET_DRIVE_GEOMETRY_EX`) and means a drive is never opened for
+//! reading data or writing.
 //!
 //! Throughput is a pure kernel counter read on every sample. Temperature and
 //! wear send commands to the device (a SMART or NVMe log read), which can
 //! wake a sleeping disk, so they are read at most every
 //! [`HEALTH_MIN_INTERVAL`] and the last result is repeated in between.
+//!
+//! A SATA drive's temperature comes from its SMART attribute 194, the one
+//! Windows shows (`Get-StorageReliabilityCounter`) and the one SMART tools
+//! name "Temperature_Celsius". The ACS-3 Device Statistics "current
+//! temperature" is only a fallback: on the reference machine's XrayDisk it
+//! reads 5 °C above attribute 194, so the two are different sensors, and a
+//! user comparing against Windows or the drive's vendor tool expects 194.
 
 use std::mem::offset_of;
 use std::ptr;
@@ -25,9 +33,10 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::Ioctl::{
     AtaDataTypeLogPage, DISK_GEOMETRY_EX, DISK_PERFORMANCE, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
-    IOCTL_DISK_PERFORMANCE, IOCTL_STORAGE_QUERY_PROPERTY, NVMeDataTypeLogPage,
-    PropertyStandardQuery, ProtocolTypeAta, ProtocolTypeNvme, STORAGE_DEVICE_DESCRIPTOR,
-    STORAGE_PROPERTY_QUERY, STORAGE_PROTOCOL_DATA_DESCRIPTOR, STORAGE_PROTOCOL_SPECIFIC_DATA,
+    IOCTL_DISK_PERFORMANCE, IOCTL_STORAGE_PREDICT_FAILURE, IOCTL_STORAGE_QUERY_PROPERTY,
+    NVMeDataTypeLogPage, PropertyStandardQuery, ProtocolTypeAta, ProtocolTypeNvme,
+    STORAGE_DEVICE_DESCRIPTOR, STORAGE_PREDICT_FAILURE, STORAGE_PROPERTY_QUERY,
+    STORAGE_PROTOCOL_DATA_DESCRIPTOR, STORAGE_PROTOCOL_SPECIFIC_DATA,
     STORAGE_TEMPERATURE_DATA_DESCRIPTOR, STORAGE_TEMPERATURE_INFO, StorageDeviceProperty,
     StorageDeviceProtocolSpecificProperty, StorageDeviceTemperatureProperty,
 };
@@ -65,6 +74,17 @@ const ATA_CURRENT_TEMPERATURE_OFFSET: usize = 8;
 /// Flag bits in the top byte of a statistic: "supported" (bit 7) and "valid"
 /// (bit 6). Both must be set for the value to mean anything.
 const ATA_STATISTIC_USABLE: u8 = 0xC0;
+/// SMART attribute id 194, "Temperature_Celsius".
+const SMART_ATTRIBUTE_TEMPERATURE: u8 = 194;
+/// Offset of the attribute table in the SMART data: after the two-byte
+/// revision number.
+const SMART_TABLE_OFFSET: usize = 2;
+/// Entries in the table, each [`SMART_ENTRY_BYTES`] long (ATA8-ACS, SMART
+/// READ DATA): id, two flag bytes, current, worst, six raw bytes, reserved.
+const SMART_ENTRIES: usize = 30;
+const SMART_ENTRY_BYTES: usize = 12;
+/// Offset of the raw value inside an entry.
+const SMART_RAW_OFFSET: usize = 5;
 /// Bounds on a believable drive temperature, in degrees Celsius.
 const PLAUSIBLE_CELSIUS: std::ops::RangeInclusive<f64> = -20.0..=125.0;
 
@@ -87,6 +107,8 @@ const _: () = {
     assert!(offset_of!(STORAGE_PROTOCOL_DATA_DESCRIPTOR, ProtocolSpecificData) == 8);
     assert!(offset_of!(STORAGE_PROTOCOL_SPECIFIC_DATA, ProtocolDataOffset) == 16);
     assert!(offset_of!(STORAGE_PROTOCOL_SPECIFIC_DATA, ProtocolDataLength) == 20);
+    assert!(offset_of!(STORAGE_PREDICT_FAILURE, VendorSpecific) == 4);
+    assert!(size_of::<STORAGE_PREDICT_FAILURE>() == 516);
     assert!(offset_of!(DISK_PERFORMANCE, BytesRead) == 0);
     assert!(offset_of!(DISK_PERFORMANCE, BytesWritten) == 8);
     assert!(offset_of!(DISK_GEOMETRY_EX, DiskSize) == 24);
@@ -362,6 +384,28 @@ fn parse_ata_temperature(bytes: &[u8], valid: usize) -> Option<f64> {
     plausible_celsius(f64::from(*log.get(ATA_CURRENT_TEMPERATURE_OFFSET)? as i8))
 }
 
+/// The temperature in SMART attribute 194 from the reply to
+/// `IOCTL_STORAGE_PREDICT_FAILURE` (`valid` bytes of a
+/// `STORAGE_PREDICT_FAILURE`, whose `VendorSpecific` holds the 512-byte SMART
+/// data).
+///
+/// Only the first raw byte is the temperature. Drives pack more after it (the
+/// Crucial BX500 keeps the lifetime minimum and maximum in raw bytes 2 to 5),
+/// so reading the raw value as one integer would give garbage. A zero byte
+/// means the drive does not fill the attribute in.
+fn parse_smart_temperature(bytes: &[u8], valid: usize) -> Option<f64> {
+    let bytes = bytes.get(..valid.min(bytes.len()))?;
+    let table =
+        bytes.get(offset_of!(STORAGE_PREDICT_FAILURE, VendorSpecific) + SMART_TABLE_OFFSET..)?;
+    let (entries, _partial_entry) = table.as_chunks::<SMART_ENTRY_BYTES>();
+    entries.iter().take(SMART_ENTRIES).find_map(|entry| {
+        if entry[0] != SMART_ATTRIBUTE_TEMPERATURE || entry[SMART_RAW_OFFSET] == 0 {
+            return None;
+        }
+        plausible_celsius(f64::from(entry[SMART_RAW_OFFSET]))
+    })
+}
+
 // ---------------------------------------------------------------------
 // The Windows backend
 // ---------------------------------------------------------------------
@@ -395,34 +439,72 @@ struct PhysicalDrive {
 }
 
 impl PhysicalDrive {
-    /// The generic temperature property. Drivers that do not implement it
-    /// (the SATA AHCI driver among them) fail with `ERROR_INVALID_FUNCTION`.
-    fn temperature_property(&self) -> Option<f64> {
-        let query = property_query(StorageDeviceTemperatureProperty, &[]);
-        let mut output = [0u8; 256];
-        let valid = ioctl(&self.handle, IOCTL_STORAGE_QUERY_PROPERTY, &query, &mut output)?;
-        parse_temperature_descriptor(&output, valid)
-    }
-
     /// Sends a log-page query and returns the reply and its valid length.
     fn read_log_page(&self, query: &[u8]) -> Option<([u8; LOG_PAGE_REPLY_BYTES], usize)> {
         let mut output = [0u8; LOG_PAGE_REPLY_BYTES];
         let valid = ioctl(&self.handle, IOCTL_STORAGE_QUERY_PROPERTY, query, &mut output)?;
         Some((output, valid))
     }
+}
 
+impl TemperatureSources for PhysicalDrive {
     fn nvme_health(&self) -> Option<NvmeHealth> {
         let (output, valid) = self.read_log_page(&nvme_health_query())?;
         parse_nvme_health(&output, valid)
     }
 
-    /// Temperature from the ACS-3 Device Statistics log, for SATA drives
-    /// whose driver has no temperature property. Drives older than ACS-3
-    /// fail the read.
-    fn ata_temperature(&self) -> Option<f64> {
+    /// Drivers that do not implement it (the SATA AHCI driver among them)
+    /// fail with `ERROR_INVALID_FUNCTION`.
+    fn property_temperature(&self) -> Option<f64> {
+        let query = property_query(StorageDeviceTemperatureProperty, &[]);
+        let mut output = [0u8; 256];
+        let valid = ioctl(&self.handle, IOCTL_STORAGE_QUERY_PROPERTY, &query, &mut output)?;
+        parse_temperature_descriptor(&output, valid)
+    }
+
+    /// The SMART data the class driver reads for failure prediction. The
+    /// IOCTL takes any access right, like the other queries here, and the
+    /// drive is only sent SMART READ DATA.
+    fn smart_temperature(&self) -> Option<f64> {
+        let mut output = [0u8; size_of::<STORAGE_PREDICT_FAILURE>()];
+        let valid = ioctl(&self.handle, IOCTL_STORAGE_PREDICT_FAILURE, &[], &mut output)?;
+        parse_smart_temperature(&output, valid)
+    }
+
+    /// Drives older than ACS-3 fail the read.
+    fn statistics_temperature(&self) -> Option<f64> {
         let (output, valid) = self.read_log_page(&ata_temperature_query())?;
         parse_ata_temperature(&output, valid)
     }
+}
+
+/// Where a drive's temperature can come from. A trait so that a test can
+/// give two sources different answers and check which one wins.
+trait TemperatureSources {
+    /// The NVMe health log: temperature and wear.
+    fn nvme_health(&self) -> Option<NvmeHealth>;
+    /// `StorageDeviceTemperatureProperty`.
+    fn property_temperature(&self) -> Option<f64>;
+    /// SMART attribute 194.
+    fn smart_temperature(&self) -> Option<f64>;
+    /// The ACS-3 Device Statistics "current temperature".
+    fn statistics_temperature(&self) -> Option<f64>;
+}
+
+/// Temperature and wear of a drive from the first source that answers.
+///
+/// Every source is one more command sent to the drive, so the order is the
+/// cost and the trust: the NVMe log, then the generic property, then (SATA
+/// only) SMART attribute 194, which is what Windows reports, and last the
+/// Device Statistics value, which on some drives measures another sensor.
+fn read_health(is_nvme: bool, sources: &dyn TemperatureSources) -> Health {
+    let nvme = if is_nvme { sources.nvme_health() } else { None };
+    let temperature = nvme
+        .and_then(|health| health.temperature)
+        .or_else(|| sources.property_temperature())
+        .or_else(|| if is_nvme { None } else { sources.smart_temperature() })
+        .or_else(|| if is_nvme { None } else { sources.statistics_temperature() });
+    Health { temperature, life_remaining: nvme.map(|health| health.life_remaining) }
 }
 
 impl DriveBackend for PhysicalDrive {
@@ -437,14 +519,7 @@ impl DriveBackend for PhysicalDrive {
     }
 
     fn health(&mut self) -> Health {
-        let nvme = if self.is_nvme { self.nvme_health() } else { None };
-        // Cheapest source first; every fallback is one more command sent to
-        // the drive, so stop at the first that answers.
-        let temperature = nvme
-            .and_then(|health| health.temperature)
-            .or_else(|| self.temperature_property())
-            .or_else(|| if self.is_nvme { None } else { self.ata_temperature() });
-        Health { temperature, life_remaining: nvme.map(|health| health.life_remaining) }
+        read_health(self.is_nvme, self)
     }
 }
 
@@ -837,6 +912,169 @@ mod tests {
                 "valid={valid}: expected None | received: {parsed:?}"
             );
         }
+    }
+
+    /// A reply to `IOCTL_STORAGE_PREDICT_FAILURE`: the failure flag, the
+    /// two-byte SMART revision, then the entries as the drive lists them.
+    fn smart_reply(entries: &[[u8; SMART_ENTRY_BYTES]]) -> Vec<u8> {
+        let mut bytes = vec![0u8; size_of::<STORAGE_PREDICT_FAILURE>()];
+        bytes[4] = 0x10; // revision
+        for (slot, entry) in entries.iter().enumerate() {
+            let start = 4 + SMART_TABLE_OFFSET + slot * SMART_ENTRY_BYTES;
+            bytes[start..start + SMART_ENTRY_BYTES].copy_from_slice(entry);
+        }
+        bytes
+    }
+
+    /// Attribute 12 (power cycles) of the reference machine's XrayDisk.
+    const SMART_POWER_CYCLES: [u8; 12] = [12, 0x32, 0, 100, 100, 0x95, 0x05, 0, 0, 0, 0, 0];
+    /// Attribute 194 of the XrayDisk: 41 °C, nothing after the first raw byte.
+    const SMART_XRAYDISK_194: [u8; 12] = [194, 0x32, 0, 100, 100, 0x29, 0, 0, 0, 0, 0, 0];
+    /// Attribute 194 of the CT500BX500SSD1: 38 °C now, lifetime minimum 22
+    /// and maximum 51 in raw bytes 2 and 4. Read as a 48-bit integer it is
+    /// 0x0033_0016_0026, which is not a temperature.
+    const SMART_BX500_194: [u8; 12] = [194, 0x22, 0, 62, 49, 0x26, 0, 0x16, 0, 0x33, 0, 0];
+
+    // ---- SMART attribute 194 --------------------------------------------------
+
+    #[test]
+    fn smart_temperature_is_the_first_raw_byte_of_attribute_194() {
+        let bytes = smart_reply(&[SMART_POWER_CYCLES, SMART_XRAYDISK_194]);
+        assert_eq!(parse_smart_temperature(&bytes, bytes.len()), Some(41.0));
+    }
+
+    #[test]
+    fn smart_temperature_ignores_the_minimum_and_maximum_packed_after_it() {
+        let bytes = smart_reply(&[SMART_BX500_194]);
+        assert_eq!(parse_smart_temperature(&bytes, bytes.len()), Some(38.0));
+    }
+
+    #[test]
+    fn smart_data_without_attribute_194_has_no_temperature() {
+        let bytes = smart_reply(&[SMART_POWER_CYCLES]);
+        assert_eq!(parse_smart_temperature(&bytes, bytes.len()), None);
+        // An empty table: every entry is id 0.
+        let empty = smart_reply(&[]);
+        assert_eq!(parse_smart_temperature(&empty, empty.len()), None);
+    }
+
+    #[test]
+    fn smart_temperature_of_zero_or_beyond_the_plausible_range_is_dropped() {
+        for raw in [0u8, 200] {
+            let mut entry = SMART_XRAYDISK_194;
+            entry[SMART_RAW_OFFSET] = raw;
+            let bytes = smart_reply(&[entry]);
+            assert_eq!(
+                parse_smart_temperature(&bytes, bytes.len()),
+                None,
+                "raw byte {raw}: expected None | received a temperature"
+            );
+        }
+    }
+
+    #[test]
+    fn smart_entries_past_the_thirtieth_are_not_part_of_the_table() {
+        // The 512 bytes after the revision hold 30 entries and a trailer; an
+        // attribute-194 look-alike in the trailer is not an attribute.
+        let mut bytes = smart_reply(&[]);
+        let trailer = 4 + SMART_TABLE_OFFSET + SMART_ENTRIES * SMART_ENTRY_BYTES;
+        bytes[trailer..trailer + SMART_ENTRY_BYTES].copy_from_slice(&SMART_XRAYDISK_194);
+        assert_eq!(parse_smart_temperature(&bytes, bytes.len()), None);
+    }
+
+    #[test]
+    fn truncated_smart_replies_do_not_panic() {
+        let bytes = smart_reply(&[SMART_POWER_CYCLES, SMART_XRAYDISK_194]);
+        // The temperature entry ends at 4 + 2 + 2 * 12 = 30 bytes, its raw
+        // value at 4 + 2 + 12 + 5 = 23.
+        for valid in 0..bytes.len() {
+            let parsed = parse_smart_temperature(&bytes, valid);
+            assert!(
+                parsed.is_none() || valid >= 30,
+                "valid={valid}: expected None | received: {parsed:?}"
+            );
+        }
+        assert_eq!(parse_smart_temperature(&[], 516), None, "empty buffer");
+    }
+
+    // ---- which source wins ------------------------------------------------------
+
+    /// A drive that answers each source with a fixed value and counts nothing.
+    #[derive(Default)]
+    struct FakeSources {
+        nvme: Option<NvmeHealth>,
+        property: Option<f64>,
+        smart: Option<f64>,
+        statistics: Option<f64>,
+    }
+
+    impl TemperatureSources for FakeSources {
+        fn nvme_health(&self) -> Option<NvmeHealth> {
+            self.nvme
+        }
+        fn property_temperature(&self) -> Option<f64> {
+            self.property
+        }
+        fn smart_temperature(&self) -> Option<f64> {
+            self.smart
+        }
+        fn statistics_temperature(&self) -> Option<f64> {
+            self.statistics
+        }
+    }
+
+    /// The reference machine's XrayDisk: Device Statistics says 46, SMART
+    /// attribute 194 and Windows say 41.
+    #[test]
+    fn a_sata_drive_reports_smart_attribute_194_not_the_device_statistics_value() {
+        let xraydisk =
+            FakeSources { smart: Some(41.0), statistics: Some(46.0), ..FakeSources::default() };
+        assert_eq!(read_health(false, &xraydisk), health(Some(41.0), None));
+    }
+
+    /// The CT500BX500SSD1 has no Device Statistics log (the read fails), so it
+    /// had no temperature sensor before attribute 194 was read.
+    #[test]
+    fn a_sata_drive_without_device_statistics_still_has_a_temperature() {
+        let bx500 = FakeSources { smart: Some(38.0), ..FakeSources::default() };
+        assert_eq!(read_health(false, &bx500), health(Some(38.0), None));
+    }
+
+    #[test]
+    fn device_statistics_are_the_last_resort_for_a_sata_drive_without_attribute_194() {
+        let no_attribute = FakeSources { statistics: Some(46.0), ..FakeSources::default() };
+        assert_eq!(read_health(false, &no_attribute), health(Some(46.0), None));
+    }
+
+    #[test]
+    fn the_generic_property_comes_before_smart() {
+        let both = FakeSources { property: Some(40.0), smart: Some(41.0), ..Default::default() };
+        assert_eq!(read_health(false, &both), health(Some(40.0), None));
+    }
+
+    #[test]
+    fn an_nvme_drive_uses_its_health_log_and_never_asks_for_smart_or_statistics() {
+        struct NvmeOnly(NvmeHealth);
+        impl TemperatureSources for NvmeOnly {
+            fn nvme_health(&self) -> Option<NvmeHealth> {
+                Some(self.0)
+            }
+            fn property_temperature(&self) -> Option<f64> {
+                None
+            }
+            fn smart_temperature(&self) -> Option<f64> {
+                panic!("(storage): expected no SMART read on an NVMe drive | received: one")
+            }
+            fn statistics_temperature(&self) -> Option<f64> {
+                panic!(
+                    "(storage): expected no Device Statistics read on an NVMe drive | received: one"
+                )
+            }
+        }
+        let log = NvmeHealth { temperature: None, life_remaining: 88.0 };
+        assert_eq!(read_health(true, &NvmeOnly(log)), health(None, Some(88.0)));
+        let log = NvmeHealth { temperature: Some(40.0), life_remaining: 88.0 };
+        assert_eq!(read_health(true, &NvmeOnly(log)), health(Some(40.0), Some(88.0)));
     }
 
     // ---- ATA Device Statistics ----------------------------------------------

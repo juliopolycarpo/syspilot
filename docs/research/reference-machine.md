@@ -100,6 +100,29 @@ thermistor at room temperature; the other chips' alternate registers cannot be
 checked here. Until a second board shows which choice loses real sensors, the
 floating inputs are shown as read.
 
+## SATA drive temperature
+
+Read on 2026-11-23 with the `sensors` example, `Get-StorageReliabilityCounter`
+and the `root\wmi` class `MSStorageDriver_ATAPISmartData`, all read-only.
+
+| Drive | Windows `Temperature` | SMART attribute 194, raw byte 0 | ACS-3 Device Statistics, current temperature | `StorageDeviceTemperatureProperty` |
+|---|---|---|---|---|
+| XrayDisk 1TB SSD (SATA) | 41 | 41 | 46 (maximum 54) | `ERROR_INVALID_FUNCTION` |
+| CT500BX500SSD1 (SATA) | 38 | 38 (raw bytes 2 and 4: minimum 22, maximum 51) | read fails (`ERROR_IO_DEVICE`) | `ERROR_INVALID_FUNCTION` |
+| Asgard AN4+ 1TNVMe (NVMe) | 40 | not applicable | not applicable | composite 40 |
+
+SysPilot used to read the Device Statistics value, so the XrayDisk showed 46 °C
+against Windows's 41 °C (issue 6) and the BX500 had no temperature sensor.
+The two are different sensors on the XrayDisk. Device Statistics is
+standardised by T13 (ACS-3) but optional, and a drive may fill "current
+temperature" from any sensor; attribute 194 is vendor-defined but is the
+drive's own "Temperature_Celsius" and what Windows and SMART tools report. The
+provider now reads attribute 194 (raw byte 0, through
+`IOCTL_STORAGE_PREDICT_FAILURE`, which needs no access right) and keeps
+Device Statistics as a fallback for a drive that has the log but no attribute
+194. Attribute 190 is not read: no source was consulted for how drives encode
+it.
+
 ## Memory modules
 
 The machine has memory, but no memory module answers at `0x50`-`0x57` through
