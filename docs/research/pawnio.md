@@ -57,6 +57,7 @@ status.
 | `STATUS_ALREADY_INITIALIZED` (`0xC0000510`) | The handle already has a module. |
 | `STATUS_INVALID_SIGNATURE` (`0xC000A000`) | The blob is not signed by the trusted key (2.2.0 passes the BCrypt status through; **unverified** at runtime). |
 | `STATUS_NOT_SUPPORTED` (`0xC00000BB`) | The module refuses this platform (wrong CPU vendor, missing device). |
+| `STATUS_NO_SUCH_DEVICE` (`0xC000000E`) | `IntelPCHThermal`'s `main()` found none of the devices it supports. SysPilot counts it as a refusal, like `STATUS_NOT_SUPPORTED` (**not seen at runtime**: the reference machine has the device). |
 
 ### Execute
 
@@ -200,6 +201,44 @@ SysPilot issues no SMBus write. The one write it can make, the DDR4 SPD page
 select, exists only with the off-by-default `spd-paging` cargo feature of
 `syspilot-hw`.
 
+### IntelPCHThermal
+
+Read only: the source has no write primitive (no `pci_config_write_*`,
+`virtual_write_*` or MSR write). Requires an Intel x64 CPU. Added in
+PawnIO.Modules pull request 79 (<https://github.com/namazso/PawnIO.Modules/pull/79>).
+
+`main()` first looks for one of the LPC/eSPI device IDs of recent client
+chipsets on bus 0 and, if it finds one, maps the fixed window at
+`0xFE000000` (route 2). Only when no such controller exists does it look for
+one of the legacy thermal functions on bus 0 (`0x9C24`, `0x8C24`, `0x9CA4`,
+`0x9D31`, `0xA131`, `0x9DF9`, `0xA379`, `0x02F9`, `0x06F9`, `0xA1B1`, `0x8D24`,
+`0xA2B1`), requires PCI command bit 1 (memory decoding) to be set and BAR0 to
+be a programmed memory BAR, and maps 256 bytes of it (route 1). It fails with
+`STATUS_NO_SUCH_DEVICE` when it finds neither, and `STATUS_NOT_SUPPORTED` when
+the function is not decoding memory or BAR0 is empty.
+
+| Function | In → out | |
+|---|---|---|
+| `ioctl_read_raw` | `[]` → `[raw, route]` | R. Route 1 is the PCI thermal BAR0 (16-bit read at offset 0), route 2 the fixed PWRM window (32-bit read at `+0x1560`). |
+| `ioctl_identity` | `[]` → `[route, didvid, pci_address, mmio_base, size]` | R. `didvid` is `device << 16 \| vendor`, `pci_address` is `bus << 16 \| device << 8 \| function`. |
+
+The module returns the register unvalidated; the consumer decodes it:
+
+- **Route 1** (PCI BAR0): bits 8:0 are the reading, `field / 2 - 50` °C. The
+  Linux driver `drivers/thermal/intel/intel_pch_thermal.c` (checked on
+  2026-11-23) masks the register with `WPT_TEMP_TSR` (`0x01FF`) and converts
+  with `GET_WPT_TEMP(x) = x * 1000 / 2 + (-50 * 1000)` millidegrees ("Resolution
+  of 1/2 degree C and an offset of -50C"). Its device ID list is the one in the
+  module, minus `0xA2B1`, which the module's author took from HWMonitor.
+- **Route 2** (PWRM): bit 9 is a valid flag and bits 8:0 are whole degrees.
+  **Unverified**: Linux has no driver for this register and no Intel document
+  was consulted. The layout is the module author's, from an analysis of
+  HWMonitor 1.65 and one read on an Intel HM870 platform (`0xFE001560` read
+  `0x80000231`, valid bit set, 49 °C, against 43 °C from the board's embedded
+  controller). Bit 31 is set in that value and is not part of the reading.
+- On both routes a field of `0` or `0x1FF` is not a reading. SysPilot also
+  drops results outside 0 to 125 °C.
+
 ## Reading hardware
 
 ### Shared bus mutexes
@@ -342,14 +381,18 @@ NCT6779D, i801 SMBus with no module behind it) with driver 2.2.0 and modules
 
 - **Read on hardware**: the device interface (open, version, load, execute),
   `IntelMSR` (temperatures, RAPL package counter), `LpcIO` with the NCT6779D
-  (detection, 26 sensors), and `SmbusI801` identity and the empty scan of
-  `0x50`–`0x57`.
+  (detection, 26 sensors), `SmbusI801` identity and the empty scan of
+  `0x50`–`0x57`, and `IntelPCHThermal` on route 1 (the thermal function
+  `8086:8C24`: identity and raw reads).
 - **Replay only** (recorded or hand-written registers, no driver):
   - the AMD provider and `AMDFamily17` (SMN thermal block, CCD layout, Tctl
     offsets);
   - DIMM decoding: DDR4 SPD, the JC-42.4 sensor and the SPD5118 hub;
   - every Super I/O chip other than the NCT6779D: the ITE IT87xx family and
     the NCT6791D to NCT6799D layouts, the NCT6771F and NCT6776F;
+  - `IntelPCHThermal` route 2 (the fixed PWRM window and its valid bit), and
+    the refusal paths (`STATUS_NO_SUCH_DEVICE`, a function that does not decode
+    memory);
   - the Intel DRAM energy unit and the PP0 domain;
   - the `spd-paging` write path.
 - **Not exercised at all**: the driver's error statuses beyond what the

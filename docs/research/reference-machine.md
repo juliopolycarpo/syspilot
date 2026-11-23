@@ -28,10 +28,11 @@ from datasheets and the Linux drivers; the last section lists it.
 | `cpu-sensors` | yes | 14 cores, package and per-core temperature (TjMax 100 °C); not available: package (reads 0.79 W, below the 6.0 W floor for a 120 W part), dram (counter reads 0) |
 | `board-sensors` | yes | NCT6779D (id/revision `0xc562`) at ports `0x2e`/`0x2f`, monitor at `0x0a20` (5 temperatures, 11 voltages, 5 fans, 5 duty) |
 | `memory-sensors` | no | i801 SMBus controller: nothing acknowledged at SMBus addresses `0x50`-`0x57`, so no memory module is reachable through this controller |
+| `chipset-sensors` | yes | Intel PCH `8086:8C24` at PCI `00:1f.6`, PCI thermal BAR0 at `0x383ffff14000` (256 bytes), reads 49.0 °C |
 | `fan-control` | no | Not part of this version |
 
-The driver state is `Ready { version: "2.2.0" }`. The two providers declare 42
-sensors (16 processor, 26 board). The release build of the example probes in
+The driver state is `Ready { version: "2.2.0" }`. The three providers declare 43
+sensors (16 processor, 26 board, 1 chipset). The release build of the example probes in
 about 300 to 385 ms when idle, 250 ms of it the package power watch window
 (see Processor); before that window it took about 50 to 60 ms idle and 350 ms
 with every core busy. The first version of this note measured 0.9 MiB of
@@ -203,6 +204,26 @@ thermistor at room temperature; the other chips' alternate registers cannot be
 checked here. Until a second board shows which choice loses real sensors, the
 floating inputs are shown as read.
 
+## Chipset: Intel PCH thermal
+
+Read on 2026-11-23 through the `IntelPCHThermal` module (PawnIO.Modules
+0.2.12), reads only.
+
+- The chipset is the one behind `PCI\VEN_8086&DEV_8C24`, "8 Series/C220 Series
+  Thermal". The module selected route 1 (PCI thermal BAR0): no modern LPC/eSPI
+  controller is present, the thermal function at `00:1f.6` decodes memory, and
+  BAR0 is a 64-bit memory BAR at `0x383ffff14000`, mapped for 256 bytes.
+- `ioctl_identity` returned `[1, 0x8C248086, 0x1F06, 0x383FFFF14000, 0x100]`.
+- `ioctl_read_raw` returned `[0xC6, 1]`: field 198, so 198 / 2 - 50 = 49.0 °C.
+  The register held the same value on all 10 samples of a ten-second run
+  (min 49.0, max 49.0) and on three reads half a second apart.
+- In the `driver_sensors` run that read it, the package was at 51 °C and
+  SYSTIN at 48 °C; the two SATA drives read 38 and 41 °C (see below). The
+  sensor was not compared with a second instrument, so 49 °C is plausible but
+  not independently confirmed.
+- Only the PCI route ran here. The PWRM route has never read hardware in this
+  project (see [PawnIO](pawnio.md#intelpchthermal)).
+
 ## SATA drive temperature
 
 Read on 2026-11-23 with the `sensors` example, `Get-StorageReliabilityCounter`
@@ -240,6 +261,10 @@ never read a real module.
 - The AMD provider (SMN thermal registers, CCD layout, Tctl offsets): replay
   only, against registers written from the `k10temp` driver.
 - DIMM decoding (DDR4 SPD, the JC-42.4 sensor, the SPD5118 hub): replay only.
+- The chipset temperature on the fixed PWRM route (modern client PCHs): replay
+  only, and the layout is unverified against Intel documentation. Also the
+  refusal paths of the module (no thermal function, a function that does not
+  decode memory).
 - Every Super I/O chip other than the NCT6779D, including all ITE IT87xx
   chips and the NCT6791D to NCT6799D layouts.
 - The `spd-paging` feature, which is the only SMBus write in the code. It was
