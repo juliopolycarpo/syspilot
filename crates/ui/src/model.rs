@@ -7,9 +7,10 @@ use std::collections::VecDeque;
 
 use syspilot_proto::catalog::{Catalog, Category, Direction, Level, Reboot, Tweak};
 use syspilot_proto::message::{
-    ActionState, DriverState, EntryStatus, HistoryEvent, HistoryKind, ServiceStatus, SystemInfo,
+    ActionState, DriverState, EntryStatus, FanAvailability, FanChannelStatus, FanPhase, FanStatus,
+    HistoryEvent, HistoryKind, ServiceStatus, SystemInfo,
 };
-use syspilot_proto::profile::Profile;
+use syspilot_proto::profile::{CurvePoint, Profile};
 use syspilot_proto::sensor::{DeviceClass, Sample, SensorInfo, SensorKind, SensorList};
 
 /// Samples kept per sensor for the small trend lines: one minute.
@@ -583,10 +584,286 @@ pub fn reading_tone(sensor: &SensorInfo, value: Option<f64>) -> Tone {
     }
 }
 
+/// Why fans are not controlled on this PC, in the order the user can act on
+/// it: a build without the feature cannot be fixed by anything on the PC, a
+/// missing driver can, and a board that is not validated cannot be fixed
+/// from the app at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FanGate {
+    /// Colour meaning of the explanation.
+    pub tone: Tone,
+    /// The explanation, as sentences.
+    pub text: String,
+    /// Whether installing or updating PawnIO is the way out, which makes
+    /// the page offer "Get PawnIO".
+    pub needs_driver: bool,
+}
+
+/// Ends `text` with a full stop, keeping its capitals as written.
+fn with_full_stop(text: &str) -> String {
+    let text = text.trim();
+    if text.is_empty() || text.ends_with(['.', '!', '?']) {
+        text.to_owned()
+    } else {
+        format!("{text}.")
+    }
+}
+
+/// What stops fan control, or `None` when the service follows curves.
+///
+/// Precedence: the build, then the driver (the service's own reason would
+/// only repeat it, with less detail), then the board.
+pub fn fan_gate(status: &ServiceStatus) -> Option<FanGate> {
+    if status.fans.availability == FanAvailability::NotInBuild {
+        return Some(FanGate {
+            tone: Tone::Neutral,
+            text: "This build of SysPilot cannot control fans. Fan control is left out of releases until it has been checked on real hardware, so the BIOS stays in charge of every fan."
+                .into(),
+            needs_driver: false,
+        });
+    }
+    let driver = match &status.driver {
+        DriverState::Ready { .. } => None,
+        DriverState::Missing => Some((
+            Tone::Caution,
+            "PawnIO is not installed. SysPilot reads and sets fan speeds through it.".to_owned(),
+        )),
+        DriverState::TooOld { version, required } => Some((
+            Tone::Caution,
+            format!("PawnIO {version} is too old. Version {required} or later is needed."),
+        )),
+        DriverState::Failed { error } => {
+            Some((Tone::Bad, format!("PawnIO is installed but can't be used. {}", sentence(error))))
+        }
+    };
+    if let Some((tone, why)) = driver {
+        return Some(FanGate {
+            tone,
+            text: format!("Fan control is off. {why}"),
+            needs_driver: true,
+        });
+    }
+    match &status.fans.availability {
+        FanAvailability::ReadOnly { reason } => Some(FanGate {
+            tone: Tone::Neutral,
+            text: if reason.trim().is_empty() {
+                "Fan control is off for this board.".into()
+            } else {
+                format!("Fan control is off for this board: {}", with_full_stop(reason))
+            },
+            needs_driver: false,
+        }),
+        FanAvailability::NotInBuild | FanAvailability::Controllable => None,
+    }
+}
+
+/// The line under the page title: what the page shows, and for which board.
+pub fn fan_page_subtitle(board: &str) -> String {
+    let about = "Each fan's speed, the curve that drives it and whether SysPilot follows it.";
+    match board.trim() {
+        "" => about.to_owned(),
+        board => format!("{board}. {about}"),
+    }
+}
+
+/// What the page says when there are no fan channels to list. A build
+/// without fan control never reads the board, so it says nothing about it.
+pub fn fan_channels_missing_text(fans: &FanStatus) -> String {
+    let board = fans.board.trim();
+    if fans.availability == FanAvailability::NotInBuild {
+        "Fan speeds are on the Sensors page.".into()
+    } else if board.is_empty() {
+        "This PC's board is not in SysPilot's fan catalog, so there are no fan channels to show here. Raw fan speeds are on the Sensors page."
+            .into()
+    } else {
+        format!(
+            "The catalog lists no fan channels for {board}. Raw fan speeds are on the Sensors page."
+        )
+    }
+}
+
+/// How one fan channel stands, as a badge and a sentence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FanState {
+    /// Short label, from the glossary in `docs/ui-glossary.md`.
+    pub badge: Badge,
+    /// The state in words, with the duty SysPilot asks for when it does.
+    pub text: String,
+}
+
+/// The state of a channel in words.
+///
+/// The phase says who holds the channel; `active` and the curve say why the
+/// BIOS holds it when it does.
+pub fn fan_state(channel: &FanChannelStatus) -> FanState {
+    let target = channel
+        .target_duty_pct
+        .map_or(String::new(), |duty| format!(" SysPilot is asking for {duty} %."));
+    let (badge, text) = match channel.phase {
+        FanPhase::Manual => (
+            Badge { text: "Following curve", tone: Tone::Good },
+            format!("Following its curve.{target}"),
+        ),
+        FanPhase::FailSafe => (
+            Badge { text: "Full speed", tone: Tone::Caution },
+            format!("Held at full speed because a temperature sensor failed.{target}"),
+        ),
+        FanPhase::ReleasePending => (
+            Badge { text: "Release pending", tone: Tone::Caution },
+            "Handing this fan back to the BIOS did not work. SysPilot is retrying.".to_owned(),
+        ),
+        FanPhase::Blocked => (
+            Badge { text: "Left alone", tone: Tone::Caution },
+            "Left alone: this fan was found in manual mode, with no saved setting to put back."
+                .to_owned(),
+        ),
+        FanPhase::Bios if channel.curve.is_empty() => (
+            Badge { text: "BIOS control", tone: Tone::Neutral },
+            "The BIOS controls this fan. The profile has no curve for it.".to_owned(),
+        ),
+        FanPhase::Bios if !channel.active => (
+            Badge { text: "BIOS control", tone: Tone::Neutral },
+            "The BIOS controls this fan. Its curve is shown but not followed.".to_owned(),
+        ),
+        FanPhase::Bios => (
+            Badge { text: "BIOS control", tone: Tone::Neutral },
+            "Handed back to the BIOS.".to_owned(),
+        ),
+    };
+    FanState { badge, text }
+}
+
+/// The problem of a channel as a sentence for the page, if it has one.
+pub fn fan_problem_text(channel: &FanChannelStatus) -> Option<String> {
+    let problem = channel.problem.as_deref().map(str::trim).filter(|text| !text.is_empty())?;
+    Some(format!("Problem: {}", with_full_stop(problem)))
+}
+
+/// What a channel's curve is driven by and how low it may go.
+pub fn fan_limits_text(channel: &FanChannelStatus) -> String {
+    let sources = if channel.sources.is_empty() {
+        "No temperature sensor is set.".to_owned()
+    } else {
+        format!("Driven by the hottest of {}.", channel.sources.join(", "))
+    };
+    if channel.min_duty_pct == 0 {
+        sources
+    } else {
+        // A no-break space keeps "30" and "%" on one line.
+        format!("{sources} Never below {}\u{a0}%.", channel.min_duty_pct)
+    }
+}
+
+/// The live numbers of one fan channel.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct FanReadings {
+    /// Fan speed, RPM, from the tachometer sensor.
+    pub speed: Option<f64>,
+    /// Duty the chip drives, percent, from the channel's duty sensor.
+    pub duty: Option<f64>,
+    /// The hottest of the curve's temperature sources, degrees Celsius.
+    pub temperature: Option<f64>,
+}
+
+/// Joins a channel to its sensors by key. A sensor of the wrong kind under
+/// the key counts as missing: showing a voltage as RPM would be worse than
+/// showing nothing.
+pub fn fan_readings(
+    channel: &FanChannelStatus,
+    sensors: &SensorList,
+    trends: &Trends,
+) -> FanReadings {
+    let latest = |key: &str, kind: SensorKind| {
+        let sensor = sensors.sensors.iter().find(|sensor| sensor.key == key)?;
+        if sensor.kind == kind { trends.latest(sensor.id) } else { None }
+    };
+    FanReadings {
+        speed: channel.tach_sensor.as_deref().and_then(|key| latest(key, SensorKind::Fan)),
+        duty: latest(&channel.channel, SensorKind::Duty),
+        temperature: channel
+            .sources
+            .iter()
+            .filter_map(|key| latest(key, SensorKind::Temperature))
+            .reduce(f64::max),
+    }
+}
+
+/// Temperatures every curve chart spans at least, so that the charts of
+/// different fans line up.
+const CURVE_TEMPERATURES: (f64, f64) = (20.0, 100.0);
+
+/// The temperature range a chart of `curve` spans: the usual range, widened
+/// to whole tens when a point lies outside it.
+pub fn curve_temperature_domain(curve: &[CurvePoint]) -> (f64, f64) {
+    let (mut low, mut high) = CURVE_TEMPERATURES;
+    for point in curve {
+        let temperature = f64::from(point.temp_c());
+        low = low.min((temperature / 10.0).floor() * 10.0);
+        high = high.max((temperature / 10.0).ceil() * 10.0);
+    }
+    (low, high)
+}
+
+/// A curve laid out in pixels, ready to draw. Pure data, so the mapping is
+/// tested without a window.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CurveShape {
+    /// The curve's points, left to right.
+    pub points: Vec<(f64, f64)>,
+    /// Heights of the grid lines: 0, 50 and 100 % duty.
+    pub grid: [f64; 3],
+    /// Horizontal position of the current temperature, when it is known.
+    pub marker: Option<f64>,
+    /// Temperature range the chart spans.
+    pub domain: (f64, f64),
+}
+
+/// Space kept free inside a chart, so that a point on the edge is not cut.
+const CURVE_INSET: f64 = 5.0;
+
+/// Lays `channel`'s curve out in a chart of `size` pixels.
+/// `temperature` places the marker; it is clamped to the chart's range.
+pub fn curve_shape(
+    channel: &FanChannelStatus,
+    temperature: Option<f64>,
+    (width, height): (f64, f64),
+) -> CurveShape {
+    let domain = curve_temperature_domain(&channel.curve);
+    let x = |temperature: f64| {
+        let share = (temperature.clamp(domain.0, domain.1) - domain.0) / (domain.1 - domain.0);
+        CURVE_INSET + share * (width - 2.0 * CURVE_INSET)
+    };
+    let y = |duty: f64| {
+        height - CURVE_INSET - duty.clamp(0.0, 100.0) / 100.0 * (height - 2.0 * CURVE_INSET)
+    };
+    CurveShape {
+        points: channel
+            .curve
+            .iter()
+            .map(|point| (x(f64::from(point.temp_c())), y(f64::from(point.duty_pct()))))
+            .collect(),
+        grid: [y(0.0), y(50.0), y(100.0)],
+        marker: temperature.map(x),
+        domain,
+    }
+}
+
+/// A curve as text, for screen readers and tooltips: the chart's data.
+pub fn curve_description(curve: &[CurvePoint]) -> String {
+    if curve.is_empty() {
+        return "No curve.".to_owned();
+    }
+    let points: Vec<String> = curve
+        .iter()
+        .map(|point| format!("{} °C: {} %", point.temp_c(), point.duty_pct()))
+        .collect();
+    format!("Fan curve, temperature to duty. {}.", points.join("; "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use syspilot_proto::message::ActionStatus;
+    use syspilot_proto::message::{ActionStatus, FanStatus};
     use syspilot_proto::sensor::DeviceInfo;
 
     const CATALOG: &str = r#"
@@ -985,5 +1262,310 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
         assert_eq!(ready, ("PawnIO 2.2.0 is ready.".to_owned(), Tone::Good));
         let failed = driver_text(&DriverState::Failed { error: "access denied".into() });
         assert_eq!(failed.0, "PawnIO is installed but can't be used. Access denied.");
+    }
+
+    /// A status whose only meaningful parts are the driver and fan control.
+    fn status_with_fans(driver: DriverState, availability: FanAvailability) -> ServiceStatus {
+        ServiceStatus {
+            version: "0.0.0".into(),
+            instance: "Fake".into(),
+            uptime_secs: 0,
+            console: false,
+            driver,
+            driver_url: "https://pawnio.eu/".into(),
+            features: Vec::new(),
+            subscribers: 0,
+            sampling: true,
+            os_build: 26_200,
+            log_dir: String::new(),
+            fan_control: true,
+            fans: FanStatus { availability, board: "Fake board".into(), channels: Vec::new() },
+            problems: Vec::new(),
+        }
+    }
+
+    fn ready() -> DriverState {
+        DriverState::Ready { version: "2.2.0".into() }
+    }
+
+    fn read_only(reason: &str) -> FanAvailability {
+        FanAvailability::ReadOnly { reason: reason.into() }
+    }
+
+    #[test]
+    fn a_build_without_fan_control_says_so_before_anything_else() {
+        // Even with the driver missing: installing PawnIO would not help.
+        let status = status_with_fans(DriverState::Missing, FanAvailability::NotInBuild);
+        let gate = fan_gate(&status).unwrap();
+        assert!(
+            gate.text.starts_with("This build of SysPilot cannot control fans."),
+            "(gate text): expected the build to be named first | received: {}",
+            gate.text
+        );
+        assert!(
+            !gate.needs_driver,
+            "(needs_driver): expected false for a build without the feature"
+        );
+        assert_eq!(gate.tone, Tone::Neutral);
+    }
+
+    #[test]
+    fn a_missing_or_broken_driver_outranks_the_boards_own_reason() {
+        let reason = read_only("PawnIO is not installed");
+        let missing = fan_gate(&status_with_fans(DriverState::Missing, reason.clone())).unwrap();
+        assert!(missing.needs_driver && missing.tone == Tone::Caution, "{missing:?}");
+        assert!(
+            missing.text.starts_with("Fan control is off. PawnIO is not installed."),
+            "(gate text): expected the driver sentence | received: {}",
+            missing.text
+        );
+        let old = DriverState::TooOld { version: "1.0".into(), required: "2.0".into() };
+        let old = fan_gate(&status_with_fans(old, reason.clone())).unwrap();
+        assert!(old.text.contains("PawnIO 1.0 is too old. Version 2.0 or later is needed."));
+        let failed = DriverState::Failed { error: "access denied".into() };
+        let failed = fan_gate(&status_with_fans(failed, reason)).unwrap();
+        assert_eq!(failed.tone, Tone::Bad);
+        assert!(failed.text.ends_with("can't be used. Access denied."), "{}", failed.text);
+    }
+
+    #[test]
+    fn a_read_only_board_gives_the_services_reason_as_a_sentence() {
+        let status =
+            status_with_fans(ready(), read_only("the board's entry has not been validated"));
+        let gate = fan_gate(&status).unwrap();
+        assert_eq!(
+            gate.text,
+            "Fan control is off for this board: the board's entry has not been validated."
+        );
+        assert!(!gate.needs_driver);
+        let already = status_with_fans(ready(), read_only("board not in the catalog."));
+        assert!(fan_gate(&already).unwrap().text.ends_with("catalog."), "no doubled full stop");
+        let silent = fan_gate(&status_with_fans(ready(), read_only("  "))).unwrap();
+        assert_eq!(silent.text, "Fan control is off for this board.");
+    }
+
+    #[test]
+    fn a_controllable_board_with_a_ready_driver_has_nothing_to_explain() {
+        assert_eq!(fan_gate(&status_with_fans(ready(), FanAvailability::Controllable)), None);
+    }
+
+    #[test]
+    fn the_subtitle_names_the_board_when_it_is_known() {
+        let plain = fan_page_subtitle("");
+        assert!(plain.starts_with("Each fan's speed"), "{plain}");
+        assert_eq!(fan_page_subtitle("  "), plain, "blank is unknown");
+        assert_eq!(fan_page_subtitle("Fake board"), format!("Fake board. {plain}"));
+    }
+
+    #[test]
+    fn an_empty_channel_list_points_to_the_sensors_page() {
+        let fans = |availability, board: &str| FanStatus {
+            availability,
+            board: board.into(),
+            channels: Vec::new(),
+        };
+        let unknown = fan_channels_missing_text(&fans(read_only("x"), ""));
+        assert!(unknown.contains("not in SysPilot's fan catalog"), "{unknown}");
+        assert!(unknown.ends_with("on the Sensors page."), "{unknown}");
+        let known = fan_channels_missing_text(&fans(read_only("x"), " Fake board "));
+        assert!(known.starts_with("The catalog lists no fan channels for Fake board."), "{known}");
+        // Without the feature nothing was looked up, so the catalog is not blamed.
+        let unbuilt = fan_channels_missing_text(&fans(FanAvailability::NotInBuild, ""));
+        assert_eq!(unbuilt, "Fan speeds are on the Sensors page.");
+    }
+
+    fn channel(phase: FanPhase) -> FanChannelStatus {
+        FanChannelStatus {
+            channel: "board.pwm2".into(),
+            label: "Rear fan".into(),
+            tach_sensor: Some("board.fan2".into()),
+            min_duty_pct: 30,
+            curve: vec![CurvePoint(40, 30), CurvePoint(60, 60), CurvePoint(80, 100)],
+            sources: vec!["cpu.package.temp".into(), "board.temp1".into()],
+            active: true,
+            target_duty_pct: Some(42),
+            phase,
+            problem: None,
+        }
+    }
+
+    #[test]
+    fn every_phase_is_told_in_its_own_words() {
+        let state = |phase| fan_state(&channel(phase));
+        let manual = state(FanPhase::Manual);
+        assert_eq!(manual.badge, Badge { text: "Following curve", tone: Tone::Good });
+        assert_eq!(manual.text, "Following its curve. SysPilot is asking for 42 %.");
+        let failsafe = state(FanPhase::FailSafe);
+        assert_eq!(failsafe.badge.tone, Tone::Caution);
+        assert_eq!(
+            failsafe.text,
+            "Held at full speed because a temperature sensor failed. SysPilot is asking for 42 %."
+        );
+        let release = state(FanPhase::ReleasePending);
+        assert_eq!(release.badge.text, "Release pending");
+        assert!(release.text.ends_with("SysPilot is retrying."), "{}", release.text);
+        let blocked = state(FanPhase::Blocked);
+        assert_eq!(blocked.badge.text, "Left alone");
+        assert!(blocked.text.starts_with("Left alone: this fan was found in manual mode"));
+        assert_eq!(state(FanPhase::Bios).text, "Handed back to the BIOS.");
+    }
+
+    #[test]
+    fn a_channel_the_bios_holds_says_why_it_does() {
+        let mut no_curve = channel(FanPhase::Bios);
+        no_curve.curve.clear();
+        assert_eq!(
+            fan_state(&no_curve).text,
+            "The BIOS controls this fan. The profile has no curve for it."
+        );
+        let mut not_followed = channel(FanPhase::Bios);
+        not_followed.active = false;
+        not_followed.target_duty_pct = None;
+        assert_eq!(
+            fan_state(&not_followed).text,
+            "The BIOS controls this fan. Its curve is shown but not followed."
+        );
+        // A target is only mentioned while SysPilot holds the channel.
+        let mut manual = channel(FanPhase::Manual);
+        manual.target_duty_pct = None;
+        assert_eq!(fan_state(&manual).text, "Following its curve.");
+    }
+
+    #[test]
+    fn a_problem_is_shown_only_when_there_is_one() {
+        let mut with_problem = channel(FanPhase::FailSafe);
+        assert_eq!(fan_problem_text(&with_problem), None);
+        with_problem.problem = Some("board.temp2 stopped answering".into());
+        assert_eq!(
+            fan_problem_text(&with_problem).as_deref(),
+            Some("Problem: board.temp2 stopped answering.")
+        );
+        with_problem.problem = Some("   ".into());
+        assert_eq!(fan_problem_text(&with_problem), None, "blank text is no problem");
+    }
+
+    #[test]
+    fn limits_name_the_sources_and_the_lowest_duty() {
+        assert_eq!(
+            fan_limits_text(&channel(FanPhase::Manual)),
+            "Driven by the hottest of cpu.package.temp, board.temp1. Never below 30\u{a0}%."
+        );
+        let mut bare = channel(FanPhase::Bios);
+        bare.sources.clear();
+        bare.min_duty_pct = 0;
+        assert_eq!(fan_limits_text(&bare), "No temperature sensor is set.");
+    }
+
+    /// A sensor list and trends standing in for the shared-memory samples.
+    fn fake_sensors(readings: &[(&str, SensorKind, Option<f64>)]) -> (SensorList, Trends) {
+        let sensors = readings
+            .iter()
+            .enumerate()
+            .map(|(id, (key, kind, _))| SensorInfo {
+                id: id as u32,
+                device: 0,
+                key: (*key).into(),
+                label: (*key).into(),
+                kind: *kind,
+                driver: true,
+            })
+            .collect();
+        let samples: Vec<Sample> = readings
+            .iter()
+            .enumerate()
+            .map(|(id, (_, _, value))| Sample { id: id as u32, value: *value })
+            .collect();
+        let mut trends = Trends::default();
+        trends.push(1, &samples);
+        (SensorList { generation: 1, devices: Vec::new(), sensors }, trends)
+    }
+
+    #[test]
+    fn a_channel_is_joined_to_its_tachometer_duty_and_hottest_source() {
+        let (sensors, trends) = fake_sensors(&[
+            ("board.fan2", SensorKind::Fan, Some(910.0)),
+            ("board.pwm2", SensorKind::Duty, Some(42.0)),
+            ("cpu.package.temp", SensorKind::Temperature, Some(55.0)),
+            ("board.temp1", SensorKind::Temperature, Some(36.0)),
+        ]);
+        assert_eq!(
+            fan_readings(&channel(FanPhase::Manual), &sensors, &trends),
+            FanReadings { speed: Some(910.0), duty: Some(42.0), temperature: Some(55.0) }
+        );
+    }
+
+    #[test]
+    fn a_missing_failed_or_mistyped_sensor_leaves_a_gap_instead_of_a_wrong_number() {
+        let (sensors, trends) = fake_sensors(&[
+            // Under the tachometer's key, but a voltage: not a speed.
+            ("board.fan2", SensorKind::Voltage, Some(12.0)),
+            ("board.pwm2", SensorKind::Duty, None),
+            ("board.temp1", SensorKind::Temperature, Some(36.0)),
+        ]);
+        let readings = fan_readings(&channel(FanPhase::Manual), &sensors, &trends);
+        assert_eq!(
+            readings,
+            // The first source is absent and the second still counts.
+            FanReadings { speed: None, duty: None, temperature: Some(36.0) },
+            "(readings): expected gaps for a mistyped, failed and absent sensor"
+        );
+        let mut untied = channel(FanPhase::Manual);
+        untied.tach_sensor = None;
+        untied.sources.clear();
+        assert_eq!(fan_readings(&untied, &sensors, &trends), FanReadings::default());
+    }
+
+    #[test]
+    fn the_chart_spans_the_usual_temperatures_and_widens_for_outliers() {
+        assert_eq!(curve_temperature_domain(&[]), (20.0, 100.0));
+        assert_eq!(
+            curve_temperature_domain(&[CurvePoint(30, 30), CurvePoint(90, 100)]),
+            (20.0, 100.0)
+        );
+        assert_eq!(
+            curve_temperature_domain(&[CurvePoint(5, 30), CurvePoint(107, 100)]),
+            (0.0, 110.0)
+        );
+    }
+
+    #[test]
+    fn curve_points_land_inside_the_chart_with_duty_growing_upwards() {
+        let shape = curve_shape(&channel(FanPhase::Manual), Some(60.0), (200.0, 100.0));
+        // 20 to 100 °C over 190 px of plot (5 px inset each side).
+        let expected_x =
+            [5.0 + 20.0 / 80.0 * 190.0, 5.0 + 40.0 / 80.0 * 190.0, 5.0 + 60.0 / 80.0 * 190.0];
+        for (index, (x, _)) in shape.points.iter().enumerate() {
+            assert!(
+                (x - expected_x[index]).abs() < 1e-9,
+                "(point {index} x): expected {} | received: {x}",
+                expected_x[index]
+            );
+        }
+        let heights: Vec<f64> = shape.points.iter().map(|(_, y)| *y).collect();
+        assert!(heights[0] > heights[1] && heights[1] > heights[2], "{heights:?}");
+        assert_eq!(shape.grid, [95.0, 50.0, 5.0], "0, 50 and 100 % duty");
+        assert_eq!(shape.marker, Some(5.0 + 40.0 / 80.0 * 190.0));
+        assert_eq!(shape.domain, (20.0, 100.0));
+    }
+
+    #[test]
+    fn the_temperature_marker_stays_on_the_chart_and_is_absent_without_a_reading() {
+        let mut flat = channel(FanPhase::Manual);
+        flat.curve.clear();
+        let hot = curve_shape(&flat, Some(300.0), (200.0, 100.0));
+        assert_eq!(hot.marker, Some(195.0), "clamped to the right edge");
+        let cold = curve_shape(&flat, Some(-5.0), (200.0, 100.0));
+        assert_eq!(cold.marker, Some(5.0), "clamped to the left edge");
+        assert_eq!(curve_shape(&flat, None, (200.0, 100.0)).marker, None);
+        assert!(hot.points.is_empty(), "no curve, no points");
+    }
+
+    #[test]
+    fn a_curve_is_described_in_words_for_screen_readers() {
+        assert_eq!(
+            curve_description(&[CurvePoint(40, 30), CurvePoint(80, 100)]),
+            "Fan curve, temperature to duty. 40 °C: 30 %; 80 °C: 100 %."
+        );
+        assert_eq!(curve_description(&[]), "No curve.");
     }
 }

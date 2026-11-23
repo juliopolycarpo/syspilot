@@ -5,7 +5,7 @@
 
 use windows_reactor::*;
 
-use crate::model::{Badge, Tone};
+use crate::model::{Badge, CurveShape, Tone};
 
 /// Space between tightly related things, e.g. a title and its caption.
 pub const GAP_TIGHT: f64 = 4.0;
@@ -54,6 +54,9 @@ pub mod glyph {
     pub const APPEARANCE: &str = "\u{E790}";
     /// A pulse line.
     pub const SENSORS: &str = "\u{E9D9}";
+    /// A thermometer. Segoe Fluent Icons has no fan, and a fan curve is
+    /// the fan's answer to temperature.
+    pub const FANS: &str = "\u{E9CA}";
     /// A computer.
     pub const SYSTEM: &str = "\u{E7F8}";
     /// Angle brackets.
@@ -318,6 +321,73 @@ pub fn sparkline(
     Canvas::new().width(width).height(height).keyed_children(segments)
 }
 
+/// Size of the dots on a curve's points.
+const CURVE_DOT: f64 = 8.0;
+/// Opacity of the grid lines and of the marker line: quieter than the data.
+const CHART_GRID: f64 = 0.18;
+
+/// A fan curve as a line chart: the points joined, a faint grid at 0, 50
+/// and 100 %, and a vertical line at the current temperature. `followed`
+/// says whether the service acts on the curve; one that it does not is drawn
+/// at half strength, so it reads as a preview and not as a state.
+///
+/// Everything is the one series colour (the curve) on the text colour at low
+/// opacity (the grid), so it holds in light, dark and contrast themes alike.
+pub fn curve_chart(
+    shape: &CurveShape,
+    (width, height): (f64, f64),
+    colour: Brush,
+    followed: bool,
+) -> View {
+    let strength = if followed { 1.0 } else { 0.5 };
+    let mut parts: Vec<KeyedView> = Vec::new();
+    for (index, y) in shape.grid.iter().enumerate() {
+        let line = Line::new()
+            .x1(0.0)
+            .y1(*y)
+            .x2(width)
+            .y2(*y)
+            .stroke(ThemeBrush::PrimaryText)
+            .stroke_thickness(1.0)
+            .opacity(CHART_GRID);
+        parts.push(KeyedView::new(format!("grid-{index}"), line));
+    }
+    if let Some(x) = shape.marker {
+        let line = Line::new()
+            .x1(x)
+            .y1(0.0)
+            .x2(x)
+            .y2(height)
+            .stroke(ThemeBrush::PrimaryText)
+            .stroke_thickness(1.0)
+            .opacity(0.6);
+        parts.push(KeyedView::new("now", line));
+    }
+    for (index, pair) in shape.points.windows(2).enumerate() {
+        let ((x1, y1), (x2, y2)) = (pair[0], pair[1]);
+        let line = Line::new()
+            .x1(x1)
+            .y1(y1)
+            .x2(x2)
+            .y2(y2)
+            .stroke(colour)
+            .stroke_thickness(2.0)
+            .opacity(strength);
+        parts.push(KeyedView::new(format!("segment-{index}"), line));
+    }
+    for (index, (x, y)) in shape.points.iter().enumerate() {
+        let dot = Ellipse::new()
+            .width(CURVE_DOT)
+            .height(CURVE_DOT)
+            .fill(colour)
+            .canvas_left(x - CURVE_DOT / 2.0)
+            .canvas_top(y - CURVE_DOT / 2.0)
+            .opacity(strength);
+        parts.push(KeyedView::new(format!("point-{index}"), dot));
+    }
+    Canvas::new().width(width).height(height).keyed_children(parts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,6 +408,26 @@ mod tests {
             Palette::new(ColorScheme::Light, false).chart(),
             Palette::new(ColorScheme::Dark, false).chart()
         );
+    }
+
+    #[test]
+    fn a_curve_chart_builds_for_a_curve_a_lone_point_and_no_curve() {
+        let shape = |points: Vec<(f64, f64)>, marker| CurveShape {
+            points,
+            grid: [95.0, 50.0, 5.0],
+            marker,
+            domain: (20.0, 100.0),
+        };
+        let colour = Palette::new(ColorScheme::Dark, false).chart();
+        let size = (280.0, 100.0);
+        for (points, marker, followed) in [
+            (vec![(5.0, 90.0), (100.0, 50.0), (270.0, 5.0)], Some(120.0), true),
+            (vec![(5.0, 90.0)], None, false),
+            (Vec::new(), Some(10.0), true),
+        ] {
+            // Building must not panic on any shape the model can produce.
+            let _ = curve_chart(&shape(points, marker), size, colour, followed);
+        }
     }
 
     #[test]

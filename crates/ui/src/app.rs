@@ -51,6 +51,8 @@ pub enum Page {
     Tweaks(Category),
     /// Live sensor readings.
     Sensors,
+    /// Fan speeds and curves. Advanced level only.
+    Fans,
     /// Hardware and software inventory.
     System,
     /// User-defined actions. Advanced level only.
@@ -63,7 +65,7 @@ pub enum Page {
 
 impl Page {
     /// Every page, in pane order.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Home,
         Self::Tweaks(Category::Performance),
         Self::Tweaks(Category::Privacy),
@@ -71,6 +73,7 @@ impl Page {
         Self::Tweaks(Category::Reliability),
         Self::Tweaks(Category::Other),
         Self::Sensors,
+        Self::Fans,
         Self::System,
         Self::Custom,
         Self::History,
@@ -87,6 +90,7 @@ impl Page {
             Self::Tweaks(Category::Reliability) => "reliability",
             Self::Tweaks(Category::Other) => "look-and-feel",
             Self::Sensors => "sensors",
+            Self::Fans => "fans",
             Self::System => "system",
             Self::Custom => "custom-actions",
             Self::History => "history",
@@ -105,6 +109,7 @@ impl Page {
             Self::Home => "Home",
             Self::Tweaks(category) => model::category_name(category),
             Self::Sensors => "Sensors",
+            Self::Fans => "Fans",
             Self::System => "System",
             Self::Custom => "Custom actions",
             Self::History => "History",
@@ -121,6 +126,7 @@ impl Page {
             Self::Tweaks(Category::Reliability) => glyph::RELIABILITY,
             Self::Tweaks(Category::Other) => glyph::APPEARANCE,
             Self::Sensors => glyph::SENSORS,
+            Self::Fans => glyph::FANS,
             Self::System => glyph::SYSTEM,
             Self::Custom => glyph::CUSTOM,
             Self::History => glyph::HISTORY,
@@ -130,12 +136,12 @@ impl Page {
 
     /// Whether the page exists at `level`.
     pub fn exists_at(self, level: ViewLevel) -> bool {
-        level == ViewLevel::Advanced || !matches!(self, Self::Custom | Self::History)
+        level == ViewLevel::Advanced || !matches!(self, Self::Fans | Self::Custom | Self::History)
     }
 
     /// Whether the page shows live sensor readings.
     fn shows_readings(self) -> bool {
-        matches!(self, Self::Home | Self::Sensors)
+        matches!(self, Self::Home | Self::Sensors | Self::Fans)
     }
 }
 
@@ -795,6 +801,7 @@ impl App {
             Page::Home => pages::home::view(self, context),
             Page::Tweaks(category) => pages::tweaks::view(self, category, context),
             Page::Sensors => pages::sensors::view(self, context),
+            Page::Fans => pages::fans::view(self, context),
             Page::System => pages::system::view(self),
             Page::Custom => pages::custom::view(self, context),
             Page::History => pages::history::view(self, context),
@@ -868,17 +875,17 @@ mod tests {
     }
 
     #[test]
-    fn simple_level_has_no_custom_actions_or_history() {
+    fn simple_level_has_no_fans_custom_actions_or_history() {
         let hidden: Vec<Page> =
             Page::ALL.into_iter().filter(|page| !page.exists_at(ViewLevel::Simple)).collect();
-        assert_eq!(hidden, [Page::Custom, Page::History]);
+        assert_eq!(hidden, [Page::Fans, Page::Custom, Page::History]);
         assert!(Page::ALL.into_iter().all(|page| page.exists_at(ViewLevel::Advanced)));
     }
 
     #[test]
     fn only_pages_with_readings_ask_for_redraws() {
         let live: Vec<Page> = Page::ALL.into_iter().filter(|page| page.shows_readings()).collect();
-        assert_eq!(live, [Page::Home, Page::Sensors]);
+        assert_eq!(live, [Page::Home, Page::Sensors, Page::Fans]);
     }
 
     /// A listener that plays back a fixed list of changes, then fails.

@@ -2,6 +2,7 @@
 //! messages back; none of them keeps state or talks to the backend.
 
 pub mod custom;
+pub mod fans;
 pub mod history;
 pub mod home;
 pub mod offline;
