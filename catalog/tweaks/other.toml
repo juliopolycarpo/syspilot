@@ -43,7 +43,7 @@ registry = { scope = "machine", key = 'SOFTWARE\Policies\Microsoft\Dsh', name = 
 id = "other.clipboard-history"
 title = "Turn off clipboard history"
 summary = "Windows stops keeping a list of what you copied, so Win+V has nothing to show."
-detail = '''Policy: Computer Configuration > Administrative Templates > System > OS Policies > Allow Clipboard History (AllowClipboardHistory). Sets HKLM\Software\Policies\Microsoft\Windows\System\AllowClipboardHistory (REG_DWORD) to 0 (not allowed). Clipboard contents are then not stored in memory as a history. The change takes effect immediately, and the Clipboard page in Settings is greyed out with a policy warning. Applies to Windows 10 1809 and later and Windows 11.'''
+detail = '''Policy: Computer Configuration > Administrative Templates > System > OS Policies > Allow Clipboard History (AllowClipboardHistory). Sets HKLM\Software\Policies\Microsoft\Windows\System\AllowClipboardHistory (REG_DWORD) to 0 (not allowed). Clipboard contents are then not stored in memory as a history. The change takes effect immediately, and the Clipboard setting in Settings is grayed out with a policy warning. Applies to Windows 10 1809 and later and Windows 11.'''
 level = "advanced"
 category = "other"
 side-effects = "Win+V no longer lists earlier copies."
@@ -56,11 +56,11 @@ registry = { scope = "machine", key = 'Software\Policies\Microsoft\Windows\Syste
 id = "other.consumer-experiences"
 title = "Turn off Microsoft consumer experiences"
 summary = "Windows stops showing Start suggestions and membership notifications, and stops installing promoted apps after setup."
-detail = '''Policy: Computer Configuration > Administrative Templates > Windows Components > Cloud Content > Turn off Microsoft consumer experiences. Sets HKLM\SOFTWARE\Policies\Microsoft\Windows\CloudContent\DisableWindowsConsumerFeatures (REG_DWORD) to 1. Microsoft lists the policy for the Enterprise and Education editions only; Windows Pro does not honor it.'''
+detail = '''Policy: Computer Configuration > Administrative Templates > Windows Components > Cloud Content > Turn off Microsoft consumer experiences. Sets HKLM\SOFTWARE\Policies\Microsoft\Windows\CloudContent\DisableWindowsConsumerFeatures (REG_DWORD) to 1. Microsoft's Policy CSP reference describes the matching policy (AllowWindowsConsumerFeatures) as controlling experiences that are typically for consumers only: Start suggestions, membership notifications, post-OOBE app install and redirect tiles. It lists the policy for the Enterprise and Education editions only, not Pro.'''
 level = "advanced"
 category = "other"
 side-effects = "No effect on editions other than Enterprise and Education."
-source = "https://learn.microsoft.com/windows/client-management/mdm/policy-csp-experience#allowwindowsconsumerfeatures"
+source = "https://learn.microsoft.com/windows/privacy/manage-connections-from-windows-operating-system-components-to-microsoft-services"
 
 [[tweak.action]]
 registry = { scope = "machine", key = 'SOFTWARE\Policies\Microsoft\Windows\CloudContent', name = "DisableWindowsConsumerFeatures", data = { dword = 1 } }
@@ -69,11 +69,11 @@ registry = { scope = "machine", key = 'SOFTWARE\Policies\Microsoft\Windows\Cloud
 id = "other.windows-spotlight"
 title = "Turn off all Windows Spotlight features"
 summary = "Windows Spotlight on the lock screen, Windows tips and related suggestions are turned off for the user."
-detail = '''Policy: User Configuration > Administrative Templates > Windows Components > Cloud Content > Turn off all Windows spotlight features. Sets HKCU\SOFTWARE\Policies\Microsoft\Windows\CloudContent\DisableWindowsSpotlightFeatures (REG_DWORD) to 1. Microsoft states that this turns off Windows Spotlight on the lock screen, Windows tips, Microsoft consumer features and other related features, and lists it for the Enterprise and Education editions only.'''
+detail = '''Policy: User Configuration > Administrative Templates > Windows Components > Cloud Content > Turn off all Windows spotlight features. Sets HKCU\SOFTWARE\Policies\Microsoft\Windows\CloudContent\DisableWindowsSpotlightFeatures (REG_DWORD) to 1. Microsoft's Policy CSP reference says the matching policy (AllowWindowsSpotlight) turns off Windows Spotlight on the lock screen, Windows Tips, Microsoft consumer features and other related features, and lists it for the Enterprise and Education editions only, not Pro.'''
 level = "advanced"
 category = "other"
 side-effects = "No effect on editions other than Enterprise and Education."
-source = "https://learn.microsoft.com/windows/client-management/mdm/policy-csp-experience#allowwindowsspotlight"
+source = "https://learn.microsoft.com/windows/privacy/manage-connections-from-windows-operating-system-components-to-microsoft-services"
 
 [[tweak.action]]
 registry = { scope = "user", key = 'SOFTWARE\Policies\Microsoft\Windows\CloudContent', name = "DisableWindowsSpotlightFeatures", data = { dword = 1 } }
