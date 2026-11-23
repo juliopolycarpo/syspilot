@@ -11,15 +11,18 @@
 
 use std::io::{self, Read, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use syspilot_hw::{Provider, SensorSpec};
-use syspilot_proto::frame::read_frame;
-use syspilot_proto::message::{DriverState, SystemInfo};
+use syspilot_proto::frame::{read_frame, write_frame};
+use syspilot_proto::message::{DriverState, FanRuntime, FanStatus, SystemInfo};
 use syspilot_proto::sensor::SensorList;
-use syspilot_proto::worker::{Probed, SAMPLE_REQUEST, WORKER_EXECUTABLE, WorkerFrame};
+use syspilot_proto::worker::{
+    FANS_REQUEST, FanPlan, Probed, RESUME_REQUEST, SAMPLE_REQUEST, SUSPEND_REQUEST,
+    WORKER_EXECUTABLE, WorkerFrame,
+};
 
 use crate::hardware::{DriverReport, Hardware};
 
@@ -81,17 +84,87 @@ impl WorkerSpawner for ProcessSpawner {
     }
 }
 
+/// What the service wants of the fans and what the controller last said,
+/// shared by [`WorkerHardware`] (which is told) and the worker that is
+/// currently live (which carries it out and reports).
+#[derive(Default)]
+struct FanLink {
+    /// The curves to follow. `None` until the service first has any.
+    plan: Option<FanPlan>,
+    /// Counts plans, so that a worker knows whether it has the latest.
+    serial: u64,
+    /// The machine is asleep or about to be: the controller lets go.
+    suspended: bool,
+    /// The controller's last report. Empty when no worker is live, which
+    /// reads as "the BIOS holds every channel".
+    runtime: Vec<FanRuntime>,
+    /// The input of the worker that is sampling, so that a plan or a sleep
+    /// reaches it at once and not with the next sample. Weak: the worker
+    /// owns its input, and ending it must close the pipe.
+    pipe: Weak<Mutex<WorkerPipe>>,
+}
+
+type SharedFans = Arc<Mutex<FanLink>>;
+
+fn fans_of(shared: &SharedFans) -> MutexGuard<'_, FanLink> {
+    // What the link holds stays consistent whichever thread panicked.
+    shared.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The input of one worker and what that worker was already told about the
+/// fans; a new worker has been told nothing.
+///
+/// Lock order: the link first and only briefly, never while holding this.
+struct WorkerPipe {
+    writer: Box<dyn Write + Send>,
+    sent_serial: u64,
+    sent_suspended: bool,
+}
+
+fn pipe_of(pipe: &Mutex<WorkerPipe>) -> MutexGuard<'_, WorkerPipe> {
+    pipe.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl WorkerPipe {
+    fn send(&mut self, bytes: &[u8]) -> Option<()> {
+        self.writer.write_all(bytes).and_then(|()| self.writer.flush()).ok()
+    }
+
+    /// Tells the worker about a newer plan and a change of sleep, if any.
+    /// `None` when the worker cannot be written to.
+    fn push_fans(&mut self, shared: &SharedFans) -> Option<()> {
+        let (plan, serial, suspended) = {
+            let link = fans_of(shared);
+            let news = (link.serial != self.sent_serial).then(|| link.plan.clone()).flatten();
+            (news, link.serial, link.suspended)
+        };
+        if let Some(plan) = plan {
+            // The byte and the frame go out in one write.
+            let mut bytes = vec![FANS_REQUEST];
+            write_frame(&mut bytes, &plan).ok()?;
+            self.send(&bytes)?;
+        }
+        self.sent_serial = serial;
+        if suspended != self.sent_suspended {
+            self.send(&[if suspended { SUSPEND_REQUEST } else { RESUME_REQUEST }])?;
+            self.sent_suspended = suspended;
+        }
+        Some(())
+    }
+}
+
 /// A running worker as the service holds it.
 struct Worker {
     /// `None` once the worker was told to end.
-    requests: Option<Box<dyn Write + Send>>,
+    requests: Option<Arc<Mutex<WorkerPipe>>>,
     /// Frames, read by a thread so that waiting for one can time out.
     frames: Receiver<WorkerFrame>,
     process: Option<Child>,
+    fans: SharedFans,
 }
 
 impl Worker {
-    fn start(link: WorkerLink) -> Self {
+    fn start(link: WorkerLink, fans: SharedFans) -> Self {
         let (sender, frames) = mpsc::channel();
         let mut source = link.frames;
         // Ends when the worker closes its output or the receiver is gone.
@@ -102,7 +175,8 @@ impl Worker {
                 }
             }
         });
-        Self { requests: Some(link.requests), frames, process: link.process }
+        let pipe = WorkerPipe { writer: link.requests, sent_serial: 0, sent_suspended: false };
+        Self { requests: Some(Arc::new(Mutex::new(pipe))), frames, process: link.process, fans }
     }
 
     /// Waits for the worker's report of what it found.
@@ -134,13 +208,26 @@ impl Worker {
         }
     }
 
-    /// Asks for one sample. `None` when the worker is gone or too slow.
+    /// Asks for one sample. `None` when the worker is gone or too slow. The
+    /// fan plan and the controller's reports travel along: the plan goes
+    /// first, and a report that arrives before the answer is kept.
     fn sample(&mut self) -> Option<Vec<Option<f64>>> {
-        let requests = self.requests.as_mut()?;
-        requests.write_all(&[SAMPLE_REQUEST]).and_then(|()| requests.flush()).ok()?;
-        match self.frames.recv_timeout(SAMPLE_TIMEOUT) {
-            Ok(WorkerFrame::Sample(values)) => Some(values),
-            _ => None,
+        let pipe = self.requests.clone()?;
+        // A worker that samples is the one a plan or a sleep must reach.
+        fans_of(&self.fans).pipe = Arc::downgrade(&pipe);
+        {
+            let mut pipe = pipe_of(&pipe);
+            pipe.push_fans(&self.fans)?;
+            pipe.send(&[SAMPLE_REQUEST])?;
+        }
+        let deadline = Instant::now() + SAMPLE_TIMEOUT;
+        loop {
+            let wait = deadline.saturating_duration_since(Instant::now());
+            match self.frames.recv_timeout(wait) {
+                Ok(WorkerFrame::Sample(values)) => return Some(values),
+                Ok(WorkerFrame::Fans(runtime)) => fans_of(&self.fans).runtime = runtime,
+                Ok(WorkerFrame::Probed(_)) | Err(_) => return None,
+            }
         }
     }
 }
@@ -201,6 +288,7 @@ struct WorkerProvider {
     restart_delay: Duration,
     specs: Vec<SensorSpec>,
     needs_driver: Vec<bool>,
+    fans: SharedFans,
 }
 
 impl WorkerProvider {
@@ -209,6 +297,7 @@ impl WorkerProvider {
         sensors: &SensorList,
         spawner: Arc<dyn WorkerSpawner>,
         restart_delay: Duration,
+        fans: SharedFans,
     ) -> Self {
         let needs_driver = sensors.sensors.iter().map(|sensor| sensor.driver).collect();
         Self {
@@ -217,6 +306,7 @@ impl WorkerProvider {
             restart_delay,
             specs: specs_of(sensors),
             needs_driver,
+            fans,
         }
     }
 
@@ -235,12 +325,17 @@ impl WorkerProvider {
                 Some(values) if values.len() == self.specs.len() => {
                     (Link::Live(worker), Some(values))
                 }
-                _ => (Self::down(self.restart_delay), None),
+                _ => {
+                    // The worker hands the fans back when it ends; what it
+                    // last reported is no longer true.
+                    fans_of(&self.fans).runtime.clear();
+                    (Self::down(self.restart_delay), None)
+                }
             },
             Link::Down { retry_at, delay } if Instant::now() >= retry_at => {
                 match self.spawner.spawn() {
                     Ok(link) => {
-                        let worker = Worker::start(link);
+                        let worker = Worker::start(link, self.fans.clone());
                         (Link::Restarting { worker, since: Instant::now(), delay }, None)
                     }
                     Err(_) => (Self::down(delay), None),
@@ -281,6 +376,13 @@ impl Provider for WorkerProvider {
     }
 }
 
+impl Drop for WorkerProvider {
+    fn drop(&mut self) {
+        // Sampling stopped: the worker ends and with it the controller.
+        fans_of(&self.fans).runtime.clear();
+    }
+}
+
 /// The machine's hardware, reached through workers.
 pub struct WorkerHardware {
     spawner: Arc<dyn WorkerSpawner>,
@@ -299,6 +401,8 @@ pub struct WorkerHardware {
     /// [`Hardware::providers`] is asked, so that it answers "none" instead
     /// of trying again while the caller waits.
     failed: bool,
+    /// What the service wants of the fans and what the controller said.
+    fans: SharedFans,
 }
 
 impl WorkerHardware {
@@ -312,6 +416,7 @@ impl WorkerHardware {
             probing: None,
             ready: None,
             failed: false,
+            fans: SharedFans::default(),
         }
     }
 
@@ -355,7 +460,7 @@ impl WorkerHardware {
     fn probe_without_waiting(&mut self) -> bool {
         match self.spawner.spawn() {
             Ok(link) => {
-                self.probing = Some((Worker::start(link), Instant::now()));
+                self.probing = Some((Worker::start(link, self.fans.clone()), Instant::now()));
                 true
             }
             Err(error) => {
@@ -375,9 +480,17 @@ impl WorkerHardware {
             .spawner
             .spawn()
             .map_err(|error| format!("The sensor worker could not be started: {error}"))?;
-        let mut worker = Worker::start(link);
+        let mut worker = Worker::start(link, self.fans.clone());
         let probed = worker.probed()?;
         Ok((worker, probed))
+    }
+
+    /// Sends what is new to the live worker's input, if there is one. A
+    /// worker that cannot be written to is dealt with by its next sample.
+    fn push_to(&self, pipe: Option<Arc<Mutex<WorkerPipe>>>) {
+        if let Some(pipe) = pipe {
+            let _ = pipe_of(&pipe).push_fans(&self.fans);
+        }
     }
 
     /// Stores a report, or the fact that none could be made. Either way
@@ -444,6 +557,7 @@ impl Hardware for WorkerHardware {
                     &probed.sensors,
                     self.spawner.clone(),
                     self.restart_delay,
+                    self.fans.clone(),
                 );
                 self.remember(Ok(probed));
                 if provider.specs.is_empty() { Vec::new() } else { vec![Box::new(provider)] }
@@ -458,15 +572,46 @@ impl Hardware for WorkerHardware {
     fn system_info(&mut self) -> SystemInfo {
         self.report().system.clone()
     }
+
+    fn fan_layout(&mut self) -> FanStatus {
+        self.report().fans.clone()
+    }
+
+    fn known_fan_layout(&mut self) -> Option<FanStatus> {
+        let current = self.report_is_current();
+        self.report.as_ref().filter(|_| current).map(|(_, probed)| probed.fans.clone())
+    }
+
+    fn set_fan_plan(&mut self, plan: FanPlan) {
+        let pipe = {
+            let mut link = fans_of(&self.fans);
+            link.plan = Some(plan);
+            link.serial += 1;
+            link.pipe.upgrade()
+        };
+        self.push_to(pipe);
+    }
+
+    fn fan_runtime(&mut self) -> Vec<FanRuntime> {
+        fans_of(&self.fans).runtime.clone()
+    }
+
+    fn set_fans_suspended(&mut self, suspended: bool) {
+        let pipe = {
+            let mut link = fans_of(&self.fans);
+            link.suspended = suspended;
+            link.pipe.upgrade()
+        };
+        // A machine about to sleep cannot wait for the next sample.
+        self.push_to(pipe);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use std::sync::{Arc, Mutex};
     use syspilot_hw::Hub;
-    use syspilot_proto::frame::write_frame;
     use syspilot_proto::message::{Feature, SystemSummary};
     use syspilot_proto::sensor::{DeviceClass, DeviceInfo, SensorInfo, SensorKind};
 
@@ -774,12 +919,230 @@ mod tests {
             frames: Box::new(frame_reader),
             process: None,
         };
-        let mut worker = Worker::start(link);
+        let mut worker = Worker::start(link, SharedFans::default());
         worker.probed().unwrap();
         drop(worker);
         // The fake returns when its input ends; a join that never returns
         // would fail the test by timing out.
         worker_thread.join().unwrap();
+    }
+
+    /// What a fan-aware fake worker was asked to do, in order.
+    #[derive(Debug, Clone, PartialEq)]
+    enum Told {
+        Plan(usize),
+        Suspend,
+        Resume,
+    }
+
+    /// What the fake controller answers a plan with.
+    fn manual_report() -> Vec<FanRuntime> {
+        vec![FanRuntime {
+            channel: "board.pwm1".into(),
+            phase: syspilot_proto::message::FanPhase::Manual,
+            target_duty_pct: Some(40),
+            problem: None,
+        }]
+    }
+
+    /// A worker that speaks the fan part of the protocol: it records what it
+    /// is told, answers a plan with a controller report as the real worker
+    /// does, and answers samples until `answers` of them were given.
+    fn fan_worker(
+        mut requests: impl Read,
+        mut frames: impl Write,
+        told: Arc<Mutex<Vec<Told>>>,
+        answers: u32,
+    ) {
+        if write_frame(&mut frames, &WorkerFrame::Probed(Box::new(fake_report()))).is_err() {
+            return;
+        }
+        let record = |entry| told.lock().unwrap_or_else(PoisonError::into_inner).push(entry);
+        let mut answered = 0;
+        let mut request = [0u8; 1];
+        while matches!(requests.read(&mut request), Ok(1)) {
+            let sent = match request[0] {
+                SAMPLE_REQUEST if answered < answers => {
+                    answered += 1;
+                    write_frame(&mut frames, &WorkerFrame::Sample(FAKE_VALUES.to_vec()))
+                }
+                FANS_REQUEST => {
+                    let Ok(plan) = read_frame::<_, FanPlan>(&mut requests) else { return };
+                    record(Told::Plan(plan.curves.len()));
+                    write_frame(&mut frames, &WorkerFrame::Fans(manual_report()))
+                }
+                SUSPEND_REQUEST => {
+                    record(Told::Suspend);
+                    Ok(())
+                }
+                RESUME_REQUEST => {
+                    record(Told::Resume);
+                    Ok(())
+                }
+                _ => Ok(()),
+            };
+            if sent.is_err() {
+                return;
+            }
+        }
+    }
+
+    /// Starts fan-aware workers; the first one stops answering after
+    /// `first_answers` samples, the ones after it do not.
+    struct FanSpawner {
+        told: Arc<Mutex<Vec<Told>>>,
+        started: AtomicU32,
+        first_answers: u32,
+    }
+
+    impl WorkerSpawner for FanSpawner {
+        fn spawn(&self) -> io::Result<WorkerLink> {
+            let earlier = self.started.fetch_add(1, Ordering::Relaxed);
+            let answers = if earlier == 0 { self.first_answers } else { u32::MAX };
+            let (request_reader, request_writer) = io::pipe()?;
+            let (frame_reader, frame_writer) = io::pipe()?;
+            let told = self.told.clone();
+            std::thread::spawn(move || fan_worker(request_reader, frame_writer, told, answers));
+            Ok(WorkerLink {
+                requests: Box::new(request_writer),
+                frames: Box::new(frame_reader),
+                process: None,
+            })
+        }
+    }
+
+    fn fan_hardware(first_answers: u32) -> (WorkerHardware, Arc<Mutex<Vec<Told>>>) {
+        let told = Arc::new(Mutex::new(Vec::new()));
+        let spawner = FanSpawner { told: told.clone(), started: AtomicU32::new(0), first_answers };
+        let mut hardware = WorkerHardware::new(Arc::new(spawner), no_driver);
+        hardware.restart_delay = Duration::ZERO;
+        (hardware, told)
+    }
+
+    fn told_so_far(told: &Mutex<Vec<Told>>) -> Vec<Told> {
+        told.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    /// Waits until the fake worker, on its own thread, has been told `count`
+    /// things.
+    fn wait_for_told(told: &Mutex<Vec<Told>>, count: usize) -> Vec<Told> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let now = told_so_far(told);
+            if now.len() >= count {
+                return now;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "(fake worker): expected {count} fan requests | received: {now:?}"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn some_plan(curves: usize) -> FanPlan {
+        let curve = syspilot_proto::profile::FanCurve {
+            channel: "board.pwm1".into(),
+            enabled: true,
+            sources: vec!["cpu.temp".into()],
+            points: vec![
+                syspilot_proto::profile::CurvePoint(30, 20),
+                syspilot_proto::profile::CurvePoint(80, 100),
+            ],
+            hysteresis_c: 0,
+            min_duty_pct: 0,
+            ramp_pct_per_sec: 10,
+        };
+        FanPlan { store_directory: "unused".into(), curves: vec![curve; curves] }
+    }
+
+    #[test]
+    fn a_plan_rides_with_the_next_sample_and_the_controllers_report_comes_back() {
+        let (mut hardware, told) = fan_hardware(u32::MAX);
+        let mut providers = hardware.providers();
+        hardware.set_fan_plan(some_plan(2));
+        assert_eq!(hardware.fan_runtime(), Vec::<FanRuntime>::new(), "nothing reported yet");
+
+        let mut values = Vec::new();
+        providers[0].sample(&mut values);
+        assert_eq!(values, FAKE_VALUES, "the report in front of the sample does not hide it");
+        assert_eq!(wait_for_told(&told, 1), [Told::Plan(2)]);
+        assert_eq!(hardware.fan_runtime(), manual_report());
+
+        // The same plan is not sent again.
+        values.clear();
+        providers[0].sample(&mut values);
+        assert_eq!(told_so_far(&told), [Told::Plan(2)]);
+    }
+
+    #[test]
+    fn sleep_and_wake_reach_the_live_worker_without_waiting_for_a_sample() {
+        let (mut hardware, told) = fan_hardware(u32::MAX);
+        let mut providers = hardware.providers();
+        let mut values = Vec::new();
+        providers[0].sample(&mut values);
+
+        hardware.set_fans_suspended(true);
+        assert_eq!(wait_for_told(&told, 1), [Told::Suspend], "no sample was asked for");
+        hardware.set_fans_suspended(true);
+        hardware.set_fans_suspended(false);
+        assert_eq!(wait_for_told(&told, 2), [Told::Suspend, Told::Resume]);
+    }
+
+    #[test]
+    fn a_plan_set_while_no_worker_samples_waits_for_the_next_one() {
+        let (mut hardware, told) = fan_hardware(u32::MAX);
+        hardware.set_fan_plan(some_plan(1));
+        hardware.set_fans_suspended(true);
+        assert_eq!(told_so_far(&told), Vec::<Told>::new(), "there is no worker to tell");
+
+        let mut providers = hardware.providers();
+        let mut values = Vec::new();
+        providers[0].sample(&mut values);
+        assert_eq!(wait_for_told(&told, 2), [Told::Plan(1), Told::Suspend]);
+    }
+
+    #[test]
+    fn a_replacement_worker_gets_the_plan_and_a_lost_one_takes_its_report_with_it() {
+        // The first worker answers one sample, then goes silent.
+        let (mut hardware, told) = fan_hardware(1);
+        let mut providers = hardware.providers();
+        hardware.set_fan_plan(some_plan(1));
+        let mut values = Vec::new();
+        providers[0].sample(&mut values);
+        wait_for_told(&told, 1);
+        assert_eq!(hardware.fan_runtime(), manual_report());
+
+        // The silent worker costs one timeout, and what it reported is gone.
+        values.clear();
+        providers[0].sample(&mut values);
+        assert_eq!(values, [None, None]);
+        assert_eq!(hardware.fan_runtime(), Vec::<FanRuntime>::new());
+
+        // Its replacement is told the plan again.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while hardware.fan_runtime().is_empty() {
+            values.clear();
+            providers[0].sample(&mut values);
+            assert!(
+                Instant::now() < deadline,
+                "(worker provider): expected the replacement to report | received: nothing"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(wait_for_told(&told, 2), [Told::Plan(1), Told::Plan(1)]);
+    }
+
+    #[test]
+    fn ending_the_sampling_clears_the_report() {
+        let (mut hardware, _told) = fan_hardware(u32::MAX);
+        let mut providers = hardware.providers();
+        hardware.set_fan_plan(some_plan(1));
+        let mut values = Vec::new();
+        providers[0].sample(&mut values);
+        assert_eq!(hardware.fan_runtime(), manual_report());
+        drop(providers);
+        assert_eq!(hardware.fan_runtime(), Vec::<FanRuntime>::new());
     }
 
     #[test]

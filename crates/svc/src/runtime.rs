@@ -73,6 +73,9 @@ pub fn serve(
         hardware: Box::new(WorkerHardware::machine()),
         logger: SensorLogger::new(data.logs(), logging),
         log_dir: data.logs().display().to_string(),
+        // The state directory is the one only SYSTEM and administrators can
+        // write, which is what the saved BIOS registers need.
+        fan_store_directory: data.state().display().to_string(),
     };
     let mut host = Host::new(core, queue, parts)
         .map_err(|error| format!("create the sensor section: {error}"))?;

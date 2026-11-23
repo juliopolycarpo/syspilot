@@ -5,7 +5,8 @@
 //! real implementation is [`crate::worker::WorkerHardware`].
 
 use syspilot_hw::Provider;
-use syspilot_proto::message::{DriverState, Feature, SystemInfo};
+use syspilot_proto::message::{DriverState, FanRuntime, FanStatus, Feature, SystemInfo};
+use syspilot_proto::worker::FanPlan;
 
 /// Where the driver is obtained. SysPilot never ships or installs it.
 pub const DRIVER_URL: &str = "https://pawnio.eu/";
@@ -48,6 +49,31 @@ pub trait Hardware {
     /// Lets go of what a finished look kept ready for
     /// [`Hardware::providers`], when nobody wanted the providers after all.
     fn release(&mut self) {}
+
+    /// What the fans of this machine allow, from the look at the machine.
+    /// Like [`Hardware::driver`], it may have to wait for that look.
+    fn fan_layout(&mut self) -> FanStatus {
+        FanStatus::default()
+    }
+
+    /// The same without waiting: `None` while no look has been made.
+    fn known_fan_layout(&mut self) -> Option<FanStatus> {
+        None
+    }
+
+    /// Sets the curves the fan controller follows, replacing any earlier
+    /// plan. The sensor worker carries them out, so they reach it with the
+    /// next sample request, and again with any worker that replaces it.
+    fn set_fan_plan(&mut self, _plan: FanPlan) {}
+
+    /// What the fan controller last reported for each channel. Empty when
+    /// no worker is running, which means the BIOS holds every channel.
+    fn fan_runtime(&mut self) -> Vec<FanRuntime> {
+        Vec::new()
+    }
+
+    /// Tells the controller the machine sleeps (`true`) or woke (`false`).
+    fn set_fans_suspended(&mut self, _suspended: bool) {}
 }
 
 #[cfg(test)]
@@ -62,6 +88,15 @@ mod fake {
     use syspilot_proto::message::SystemSummary;
     use syspilot_proto::sensor::{DeviceClass, SensorKind};
 
+    /// What the fake fan controller was told and what it answers.
+    #[derive(Default)]
+    struct FakeFans {
+        layout: FanStatus,
+        runtime: Vec<FanRuntime>,
+        plans: Vec<FanPlan>,
+        suspensions: Vec<bool>,
+    }
+
     /// Scripted hardware: one CPU temperature sensor, plus a fan sensor
     /// while the driver is "installed".
     #[derive(Clone)]
@@ -70,6 +105,7 @@ mod fake {
         probes: Arc<AtomicU32>,
         /// While set, a look at the machine is "under way".
         looking: Arc<AtomicBool>,
+        fans: Arc<Mutex<FakeFans>>,
     }
 
     impl Default for FakeHardware {
@@ -78,11 +114,36 @@ mod fake {
                 driver: Arc::new(Mutex::new(DriverState::Missing)),
                 probes: Arc::new(AtomicU32::new(0)),
                 looking: Arc::new(AtomicBool::new(false)),
+                fans: Arc::default(),
             }
         }
     }
 
     impl FakeHardware {
+        fn fans(&self) -> std::sync::MutexGuard<'_, FakeFans> {
+            self.fans.lock().unwrap_or_else(PoisonError::into_inner)
+        }
+
+        /// What the board allows for the fans, from now on.
+        pub fn set_fan_layout(&self, layout: FanStatus) {
+            self.fans().layout = layout;
+        }
+
+        /// What the fake controller reports from now on.
+        pub fn set_fan_runtime(&self, runtime: Vec<FanRuntime>) {
+            self.fans().runtime = runtime;
+        }
+
+        /// Every plan the service handed over, oldest first.
+        pub fn fan_plans(&self) -> Vec<FanPlan> {
+            self.fans().plans.clone()
+        }
+
+        /// Every sleep (`true`) and wake (`false`) the service announced.
+        pub fn fan_suspensions(&self) -> Vec<bool> {
+            self.fans().suspensions.clone()
+        }
+
         /// Changes what driver detection reports from now on.
         pub fn set_driver(&self, state: DriverState) {
             *self.driver.lock().unwrap_or_else(PoisonError::into_inner) = state;
@@ -174,6 +235,26 @@ mod fake {
 
         fn providers_pending(&mut self) -> bool {
             self.looking.load(Ordering::Relaxed)
+        }
+
+        fn fan_layout(&mut self) -> FanStatus {
+            self.fans().layout.clone()
+        }
+
+        fn known_fan_layout(&mut self) -> Option<FanStatus> {
+            Some(self.fans().layout.clone())
+        }
+
+        fn set_fan_plan(&mut self, plan: FanPlan) {
+            self.fans().plans.push(plan);
+        }
+
+        fn fan_runtime(&mut self) -> Vec<FanRuntime> {
+            self.fans().runtime.clone()
+        }
+
+        fn set_fans_suspended(&mut self, suspended: bool) {
+            self.fans().suspensions.push(suspended);
         }
     }
 }

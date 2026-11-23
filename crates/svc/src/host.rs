@@ -15,15 +15,18 @@ use syspilot_engine::enforcer::{StateStore, TriggerEvent};
 use syspilot_hw::Hub;
 use syspilot_proto::Instance;
 use syspilot_proto::message::{
-    DriverState, ErrorCode, Event as ClientEvent, FanStatus, Request, Response, ServiceError,
+    DriverState, ErrorCode, Event as ClientEvent, FanAvailability, Request, Response, ServiceError,
     ServiceStatus,
 };
+use syspilot_proto::profile::FanCurve;
 use syspilot_proto::sensor::{SectionWriter, SensorList};
 use syspilot_proto::win::{MappedSection, SecurityDescriptor};
+use syspilot_proto::worker::FanPlan;
 use windows_sys::Win32::System::Threading::{INFINITE, WaitForSingleObject};
 
 use crate::core::{Core, Effects};
 use crate::events::{Event, EventQueue};
+use crate::fans;
 use crate::hardware::{DRIVER_URL, Hardware};
 use crate::logger::SensorLogger;
 use crate::watch::WatchSet;
@@ -61,6 +64,10 @@ pub struct HostParts {
     pub logger: SensorLogger,
     /// The log directory as shown to the user.
     pub log_dir: String,
+    /// Where the fan controller keeps the BIOS registers it saved before its
+    /// first write, so that a crash cannot lose them. A directory only the
+    /// service's own account and administrators can write.
+    pub fan_store_directory: String,
 }
 
 /// The running service.
@@ -86,6 +93,11 @@ pub struct Host<S> {
     /// Whether the hardware said "later" to something since the last check.
     look_pending: bool,
     started: Instant,
+    /// The curves the hardware was last told to follow. Empty until there
+    /// are any, so a service without curves never mentions fans to a worker.
+    fan_plan: Vec<FanCurve>,
+    /// What clients were last told about the fan controller.
+    fan_watch: fans::Watch,
 }
 
 /// Where a request's answer goes.
@@ -119,6 +131,8 @@ impl<S: StateStore + Clone + 'static> Host<S> {
             waiting: Vec::new(),
             look_pending: false,
             started: Instant::now(),
+            fan_plan: Vec::new(),
+            fan_watch: fans::Watch::default(),
         })
     }
 
@@ -184,9 +198,15 @@ impl<S: StateStore + Clone + 'static> Host<S> {
                 }
             }
             // Buffered log rows should not be lost if the machine does not
-            // come back.
-            Event::Suspend => self.parts.logger.close(),
-            Event::Resume => self.trigger(&TriggerEvent::Resume),
+            // come back, and the fans go back to the BIOS before it sleeps.
+            Event::Suspend => {
+                self.parts.logger.close();
+                self.parts.hardware.set_fans_suspended(true);
+            }
+            Event::Resume => {
+                self.parts.hardware.set_fans_suspended(false);
+                self.trigger(&TriggerEvent::Resume);
+            }
         }
         Flow::Continue
     }
@@ -283,6 +303,10 @@ impl<S: StateStore + Clone + 'static> Host<S> {
         }
         let mut problems = self.core.problems();
         problems.extend(self.logger_problem.clone());
+        let layout = self.parts.hardware.fan_layout();
+        let runtime = self.parts.hardware.fan_runtime();
+        let fans =
+            fans::merge(&layout, &self.core.profile().fans, &runtime, self.core.fan_control());
         ServiceStatus {
             version: env!("CARGO_PKG_VERSION").into(),
             instance: self.parts.instance.name().into(),
@@ -296,7 +320,7 @@ impl<S: StateStore + Clone + 'static> Host<S> {
             os_build: self.parts.os_build,
             log_dir: self.parts.log_dir.clone(),
             fan_control: self.core.fan_control(),
-            fans: FanStatus::default(),
+            fans,
             problems,
         }
     }
@@ -323,8 +347,12 @@ impl<S: StateStore + Clone + 'static> Host<S> {
     /// is currently needed. Cheap when nothing changed.
     fn settle(&mut self) {
         self.sync_watches();
+        let curves = self.fan_curves_to_follow();
+        self.sync_fan_plan(&curves);
+        // A curve needs the worker and its sensors even when nobody looks.
         let wants_values = self.parts.logger.is_enabled()
-            || self.subscribers.iter().any(|subscriber| subscriber.sensors);
+            || self.subscribers.iter().any(|subscriber| subscriber.sensors)
+            || !curves.is_empty();
         if wants_values {
             if self.hub.is_none() {
                 if self.parts.hardware.providers_pending() {
@@ -343,6 +371,45 @@ impl<S: StateStore + Clone + 'static> Host<S> {
             if self.subscribers.is_empty() {
                 self.hub = None;
             }
+        }
+        // Dropping the hub ended the worker and with it the controller.
+        self.poll_fans();
+    }
+
+    /// The enabled curves, when this service accepts them and the board may
+    /// follow them. Empty is the idle state: no worker is kept for the fans.
+    /// Before the first look at the machine the board is not known, and the
+    /// curves count, so that the look happens.
+    fn fan_curves_to_follow(&mut self) -> Vec<FanCurve> {
+        let curves = fans::enabled_curves(self.core.profile());
+        if curves.is_empty() || !self.core.fan_control() {
+            return Vec::new();
+        }
+        match self.parts.hardware.known_fan_layout() {
+            Some(layout) if layout.availability != FanAvailability::Controllable => Vec::new(),
+            _ => curves,
+        }
+    }
+
+    /// Hands the hardware the curves when they differ from the last ones.
+    fn sync_fan_plan(&mut self, curves: &[FanCurve]) {
+        if self.fan_plan == curves {
+            return;
+        }
+        self.fan_plan = curves.to_vec();
+        let plan = FanPlan {
+            store_directory: self.parts.fan_store_directory.clone(),
+            curves: curves.to_vec(),
+        };
+        self.parts.hardware.set_fan_plan(plan);
+    }
+
+    /// Looks at what the controller reports and tells subscribers when
+    /// something they show has changed.
+    fn poll_fans(&mut self) {
+        let runtime = self.parts.hardware.fan_runtime();
+        if self.fan_watch.changed(&runtime) {
+            self.broadcast(ClientEvent::StatusChanged, false);
         }
     }
 
@@ -384,6 +451,7 @@ impl<S: StateStore + Clone + 'static> Host<S> {
             self.broadcast(ClientEvent::StatusChanged, false);
         }
         self.broadcast(ClientEvent::Sampled, true);
+        self.poll_fans();
         // Keep a steady one-second rhythm, but do not try to catch up after
         // a stall (sleep, a slow provider): skip to the next whole period.
         let due = self.next_sample.map_or(now, |due| due + SAMPLE_PERIOD);
@@ -430,6 +498,7 @@ mod tests {
     use syspilot_engine::os::{Hive, RegValue, reg_type};
     use syspilot_engine::store::MemoryStateStore;
     use syspilot_proto::catalog::Catalog;
+    use syspilot_proto::message::{FanChannelStatus, FanPhase, FanRuntime, FanStatus};
     use syspilot_proto::profile::LoggingConfig;
     use syspilot_proto::sensor::SectionReader;
     use syspilot_proto::{Client, EventStream};
@@ -447,6 +516,10 @@ source = "https://learn.microsoft.com/windows/"
 registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Value", data = { dword = 1 } }
 "#;
 
+    /// The directory the host hands the controller; the fake hardware only
+    /// records it.
+    const FAN_STORE: &str = r"C:\fake\SysPilot\state";
+
     static NEXT_INSTANCE: AtomicUsize = AtomicUsize::new(0);
 
     /// A host over a fake OS and fake hardware, served on a real pipe and
@@ -462,6 +535,13 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
 
     impl RunningHost {
         fn start() -> Self {
+            Self::start_with(false)
+        }
+
+        /// `fan_curves`: whether the service accepts fan curves, as a build
+        /// with the `fan-control` feature does. The hardware is a fake either
+        /// way.
+        fn start_with(fan_curves: bool) -> Self {
             assert!(
                 is_process_elevated(),
                 "(test environment): expected an elevated process, which the Global\\ sensor section requires | received: a standard user"
@@ -487,7 +567,10 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
                 move || {
                     let catalog = Catalog::parse(CATALOG).unwrap();
                     let store = MemoryStateStore::default();
-                    let core = Core::new(fake.os(), store, catalog, 26100, true);
+                    let mut core = Core::new(fake.os(), store, catalog, 26100, true);
+                    if fan_curves {
+                        core.accept_fan_curves_in_tests();
+                    }
                     let parts = HostParts {
                         instance,
                         console: true,
@@ -495,6 +578,7 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
                         hardware: Box::new(hardware),
                         logger: SensorLogger::new(log_dir.clone(), LoggingConfig::default()),
                         log_dir: log_dir.display().to_string(),
+                        fan_store_directory: FAN_STORE.into(),
                     };
                     let mut host = Host::new(core, queue, parts).unwrap();
                     ready.send(()).unwrap();
@@ -718,5 +802,147 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
         assert_eq!(client.catalog().unwrap().tweaks.len(), 1);
         assert_eq!(client.system_info().unwrap().summary.computer, "FAKE-PC");
         assert_eq!(client.profile().unwrap().enabled, Vec::<String>::new());
+    }
+
+    fn curve_on(pwm: u8) -> FanCurve {
+        FanCurve {
+            channel: format!("board.pwm{pwm}"),
+            enabled: true,
+            sources: vec!["cpu.temp".into()],
+            points: vec![
+                syspilot_proto::profile::CurvePoint(30, 20),
+                syspilot_proto::profile::CurvePoint(80, 100),
+            ],
+            hysteresis_c: 2,
+            min_duty_pct: 0,
+            ramp_pct_per_sec: 10,
+        }
+    }
+
+    fn board_layout(availability: FanAvailability) -> FanStatus {
+        FanStatus {
+            availability,
+            board: "ACME B550".into(),
+            channels: vec![FanChannelStatus {
+                channel: "board.pwm1".into(),
+                label: "CPU fan".into(),
+                tach_sensor: Some("board.fan1".into()),
+                min_duty_pct: 20,
+                ..FanChannelStatus::default()
+            }],
+        }
+    }
+
+    fn manual_at(duty: u8) -> Vec<FanRuntime> {
+        vec![FanRuntime {
+            channel: "board.pwm1".into(),
+            phase: FanPhase::Manual,
+            target_duty_pct: Some(duty),
+            problem: None,
+        }]
+    }
+
+    #[test]
+    fn a_service_without_curves_never_mentions_fans_to_the_hardware() {
+        let host = RunningHost::start_with(true);
+        host.hardware.set_fan_layout(board_layout(FanAvailability::Controllable));
+        let mut client = host.client();
+        enable_scratch(&mut client);
+        let _sensors = host.subscribe(true);
+        assert!(client.status().unwrap().sampling);
+        assert_eq!(host.hardware.fan_plans(), Vec::<FanPlan>::new());
+        assert!(!client.status().unwrap().fans.channels[0].active);
+    }
+
+    #[test]
+    fn curves_on_a_controllable_board_keep_sampling_and_reach_the_hardware_once() {
+        let host = RunningHost::start_with(true);
+        host.hardware.set_fan_layout(board_layout(FanAvailability::Controllable));
+        let mut client = host.client();
+        client.command(&Request::SetFans(vec![curve_on(1)])).unwrap();
+        // No sensor client at all, and still the worker is kept running.
+        assert!(client.status().unwrap().sampling, "a curve needs sensor values");
+        assert_eq!(
+            host.hardware.fan_plans(),
+            [FanPlan { store_directory: FAN_STORE.into(), curves: vec![curve_on(1)] }]
+        );
+
+        // An unrelated change does not repeat the plan.
+        enable_scratch(&mut client);
+        assert_eq!(host.hardware.fan_plans().len(), 1, "the same curves are not sent again");
+
+        let channel = &client.status().unwrap().fans.channels[0];
+        assert!(channel.active);
+        assert_eq!(channel.curve.len(), 2);
+
+        // No curves: the hardware is told to let go and sampling ends.
+        client.command(&Request::SetFans(Vec::new())).unwrap();
+        // The loop answers a command before it settles; a request after it
+        // is served after the settling.
+        let sampling = client.status().unwrap().sampling;
+        let plans = host.hardware.fan_plans();
+        assert_eq!(plans.len(), 2);
+        assert!(plans[1].curves.is_empty(), "{plans:?}");
+        assert!(!sampling, "nothing needs values any more");
+    }
+
+    #[test]
+    fn curves_on_a_read_only_board_keep_no_worker_and_say_why() {
+        let host = RunningHost::start_with(true);
+        let reason = "the board's entry has not been validated".to_owned();
+        host.hardware
+            .set_fan_layout(board_layout(FanAvailability::ReadOnly { reason: reason.clone() }));
+        let mut client = host.client();
+        client.command(&Request::SetFans(vec![curve_on(1)])).unwrap();
+        let status = client.status().unwrap();
+        assert!(!status.sampling, "a board that cannot follow curves needs no worker");
+        assert_eq!(host.hardware.fan_plans(), Vec::<FanPlan>::new());
+        assert_eq!(status.fans.availability, FanAvailability::ReadOnly { reason });
+        let channel = &status.fans.channels[0];
+        assert!(!channel.active);
+        assert_eq!(channel.curve.len(), 2, "the curve is still shown");
+        assert_eq!(channel.phase, FanPhase::Bios);
+    }
+
+    #[test]
+    fn what_the_controller_reports_reaches_the_status_and_the_subscribers() {
+        let host = RunningHost::start_with(true);
+        host.hardware.set_fan_layout(board_layout(FanAvailability::Controllable));
+        let mut events = host.subscribe(false);
+        let mut client = host.client();
+        client.command(&Request::SetFans(vec![curve_on(1)])).unwrap();
+        wait_for(&mut events, ClientEvent::ProfileChanged);
+
+        host.hardware.set_fan_runtime(manual_at(40));
+        // The next sample (every second) polls the controller.
+        wait_for(&mut events, ClientEvent::StatusChanged);
+        let channel = &client.status().unwrap().fans.channels[0];
+        assert_eq!((channel.phase, channel.target_duty_pct), (FanPhase::Manual, Some(40)));
+
+        // A source that fails: full speed, with the reason.
+        let failing = FanRuntime {
+            channel: "board.pwm1".into(),
+            phase: FanPhase::FailSafe,
+            target_duty_pct: Some(100),
+            problem: Some("cpu.temp has no reading".into()),
+        };
+        host.hardware.set_fan_runtime(vec![failing]);
+        wait_for(&mut events, ClientEvent::StatusChanged);
+        let channel = &client.status().unwrap().fans.channels[0];
+        assert_eq!(channel.phase, FanPhase::FailSafe);
+        assert_eq!(channel.problem.as_deref(), Some("cpu.temp has no reading"));
+    }
+
+    #[test]
+    fn the_machine_going_to_sleep_and_waking_reaches_the_controller() {
+        let host = RunningHost::start_with(true);
+        host.queue.push(Event::Suspend);
+        host.queue.push(Event::Resume);
+        let told = (0..100).any(|_| {
+            std::thread::sleep(Duration::from_millis(20));
+            host.hardware.fan_suspensions().len() == 2
+        });
+        assert!(told, "(host): expected the sleep and the wake to reach the hardware");
+        assert_eq!(host.hardware.fan_suspensions(), [true, false]);
     }
 }

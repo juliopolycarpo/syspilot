@@ -7,6 +7,7 @@ mod catalog;
 mod cli;
 mod core;
 mod events;
+mod fans;
 mod hardware;
 mod host;
 mod install;

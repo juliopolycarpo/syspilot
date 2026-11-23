@@ -13,9 +13,12 @@ publish = false
 workspace = true
 
 [features]
-# Lets the service drive fans. Off until fan control has been validated on
-# real hardware for at least one catalogued board.
-fan-control = []
+# Lets the service accept fan curves and keep a worker running for them. Off
+# until fan control has been validated on real hardware for at least one
+# catalogued board. The registers are written by the worker, which has its own
+# feature of the same name (`syspilot-sensors/fan-control`); a build that
+# follows curves needs both. Releases have neither.
+fan-control = ["syspilot-hw/fan-control"]
 
 # The resident process is budgeted: adding a dependency here needs an entry
 # in docs/decisions.md with its size impact.

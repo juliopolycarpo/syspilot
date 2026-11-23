@@ -107,6 +107,14 @@ impl<S: StateStore + Clone + 'static> Core<S> {
         self.fan_control
     }
 
+    /// Makes a test build accept fan curves whatever the cargo features say,
+    /// so the default test run covers the wiring. Nothing writes to a fan
+    /// through the core: the hardware it talks to is a fake.
+    #[cfg(test)]
+    pub fn accept_fan_curves_in_tests(&mut self) {
+        self.fan_control = true;
+    }
+
     /// Problems the user should see in the status view.
     pub fn problems(&self) -> Vec<String> {
         let store_problem = self
