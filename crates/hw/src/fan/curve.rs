@@ -362,6 +362,13 @@ impl CurveFollower {
         self.output
     }
 
+    /// Forgets everything followed so far: the next step returns the curve's
+    /// duty without ramping.
+    pub fn reset(&mut self) {
+        self.followed = None;
+        self.output = None;
+    }
+
     /// Forgets the temperature followed and continues from `duty`, so the
     /// ramp limits apply from where the fan actually is. Used after a
     /// fail-safe or a resume.
@@ -687,6 +694,16 @@ mod tests {
         assert_eq!(follower.step(30.0, 1.0), Ok(95.0), "from full duty down at 5 %/s");
         follower.restart_from(5.0);
         assert_eq!(follower.output(), Some(20.0), "a restart is clamped to the minimum duty");
+    }
+
+    #[test]
+    fn a_reset_follower_returns_the_curve_duty_without_ramping() {
+        let limited = FollowerSettings { max_fall_per_second: Some(1.0), ..settings(5.0, 20.0) };
+        let mut follower = CurveFollower::new(standard_curve(), limited).unwrap();
+        assert_eq!(follower.step(70.0, 1.0), Ok(100.0));
+        follower.reset();
+        assert_eq!(follower.output(), None);
+        assert_eq!(follower.step(30.0, 1.0), Ok(20.0), "no ramp from the earlier 100 %");
     }
 
     #[test]

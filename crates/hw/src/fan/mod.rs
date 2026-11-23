@@ -5,6 +5,9 @@
 //! - [`board`]: which boards SysPilot may control and with which limits.
 //!   Always compiled; it only describes, and a board stays read-only until a
 //!   human has validated its entry.
+//! - `failsafe` (feature `fan-control`): the channel trait and the controller
+//!   that saves the BIOS mode, restores it and drives the fans to 100 % when
+//!   a sensor fails.
 //!
 //! Decision 12 keeps version 1 from writing to hardware. Everything that can
 //! write a fan register is behind the `fan-control` feature, which is off by
@@ -12,3 +15,5 @@
 
 pub mod board;
 pub mod curve;
+#[cfg(feature = "fan-control")]
+pub mod failsafe;
