@@ -108,16 +108,13 @@ impl Backend for ServiceBackend {
         } else {
             (None, Vec::new())
         };
-        Ok(Snapshot {
-            elevated,
-            status: Some(client.status()?),
-            catalog: client.catalog()?,
-            states: client.states()?,
-            profile,
-            history,
-            sensors: client.sensors()?,
-            system: client.system_info()?,
-        })
+        let (catalog, states) = (client.catalog()?, client.states()?);
+        // The sensors come before the status: listing them is what makes
+        // the service look at the hardware, and the status reports what
+        // that look found.
+        let (sensors, system) = (client.sensors()?, client.system_info()?);
+        let status = Some(client.status()?);
+        Ok(Snapshot { elevated, status, catalog, states, profile, history, sensors, system })
     }
 
     fn send(&self, request: &Request) -> Result<(), Failure> {
