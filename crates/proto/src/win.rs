@@ -73,6 +73,10 @@ unsafe impl Sync for OwnedHandle {}
 /// A security descriptor built from an SDDL string.
 pub struct SecurityDescriptor(PSECURITY_DESCRIPTOR);
 
+// SAFETY: the descriptor is a private heap allocation that is only read
+// after construction; nothing about it is tied to the creating thread.
+unsafe impl Send for SecurityDescriptor {}
+
 impl SecurityDescriptor {
     /// Parses `sddl`, e.g. `D:(A;;GA;;;SY)(A;;GA;;;BA)`.
     pub fn from_sddl(sddl: &str) -> io::Result<Self> {
