@@ -121,13 +121,18 @@ fn details(app: &App, row: &TweakRow, context: &ViewContext<App>) -> View {
 fn row(app: &App, row: &TweakRow, context: &ViewContext<App>) -> KeyedView {
     let summary = summary(app, row, context);
     let view = if app.level() == ViewLevel::Advanced {
-        Expander::new().horizontal_alignment(HorizontalAlignment::Stretch).slots([
-            SlotView::new(
-                ExpanderSlot::Header,
-                Border::new().padding(Thickness::xy(0.0, GAP_MEDIUM)).content(summary),
-            ),
-            SlotView::new(ExpanderSlot::Content, details(app, row, context)),
-        ])
+        // Named, so that a screen reader says which tweak the details are
+        // of; the switch inside carries the tweak's own title.
+        Expander::new()
+            .horizontal_alignment(HorizontalAlignment::Stretch)
+            .automation_name(format!("Details of {}", row.title))
+            .slots([
+                SlotView::new(
+                    ExpanderSlot::Header,
+                    Border::new().padding(Thickness::xy(0.0, GAP_MEDIUM)).content(summary),
+                ),
+                SlotView::new(ExpanderSlot::Content, details(app, row, context)),
+            ])
     } else {
         widgets::card().content(summary)
     };

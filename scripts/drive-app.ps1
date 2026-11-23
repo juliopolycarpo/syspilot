@@ -19,7 +19,10 @@ param(
     [string] $Name,
     [ValidateSet('Toggle', 'Invoke', 'Select', 'Expand')] [string] $Action = 'Invoke',
     # Lists the named controls of the window instead of acting.
-    [switch] $List
+    [switch] $List,
+    # Lists the controls a keyboard user can reach that have no accessible
+    # name, instead of acting. Nothing listed means none.
+    [switch] $Unnamed
 )
 
 $ErrorActionPreference = 'Stop'
@@ -37,6 +40,13 @@ if ($List) {
     $root.FindAll($scope, $everything) |
         Where-Object { $_.Current.Name } |
         ForEach-Object { '{0,-14} {1}' -f $_.Current.ControlType.ProgrammaticName.Replace('ControlType.', ''), $_.Current.Name }
+    return
+}
+
+if ($Unnamed) {
+    $root.FindAll($scope, $everything) |
+        Where-Object { $_.Current.IsKeyboardFocusable -and -not $_.Current.Name } |
+        ForEach-Object { '{0} (id "{1}")' -f $_.Current.ControlType.ProgrammaticName.Replace('ControlType.', ''), $_.Current.AutomationId }
     return
 }
 
