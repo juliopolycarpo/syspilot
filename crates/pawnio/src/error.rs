@@ -19,6 +19,11 @@ pub mod status {
     pub const ACCESS_DENIED: u32 = 0xC000_0022;
     pub const BUFFER_TOO_SMALL: u32 = 0xC000_0023;
     pub const OBJECT_NAME_NOT_FOUND: u32 = 0xC000_0034;
+    /// An `RDMSR` of a register the CPU does not implement raises a general
+    /// protection fault, which the module reports as this status. Seen for
+    /// allow-listed MSRs that this model lacks (`0x64D`, `0x641` on a
+    /// Broadwell-EP).
+    pub const PRIVILEGED_INSTRUCTION: u32 = 0xC000_0096;
     pub const DEVICE_NOT_READY: u32 = 0xC000_00A3;
     pub const IO_TIMEOUT: u32 = 0xC000_00B5;
     pub const NOT_SUPPORTED: u32 = 0xC000_00BB;
@@ -43,6 +48,7 @@ pub fn status_name(status: u32) -> Option<&'static str> {
         status::ACCESS_DENIED => "STATUS_ACCESS_DENIED",
         status::BUFFER_TOO_SMALL => "STATUS_BUFFER_TOO_SMALL",
         status::OBJECT_NAME_NOT_FOUND => "STATUS_OBJECT_NAME_NOT_FOUND",
+        status::PRIVILEGED_INSTRUCTION => "STATUS_PRIVILEGED_INSTRUCTION",
         status::DEVICE_NOT_READY => "STATUS_DEVICE_NOT_READY",
         status::IO_TIMEOUT => "STATUS_IO_TIMEOUT",
         status::NOT_SUPPORTED => "STATUS_NOT_SUPPORTED",
@@ -451,6 +457,18 @@ mod tests {
     }
 
     #[test]
+    fn a_faulting_msr_read_is_named_in_the_error_text() {
+        let text =
+            Error::from_execute_status("ioctl_read_msr", &[0x64D], status::PRIVILEGED_INSTRUCTION)
+                .to_string();
+        assert_eq!(
+            text,
+            "(pawnio.ioctl_read_msr): expected 0x00000000 (STATUS_SUCCESS) | received: \
+             0xC0000096 (STATUS_PRIVILEGED_INSTRUCTION)"
+        );
+    }
+
+    #[test]
     fn display_of_an_unnamed_status_shows_the_hex_value() {
         let text = Error::Status { operation: "load".into(), status: 0xC000_0999 }.to_string();
         assert!(text.contains("received: 0xC0000999"), "{text}");
@@ -470,6 +488,7 @@ mod tests {
             status::ACCESS_DENIED,
             status::BUFFER_TOO_SMALL,
             status::OBJECT_NAME_NOT_FOUND,
+            status::PRIVILEGED_INSTRUCTION,
             status::DEVICE_NOT_READY,
             status::IO_TIMEOUT,
             status::NOT_SUPPORTED,
