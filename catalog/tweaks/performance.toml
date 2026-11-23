@@ -1,0 +1,55 @@
+# Performance: responsiveness, latency and throughput.
+# Rules for every entry are in docs/tweak-catalog.md.
+
+[[tweak]]
+id = "performance.disk-idle-timeout-ac"
+title = "Keep the hard disk on while plugged in"
+summary = "Hard disks stay powered while the PC is plugged in, so a sleeping disk no longer delays opening files."
+detail = '''Sets the disk idle timeout of the active power plan to 0 on AC power. The value is the period of inactivity in seconds before the disk is powered down, and 0 means never. Subgroup GUID_DISK_SUBGROUP 0012ee47-9041-4b5d-9b77-535fba8b1442, setting 6738e2c4-e8a5-4a42-b16a-e040e769756e (powercfg alias DISKIDLE, a hidden setting). The battery (DC) value is left alone.'''
+level = "simple"
+category = "performance"
+side-effects = "Drives draw idle power while the PC is plugged in."
+source = "https://learn.microsoft.com/windows-hardware/customize/power-settings/disk-settings-disk-idle-timeout"
+
+[[tweak.action]]
+power = { subgroup = "0012ee47-9041-4b5d-9b77-535fba8b1442", setting = "6738e2c4-e8a5-4a42-b16a-e040e769756e", ac = 0 }
+
+[[tweak]]
+id = "performance.window-animations"
+title = "Turn off window and control animations"
+summary = "Windows, menus and controls open, close and move without animation."
+detail = '''Policy: User Configuration > Administrative Templates > Windows Components > File Explorer > Turn off common control and window animations (TurnOffSPIAnimations). Sets HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\TurnOffSPIAnimations (REG_DWORD) to 1. Microsoft describes the policy as similar to the settings users have directly, and notes that disabling animations can improve usability for some visual disabilities as well as performance and battery life in some scenarios. Applies to Windows 10 2004 and later and Windows 11.'''
+level = "simple"
+category = "performance"
+side-effects = "Menus and windows appear without fade or slide effects."
+reboot = "sign-out"
+source = "https://learn.microsoft.com/windows/client-management/mdm/policy-csp-admx-explorer#turnoffspianimations"
+
+[[tweak.action]]
+registry = { scope = "user", key = 'Software\Microsoft\Windows\CurrentVersion\Policies\Explorer', name = "TurnOffSPIAnimations", data = { dword = 1 } }
+
+[[tweak]]
+id = "performance.core-parking-ac"
+title = "Keep all processor cores unparked on AC power"
+summary = "Every CPU core stays available while the PC is plugged in instead of being put to sleep when idle, at the cost of higher idle power use."
+detail = '''Sets "Processor Performance Core Parking Min Cores" of the active power plan to 100% on AC power. Subgroup GUID_PROCESSOR_SETTINGS_SUBGROUP 54533251-82be-4824-96c1-47b60b740d00, setting 0cc5b647-c1df-4637-891a-dec35c318583 (a hidden setting). The setting is the minimum percentage of logical processors that can be unparked at any time, and Microsoft documents that the core parking algorithm is disabled when it is not less than the maximum cores setting (ea062031-0e34-4ff1-9b6d-eb1059334028, range 0 to 100). The battery (DC) value is left alone.'''
+level = "advanced"
+category = "performance"
+side-effects = "Higher idle power use and heat while plugged in."
+source = "https://learn.microsoft.com/previous-versions/windows/hardware/design/dn613985(v=vs.85)"
+
+[[tweak.action]]
+power = { subgroup = "54533251-82be-4824-96c1-47b60b740d00", setting = "0cc5b647-c1df-4637-891a-dec35c318583", ac = 100 }
+
+[[tweak]]
+id = "performance.background-apps"
+title = "Block apps from running in the background"
+summary = "Microsoft Store apps no longer run in the background, so they only work while you use them."
+detail = '''Policy: Computer Configuration > Administrative Templates > Windows Components > App Privacy > Let Windows apps run in the background, with "Select a setting" set to Force Deny. Sets HKLM\Software\Policies\Microsoft\Windows\AppPrivacy\LetAppsRunInBackground (REG_DWORD) to 2 (Force Deny). Applies to Windows 10 1703 and later and Windows 11.'''
+level = "advanced"
+category = "performance"
+side-effects = "Microsoft documents that some apps, including Cortana and Search, might not function as expected."
+source = "https://learn.microsoft.com/windows/privacy/manage-connections-from-windows-operating-system-components-to-microsoft-services"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'Software\Policies\Microsoft\Windows\AppPrivacy', name = "LetAppsRunInBackground", data = { dword = 2 } }

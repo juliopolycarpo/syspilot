@@ -1,0 +1,296 @@
+# Privacy: data sent to Microsoft or exposed to apps.
+# Rules for every entry are in docs/tweak-catalog.md.
+
+[[tweak]]
+id = "privacy.advertising-id"
+title = "Turn off the advertising ID"
+summary = "Apps can no longer use your advertising ID to show ads based on your app activity."
+detail = '''Policy: Computer Configuration > Administrative Templates > System > User Profiles > Turn off the advertising ID. Sets HKLM\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo\DisabledByGroupPolicy (REG_DWORD) to 1. Microsoft notes that turning the feature off resets the ID.'''
+level = "simple"
+category = "privacy"
+source = "https://learn.microsoft.com/windows/privacy/manage-connections-from-windows-operating-system-components-to-microsoft-services"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo', name = "DisabledByGroupPolicy", data = { dword = 1 } }
+
+[[tweak]]
+id = "privacy.tailored-experiences"
+title = "Turn off tailored experiences"
+summary = "Windows stops using your diagnostic data to suggest tips and recommendations made for you."
+detail = '''Policy: User Configuration > Administrative Templates > Windows Components > Cloud Content > Do not use diagnostic data for tailored experiences. Sets HKCU\SOFTWARE\Policies\Microsoft\Windows\CloudContent\DisableTailoredExperiencesWithDiagnosticData (REG_DWORD) to 1.'''
+level = "simple"
+category = "privacy"
+source = "https://learn.microsoft.com/windows/privacy/manage-connections-from-windows-operating-system-components-to-microsoft-services"
+
+[[tweak.action]]
+registry = { scope = "user", key = 'SOFTWARE\Policies\Microsoft\Windows\CloudContent', name = "DisableTailoredExperiencesWithDiagnosticData", data = { dword = 1 } }
+
+[[tweak]]
+id = "privacy.feedback-requests"
+title = "Turn off feedback requests"
+summary = "Windows stops asking you for feedback."
+detail = '''Policy: Computer Configuration > Administrative Templates > Windows Components > Data Collection and Preview Builds > Do not show feedback notifications. Sets HKLM\Software\Policies\Microsoft\Windows\DataCollection\DoNotShowFeedbackNotifications (REG_DWORD) to 1.'''
+level = "simple"
+category = "privacy"
+source = "https://learn.microsoft.com/windows/privacy/manage-connections-from-windows-operating-system-components-to-microsoft-services"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'Software\Policies\Microsoft\Windows\DataCollection', name = "DoNotShowFeedbackNotifications", data = { dword = 1 } }
+
+[[tweak]]
+id = "privacy.recent-items"
+title = "Hide recent files in Start and File Explorer"
+summary = "Start, File Explorer and Jump Lists stop listing the files and items you opened recently."
+detail = '''Sets HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\Start_TrackDocs (REG_DWORD) to 0. This is the same as turning off "Show recently opened items in Start, Jump Lists, and File Explorer" under Settings > Personalization > Start. The setting controls whether recommended files in Start, recent files in File Explorer and items in Jump Lists are shown.'''
+level = "simple"
+category = "privacy"
+source = "https://learn.microsoft.com/windows/privacy/manage-connections-from-windows-operating-system-components-to-microsoft-services"
+
+[[tweak.action]]
+registry = { scope = "user", key = 'Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced', name = "Start_TrackDocs", data = { dword = 0 } }
+
+[[tweak]]
+id = "privacy.diagnostic-data-required"
+title = "Send only required diagnostic data"
+summary = "Windows sends only the diagnostic data it needs to stay secure and up to date, and the optional diagnostic data switch in Settings is disabled."
+detail = '''Policy: Computer Configuration > Administrative Templates > Windows Components > Data Collection and Preview Builds > Allow Diagnostic Data (AllowTelemetry). Sets HKLM\Software\Policies\Microsoft\Windows\DataCollection\AllowTelemetry (REG_DWORD) to 1 (required diagnostic data, called Basic in older documentation). Values: 0 turns diagnostic data off and is supported only on Enterprise, Education and Server editions, where other editions treat it as 1; 1 sends required data; 3 sends optional data. This entry uses 1 so it behaves the same on every edition.'''
+level = "advanced"
+category = "privacy"
+side-effects = "Required diagnostic data is still sent. Windows disables the Optional diagnostic data control in Settings while the policy is set."
+source = "https://learn.microsoft.com/windows/client-management/mdm/policy-csp-system#allowtelemetry"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'Software\Policies\Microsoft\Windows\DataCollection', name = "AllowTelemetry", data = { dword = 1 } }
+
+[[tweak]]
+id = "privacy.diagnostic-log-collection"
+title = "Limit diagnostic log collection"
+summary = "Windows does not collect extra diagnostic logs to troubleshoot problems, even when optional diagnostic data is on."
+detail = '''Policy: Computer Configuration > Administrative Templates > Windows Components > Data Collection and Preview Builds > Limit Diagnostic Log Collection (LimitDiagnosticLogCollection). Sets HKLM\Software\Policies\Microsoft\Windows\DataCollection\LimitDiagnosticLogCollection (REG_DWORD) to 1 (enabled: diagnostic logs are not collected). Without the policy, Microsoft may occasionally collect diagnostic logs from devices configured to send optional diagnostic data. Applies to Windows 11 21H2 and later.'''
+level = "advanced"
+category = "privacy"
+min-build = 22000
+source = "https://learn.microsoft.com/windows/client-management/mdm/policy-csp-system#limitdiagnosticlogcollection"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'Software\Policies\Microsoft\Windows\DataCollection', name = "LimitDiagnosticLogCollection", data = { dword = 1 } }
+
+[[tweak]]
+id = "privacy.crash-dump-collection"
+title = "Limit crash dump collection"
+summary = "Windows Error Reporting sends only small crash dumps, never full or heap dumps, even when optional diagnostic data is on."
+detail = '''Policy: Computer Configuration > Administrative Templates > Windows Components > Data Collection and Preview Builds > Limit Dump Collection (LimitDumpCollection). Sets HKLM\Software\Policies\Microsoft\Windows\DataCollection\LimitDumpCollection (REG_DWORD) to 1 (enabled: Windows Error Reporting sends only kernel mini dumps and user mode triage dumps). Applies to Windows 11 21H2 and later.'''
+level = "advanced"
+category = "privacy"
+min-build = 22000
+source = "https://learn.microsoft.com/windows/client-management/mdm/policy-csp-system#limitdumpcollection"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'Software\Policies\Microsoft\Windows\DataCollection', name = "LimitDumpCollection", data = { dword = 1 } }
+
+[[tweak]]
+id = "privacy.service-configuration-downloads"
+title = "Turn off service configuration downloads"
+summary = "Windows components stop downloading configuration updates from Microsoft's Services Configuration (OneSettings) service."
+detail = '''Sets HKLM\Software\Policies\Microsoft\Windows\DataCollection\DisableOneSettingsDownloads (REG_DWORD) to 1. Windows components and apps, such as the telemetry service, use Services Configuration to update their configuration dynamically.'''
+level = "advanced"
+category = "privacy"
+side-effects = "Microsoft documents that apps using Services Configuration may stop working."
+source = "https://learn.microsoft.com/windows/privacy/manage-connections-from-windows-operating-system-components-to-microsoft-services"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'Software\Policies\Microsoft\Windows\DataCollection', name = "DisableOneSettingsDownloads", data = { dword = 1 } }
+
+[[tweak]]
+id = "privacy.activity-history"
+title = "Turn off activity history"
+summary = "Windows stops recording your activity history on this PC and stops sending it to Microsoft."
+detail = '''Policies under Computer Configuration > Administrative Templates > System > OS Policies: Enables Activity Feed, Allow publishing of User Activities and Allow upload of User Activities, all disabled. Sets three REG_DWORD values under HKLM\Software\Policies\Microsoft\Windows\System to 0: EnableActivityFeed, PublishUserActivities and UploadUserActivities. This matches clearing both Store my activity history on this device and Send my activity history to Microsoft under Settings > Privacy > Activity History.'''
+level = "advanced"
+category = "privacy"
+side-effects = "Features that rely on your activity history have nothing to show."
+source = "https://learn.microsoft.com/windows/privacy/manage-connections-from-windows-operating-system-components-to-microsoft-services"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'Software\Policies\Microsoft\Windows\System', name = "EnableActivityFeed", data = { dword = 0 } }
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'Software\Policies\Microsoft\Windows\System', name = "PublishUserActivities", data = { dword = 0 } }
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'Software\Policies\Microsoft\Windows\System', name = "UploadUserActivities", data = { dword = 0 } }
+
+[[tweak]]
+id = "privacy.clipboard-sync"
+title = "Turn off clipboard sync across devices"
+summary = "Clipboard contents are no longer shared with your other devices."
+detail = '''Policy: Computer Configuration > Administrative Templates > System > OS Policies > Allow Clipboard synchronization across devices (AllowCrossDeviceClipboard). Sets HKLM\Software\Policies\Microsoft\Windows\System\AllowCrossDeviceClipboard (REG_DWORD) to 0 (not allowed). Devices that use the same Microsoft account or Microsoft Entra account can no longer synchronize clipboard contents. The change takes effect immediately. Applies to Windows 10 1809 and later and Windows 11.'''
+level = "advanced"
+category = "privacy"
+source = "https://learn.microsoft.com/windows/client-management/mdm/policy-csp-privacy#allowcrossdeviceclipboard"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'Software\Policies\Microsoft\Windows\System', name = "AllowCrossDeviceClipboard", data = { dword = 0 } }
+
+[[tweak]]
+id = "privacy.online-speech-recognition"
+title = "Turn off online speech recognition"
+summary = "Your voice input is no longer sent to Microsoft's speech services."
+detail = '''Sets HKCU\Software\Microsoft\Speech_OneCore\Settings\OnlineSpeechPrivacy\HasAccepted (REG_DWORD) to 0. This is the same as switching Settings > Privacy > Speech > Online speech recognition to Off, which turns off dictation and speaking to Cortana and other apps through Microsoft speech services.'''
+level = "advanced"
+category = "privacy"
+side-effects = "Dictation and voice features that need Microsoft's online speech service stop working."
+source = "https://learn.microsoft.com/windows/privacy/manage-connections-from-windows-operating-system-components-to-microsoft-services"
+
+[[tweak.action]]
+registry = { scope = "user", key = 'Software\Microsoft\Speech_OneCore\Settings\OnlineSpeechPrivacy', name = "HasAccepted", data = { dword = 0 } }
+
+[[tweak]]
+id = "privacy.inking-typing-collection"
+title = "Stop collecting inking and typing data"
+summary = "Windows stops collecting what you type and write to improve suggestions and handwriting recognition."
+detail = '''Sets two REG_DWORD values under HKCU\Software\Microsoft\InputPersonalization to 1: RestrictImplicitTextCollection and RestrictImplicitInkCollection. Microsoft lists them as the registry equivalent of turning off Improve inking and typing in Settings > Privacy > Diagnostics & feedback, together with the Text Input and Handwriting personalization policies.'''
+level = "advanced"
+category = "privacy"
+source = "https://learn.microsoft.com/windows/privacy/manage-connections-from-windows-operating-system-components-to-microsoft-services"
+
+[[tweak.action]]
+registry = { scope = "user", key = 'Software\Microsoft\InputPersonalization', name = "RestrictImplicitTextCollection", data = { dword = 1 } }
+
+[[tweak.action]]
+registry = { scope = "user", key = 'Software\Microsoft\InputPersonalization', name = "RestrictImplicitInkCollection", data = { dword = 1 } }
+
+[[tweak]]
+id = "privacy.find-my-device"
+title = "Turn off Find My Device"
+summary = "Windows stops supporting Find My Device, so you cannot locate this PC if it is lost."
+detail = '''Policy: Computer Configuration > Administrative Templates > Windows Components > Find My Device > Turn On/Off Find My Device. Sets HKLM\SOFTWARE\Policies\Microsoft\FindMyDevice\AllowFindMyDevice (REG_DWORD) to 0.'''
+level = "advanced"
+category = "privacy"
+side-effects = "You cannot locate a lost or stolen PC with Find My Device."
+source = "https://learn.microsoft.com/windows/privacy/manage-connections-from-windows-operating-system-components-to-microsoft-services"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SOFTWARE\Policies\Microsoft\FindMyDevice', name = "AllowFindMyDevice", data = { dword = 0 } }
+
+[[tweak]]
+id = "privacy.location"
+title = "Turn off location for this device"
+summary = "Location is turned off for the whole PC, so apps and Windows features cannot get your position."
+detail = '''Policy: Computer Configuration > Administrative Templates > Windows Components > Location and Sensors > Turn off location. Sets HKLM\Software\Policies\Microsoft\Windows\LocationAndSensors\DisableLocation (REG_DWORD) to 1. This is the device-wide switch; per-app access is a separate policy (LetAppsAccessLocation) that this entry does not touch.'''
+level = "advanced"
+category = "privacy"
+side-effects = "Apps and Windows features that depend on location stop working."
+source = "https://learn.microsoft.com/windows/privacy/manage-connections-from-windows-operating-system-components-to-microsoft-services"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'Software\Policies\Microsoft\Windows\LocationAndSensors', name = "DisableLocation", data = { dword = 1 } }
+
+[[tweak]]
+id = "privacy.web-search"
+title = "Turn off web results in Search"
+summary = "Search stops sending what you type to the web and stops showing web results."
+detail = '''Two policies under Computer Configuration > Administrative Templates > Windows Components > Search: Do not allow web search and Don't search the web or display web results in Search. Sets two REG_DWORD values under HKLM\SOFTWARE\Policies\Microsoft\Windows\Windows Search: DisableWebSearch to 1 and ConnectedSearchUseWeb to 0.'''
+level = "advanced"
+category = "privacy"
+side-effects = "Search shows only results from this PC."
+source = "https://learn.microsoft.com/windows/privacy/manage-connections-from-windows-operating-system-components-to-microsoft-services"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SOFTWARE\Policies\Microsoft\Windows\Windows Search', name = "DisableWebSearch", data = { dword = 1 } }
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SOFTWARE\Policies\Microsoft\Windows\Windows Search', name = "ConnectedSearchUseWeb", data = { dword = 0 } }
+
+[[tweak]]
+id = "privacy.app-launch-tracking"
+title = "Stop tracking app launches"
+summary = "Windows no longer tracks which apps you open to improve Start and search results."
+detail = '''Sets HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced\Start_TrackProgs (REG_DWORD) to 0. This is the same as turning off "Let Windows track app launches to improve Start and search results" in Settings.'''
+level = "advanced"
+category = "privacy"
+side-effects = "Start and search results are no longer ranked by what you open."
+source = "https://learn.microsoft.com/windows/privacy/manage-connections-from-windows-operating-system-components-to-microsoft-services"
+
+[[tweak.action]]
+registry = { scope = "user", key = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced', name = "Start_TrackProgs", data = { dword = 0 } }
+
+[[tweak]]
+id = "privacy.language-list"
+title = "Hide your language list from websites"
+summary = "Websites can no longer read your language list to show you locally relevant content."
+detail = '''Sets HKCU\Control Panel\International\User Profile\HttpAcceptLanguageOptOut (REG_DWORD) to 1. This is the same as turning off "Let websites provide locally relevant content by accessing my language list" in Settings.'''
+level = "advanced"
+category = "privacy"
+source = "https://learn.microsoft.com/windows/privacy/manage-connections-from-windows-operating-system-components-to-microsoft-services"
+
+[[tweak.action]]
+registry = { scope = "user", key = 'Control Panel\International\User Profile', name = "HttpAcceptLanguageOptOut", data = { dword = 1 } }
+
+[[tweak]]
+id = "privacy.settings-sync"
+title = "Turn off settings sync"
+summary = "Windows stops syncing your settings across devices, and you cannot turn syncing back on in Settings."
+detail = '''Policy: Computer Configuration > Administrative Templates > Windows Components > Sync your settings > Do not sync, with "Allow users to turn syncing on" left unchecked. Sets two REG_DWORD values under HKLM\Software\Policies\Microsoft\Windows\SettingSync: DisableSettingSync to 2 and DisableSettingSyncUserOverride to 1.'''
+level = "advanced"
+category = "privacy"
+side-effects = "Settings you sync today stop following you to your other devices."
+source = "https://learn.microsoft.com/windows/privacy/manage-connections-from-windows-operating-system-components-to-microsoft-services"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'Software\Policies\Microsoft\Windows\SettingSync', name = "DisableSettingSync", data = { dword = 2 } }
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'Software\Policies\Microsoft\Windows\SettingSync', name = "DisableSettingSyncUserOverride", data = { dword = 1 } }
+
+[[tweak]]
+id = "privacy.malicious-software-removal-reports"
+title = "Turn off MSRT infection reports"
+summary = "The Windows malicious software removal tool (MSRT) stops sending infection information to Microsoft."
+detail = '''Sets HKLM\Software\Policies\Microsoft\MRT\DontReportInfectionInformation (REG_DWORD) to 1. Microsoft notes there is no Group Policy for this setting, so the registry value is the only way to set it.'''
+level = "advanced"
+category = "privacy"
+source = "https://learn.microsoft.com/windows/privacy/manage-connections-from-windows-operating-system-components-to-microsoft-services"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'Software\Policies\Microsoft\MRT', name = "DontReportInfectionInformation", data = { dword = 1 } }
+
+[[tweak]]
+id = "privacy.windows-error-reporting"
+title = "Turn off Windows Error Reporting"
+summary = "Windows stops collecting and sending problem reports when apps crash."
+detail = '''Sets HKLM\Software\Microsoft\Windows\Windows Error Reporting\Disabled (REG_DWORD) to 1 (0 = enabled, the default; 1 = disabled). The value enables or disables WER as a whole, including report queuing and archiving.'''
+level = "advanced"
+category = "privacy"
+side-effects = "Problem reports, and the solution lookups that depend on them, stop."
+source = "https://learn.microsoft.com/windows/win32/wer/wer-settings"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'Software\Microsoft\Windows\Windows Error Reporting', name = "Disabled", data = { dword = 1 } }
+
+[[tweak]]
+id = "privacy.recall-snapshots"
+title = "Turn off saving snapshots for Recall"
+summary = "Windows stops saving screen snapshots for Recall and deletes the ones already saved."
+detail = '''Policy: Computer Configuration > Administrative Templates > Windows Components > Windows AI > Turn off saving snapshots for use with Recall (DisableAIDataAnalysis). Sets HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsAI\DisableAIDataAnalysis (REG_DWORD) to 1. Microsoft documents that snapshots saved earlier are deleted when the policy is enabled. Applies to Windows 11 24H2 with KB5055627 and later.'''
+level = "advanced"
+category = "privacy"
+side-effects = "Snapshots already saved for Recall are deleted, and reverting this entry does not bring them back."
+min-build = 26100
+source = "https://learn.microsoft.com/windows/client-management/mdm/policy-csp-windowsai#disableaidataanalysis"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SOFTWARE\Policies\Microsoft\Windows\WindowsAI', name = "DisableAIDataAnalysis", data = { dword = 1 } }
+
+[[tweak]]
+id = "privacy.delivery-optimization-peering"
+title = "Turn off peer-to-peer downloads"
+summary = "Windows downloads updates and apps only from Microsoft servers or a cache server, and does not share them with other PCs."
+detail = '''Policy: Computer Configuration > Administrative Templates > Windows Components > Delivery Optimization > Download Mode, set to HTTP only. Sets HKLM\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization\DODownloadMode (REG_DWORD) to 0 (HTTP only, no peering). Other values: 1 LAN, 2 group, 3 Internet, 99 HTTP only without the Delivery Optimization cloud service, 100 bypass (deprecated in Windows 11).'''
+level = "advanced"
+category = "privacy"
+side-effects = "Downloads cannot use other PCs on your network as a source, so a slow Internet connection is felt more."
+source = "https://learn.microsoft.com/windows/client-management/mdm/policy-csp-deliveryoptimization#dodownloadmode"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization', name = "DODownloadMode", data = { dword = 0 } }

@@ -1,0 +1,91 @@
+# Other: interface and quality-of-life adjustments.
+# Rules for every entry are in docs/tweak-catalog.md.
+
+[[tweak]]
+id = "other.transparency"
+title = "Turn off transparency effects"
+summary = "Windows and surfaces such as Start and the taskbar use solid colors instead of translucent ones."
+detail = '''Sets HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize\EnableTransparency (REG_DWORD) to 0. Microsoft lists the value, 0 or 1, as the switch for the transparency effect on windows and surfaces.'''
+level = "simple"
+category = "other"
+source = "https://learn.microsoft.com/windows/apps/develop/settings/settings-common"
+
+[[tweak.action]]
+registry = { scope = "user", key = 'Software\Microsoft\Windows\CurrentVersion\Themes\Personalize', name = "EnableTransparency", data = { dword = 0 } }
+
+[[tweak]]
+id = "other.start-recommendations"
+title = "Hide recommendations in Start"
+summary = "The Start menu stops showing recommended tips, shortcuts and new apps."
+detail = '''Sets HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\Start_IrisRecommendations (REG_DWORD) to 0. Microsoft lists the value, 0 or 1, as specifying whether recommendations for tips, shortcuts, new apps and more are shown in Start.'''
+level = "simple"
+category = "other"
+min-build = 22000
+source = "https://learn.microsoft.com/windows/apps/develop/settings/settings-windows-11"
+
+[[tweak.action]]
+registry = { scope = "user", key = 'Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced', name = "Start_IrisRecommendations", data = { dword = 0 } }
+
+[[tweak]]
+id = "other.widgets"
+title = "Turn off Widgets"
+summary = "The Widgets feature is turned off, including its content on the taskbar."
+detail = '''Policy: Computer Configuration > Administrative Templates > Windows Components > Widgets > Allow widgets (AllowNewsAndInterests). Sets HKLM\SOFTWARE\Policies\Microsoft\Dsh\AllowNewsAndInterests (REG_DWORD) to 0 (not allowed). The policy applies to the entire widgets experience, including content on the taskbar. Applies to Windows 11 21H2 and later.'''
+level = "advanced"
+category = "other"
+min-build = 22000
+source = "https://learn.microsoft.com/windows/client-management/mdm/policy-csp-newsandinterests#allownewsandinterests"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SOFTWARE\Policies\Microsoft\Dsh', name = "AllowNewsAndInterests", data = { dword = 0 } }
+
+[[tweak]]
+id = "other.clipboard-history"
+title = "Turn off clipboard history"
+summary = "Windows stops keeping a list of what you copied, so Win+V has nothing to show."
+detail = '''Policy: Computer Configuration > Administrative Templates > System > OS Policies > Allow Clipboard History (AllowClipboardHistory). Sets HKLM\Software\Policies\Microsoft\Windows\System\AllowClipboardHistory (REG_DWORD) to 0 (not allowed). Clipboard contents are then not stored in memory as a history. The change takes effect immediately, and the Clipboard page in Settings is greyed out with a policy warning. Applies to Windows 10 1809 and later and Windows 11.'''
+level = "advanced"
+category = "other"
+side-effects = "Win+V no longer lists earlier copies."
+source = "https://learn.microsoft.com/windows/client-management/mdm/policy-csp-experience#allowclipboardhistory"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'Software\Policies\Microsoft\Windows\System', name = "AllowClipboardHistory", data = { dword = 0 } }
+
+[[tweak]]
+id = "other.consumer-experiences"
+title = "Turn off Microsoft consumer experiences"
+summary = "Windows stops showing Start suggestions and membership notifications, and stops installing promoted apps after setup."
+detail = '''Policy: Computer Configuration > Administrative Templates > Windows Components > Cloud Content > Turn off Microsoft consumer experiences. Sets HKLM\SOFTWARE\Policies\Microsoft\Windows\CloudContent\DisableWindowsConsumerFeatures (REG_DWORD) to 1. Microsoft lists the policy for the Enterprise and Education editions only; Windows Pro does not honor it.'''
+level = "advanced"
+category = "other"
+side-effects = "No effect on editions other than Enterprise and Education."
+source = "https://learn.microsoft.com/windows/client-management/mdm/policy-csp-experience#allowwindowsconsumerfeatures"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SOFTWARE\Policies\Microsoft\Windows\CloudContent', name = "DisableWindowsConsumerFeatures", data = { dword = 1 } }
+
+[[tweak]]
+id = "other.windows-spotlight"
+title = "Turn off all Windows Spotlight features"
+summary = "Windows Spotlight on the lock screen, Windows tips and related suggestions are turned off for the user."
+detail = '''Policy: User Configuration > Administrative Templates > Windows Components > Cloud Content > Turn off all Windows spotlight features. Sets HKCU\SOFTWARE\Policies\Microsoft\Windows\CloudContent\DisableWindowsSpotlightFeatures (REG_DWORD) to 1. Microsoft states that this turns off Windows Spotlight on the lock screen, Windows tips, Microsoft consumer features and other related features, and lists it for the Enterprise and Education editions only.'''
+level = "advanced"
+category = "other"
+side-effects = "No effect on editions other than Enterprise and Education."
+source = "https://learn.microsoft.com/windows/client-management/mdm/policy-csp-experience#allowwindowsspotlight"
+
+[[tweak.action]]
+registry = { scope = "user", key = 'SOFTWARE\Policies\Microsoft\Windows\CloudContent', name = "DisableWindowsSpotlightFeatures", data = { dword = 1 } }
+
+[[tweak]]
+id = "other.apps-for-websites"
+title = "Turn off apps for websites"
+summary = "Links on websites that are registered with an app no longer open that app directly."
+detail = '''Policy: Computer Configuration > Administrative Templates > System > Group Policy > Configure web-to-app linking with URI handlers, disabled. Sets HKLM\SOFTWARE\Policies\Microsoft\Windows\System\EnableAppUriHandlers (REG_DWORD) to 0.'''
+level = "advanced"
+category = "other"
+source = "https://learn.microsoft.com/windows/privacy/manage-connections-from-windows-operating-system-components-to-microsoft-services"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SOFTWARE\Policies\Microsoft\Windows\System', name = "EnableAppUriHandlers", data = { dword = 0 } }

@@ -1,0 +1,295 @@
+# Security: attack surface and exploit mitigations.
+# Every entry sets a direction. Entries that weaken carry a risk and are Advanced.
+# Entries with audit = true are detect-only: they are reported, never applied.
+# Rules for every entry are in docs/tweak-catalog.md.
+
+[[tweak]]
+id = "security.lsa-protection"
+title = "Run LSA as a protected process"
+summary = "The Local Security Authority, which holds sign-in credentials, runs as a protected process that only correctly signed plug-ins and drivers can load into."
+detail = '''Sets HKLM\SYSTEM\CurrentControlSet\Control\Lsa\RunAsPPL (REG_DWORD) to 2: added LSA protection without a UEFI lock, enforced only on Windows 11 22H2 and later. The value 1 stores a UEFI variable that registry or policy changes cannot remove, so this entry never uses it. Windows 11 22H2 and later already enable it by default, without a UEFI variable, on new installations that meet Microsoft's criteria, and run audit mode by default.'''
+level = "advanced"
+category = "security"
+direction = "hardens"
+side-effects = "LSA plug-ins and drivers that are not correctly signed fail to load. A debugger cannot attach to LSASS while it runs as a protected process."
+reboot = "restart"
+source = "https://learn.microsoft.com/windows-server/security/credentials-protection-and-management/configuring-additional-lsa-protection"
+min-build = 22621
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SYSTEM\CurrentControlSet\Control\Lsa', name = "RunAsPPL", data = { dword = 2 } }
+
+[[tweak]]
+id = "security.memory-integrity"
+title = "Turn on memory integrity"
+summary = "Windows checks kernel code with virtualization-based protection and blocks drivers that fail the check."
+detail = '''Microsoft's recommended registry settings for memory integrity without a UEFI lock. Under HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard: EnableVirtualizationBasedSecurity = 1, RequirePlatformSecurityFeatures = 1 (Secure Boot; 3 would also require DMA protection) and Locked = 0. Under HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity: Enabled = 1 and Locked = 0. If the system fails to boot after this change, set Scenarios\HypervisorEnforcedCodeIntegrity\Enabled to 0 from the Windows recovery environment.'''
+level = "advanced"
+category = "security"
+direction = "hardens"
+side-effects = "Drivers that are not compatible are blocked. Microsoft warns that the system may fail if incompatible drivers load, so test on one PC first."
+reboot = "restart"
+source = "https://learn.microsoft.com/windows/security/hardware-security/enable-virtualization-based-protection-of-code-integrity"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SYSTEM\CurrentControlSet\Control\DeviceGuard', name = "EnableVirtualizationBasedSecurity", data = { dword = 1 } }
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SYSTEM\CurrentControlSet\Control\DeviceGuard', name = "RequirePlatformSecurityFeatures", data = { dword = 1 } }
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SYSTEM\CurrentControlSet\Control\DeviceGuard', name = "Locked", data = { dword = 0 } }
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity', name = "Enabled", data = { dword = 1 } }
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity', name = "Locked", data = { dword = 0 } }
+
+[[tweak]]
+id = "security.ntlmv2-only"
+title = "Require NTLMv2 for network sign-in"
+summary = "This PC authenticates to network servers with NTLMv2 only, never with the older LM or NTLM responses."
+detail = '''Policy: Computer Configuration > Windows Settings > Security Settings > Local Policies > Security Options > Network security: LAN Manager authentication level, set to Send NTLMv2 response only. Refuse LM & NTLM. Sets HKLM\System\CurrentControlSet\Control\Lsa\LmCompatibilityLevel (REG_DWORD) to 5. Client devices use NTLMv2 authentication, and NTLMv2 session security if the server supports it. Domain controllers refuse LM and NTLM authentication and accept only NTLMv2.'''
+level = "advanced"
+category = "security"
+direction = "hardens"
+side-effects = "Servers, NAS devices and printers that only support LM or NTLM can no longer authenticate."
+reboot = "restart"
+source = "https://learn.microsoft.com/windows/security/threat-protection/security-policy-settings/network-security-lan-manager-authentication-level"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'System\CurrentControlSet\Control\Lsa', name = "LmCompatibilityLevel", data = { dword = 5 } }
+
+[[tweak]]
+id = "security.smb-client-signing"
+title = "Require SMB signing for outgoing connections"
+summary = "This PC refuses to use SMB file shares on servers that do not sign their messages."
+detail = '''Policy: Computer Configuration > Windows Settings > Security Settings > Local Policies > Security Options > Microsoft network client: Digitally sign communications (always). Sets HKLM\System\CurrentControlSet\Services\LanManWorkstation\Parameters\RequireSecuritySignature (REG_DWORD) to 1. For SMB 2 and later, signing is controlled solely by whether it is required.'''
+level = "advanced"
+category = "security"
+direction = "hardens"
+side-effects = "Servers and devices that do not support SMB signing can no longer be reached."
+reboot = "restart"
+source = "https://learn.microsoft.com/windows-server/storage/file-server/smb-signing-overview"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'System\CurrentControlSet\Services\LanManWorkstation\Parameters', name = "RequireSecuritySignature", data = { dword = 1 } }
+
+[[tweak]]
+id = "security.smb-server-signing"
+title = "Require SMB signing for incoming connections"
+summary = "This PC refuses SMB connections from clients that do not sign their messages."
+detail = '''Policy: Computer Configuration > Windows Settings > Security Settings > Local Policies > Security Options > Microsoft network server: Digitally sign communications (always). Sets HKLM\System\CurrentControlSet\Services\LanManServer\Parameters\RequireSecuritySignature (REG_DWORD) to 1. For SMB 2 and later, signing is controlled solely by whether it is required.'''
+level = "advanced"
+category = "security"
+direction = "hardens"
+side-effects = "Clients and devices that do not support SMB signing can no longer use shares on this PC."
+reboot = "restart"
+source = "https://learn.microsoft.com/windows-server/storage/file-server/smb-signing-overview"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'System\CurrentControlSet\Services\LanManServer\Parameters', name = "RequireSecuritySignature", data = { dword = 1 } }
+
+[[tweak]]
+id = "security.smb1-server"
+title = "Turn off the SMBv1 server"
+summary = "This PC no longer accepts SMBv1 connections. SMB 2 and SMB 3 keep working."
+detail = '''Sets HKLM\SYSTEM\CurrentControlSet\Services\LanManServer\Parameters\SMB1 (REG_DWORD) to 0. The value does not exist by default and the default is enabled. Microsoft states that SMBv1 has significant security vulnerabilities and strongly encourages you not to use it.'''
+level = "advanced"
+category = "security"
+direction = "hardens"
+side-effects = "Old computers and software that only speak SMBv1 can no longer connect to shares on this PC."
+reboot = "restart"
+source = "https://learn.microsoft.com/windows-server/storage/file-server/troubleshoot/detect-enable-and-disable-smbv1-v2-v3"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters', name = "SMB1", data = { dword = 0 } }
+
+[[tweak]]
+id = "security.llmnr"
+title = "Turn off LLMNR"
+summary = "Windows stops using link-local multicast name resolution (LLMNR), a fallback that any device on the local network can answer."
+detail = '''Policy: Computer Configuration > Administrative Templates > Network > DNS Client > Turn off multicast name resolution, enabled. Sets HKLM\Software\Policies\Microsoft\Windows NT\DNSClient\EnableMulticast (REG_DWORD) to 0. With the policy enabled, LLMNR is disabled on all network adapters of the DNS client.'''
+level = "advanced"
+category = "security"
+direction = "hardens"
+side-effects = "Devices on the local subnet that have no DNS record stop resolving by name through LLMNR."
+source = "https://learn.microsoft.com/windows/client-management/mdm/policy-csp-admx-dnsclient#turn_off_multicast"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'Software\Policies\Microsoft\Windows NT\DNSClient', name = "EnableMulticast", data = { dword = 0 } }
+
+[[tweak]]
+id = "security.wdigest"
+title = "Turn off WDigest credential caching"
+summary = "Windows does not keep WDigest sign-in credentials in memory, where malware could read them."
+detail = '''Sets HKLM\System\CurrentControlSet\Control\SecurityProviders\WDigest\UseLogonCredential (REG_DWORD) to 0, so WDigest does not store credentials in memory. A value of 1 stores them. Windows 8.1, Windows Server 2012 R2 and later already default to 0 when the value is absent, so this entry makes the default explicit.'''
+level = "advanced"
+category = "security"
+direction = "hardens"
+side-effects = "Microsoft notes that you may be asked for credentials more often when you use WDigest."
+reboot = "restart"
+source = "https://support.microsoft.com/help/2871997"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'System\CurrentControlSet\Control\SecurityProviders\WDigest', name = "UseLogonCredential", data = { dword = 0 } }
+
+[[tweak]]
+id = "security.printer-driver-installation"
+title = "Require administrator rights to install printer drivers"
+summary = "Only administrators can install printer drivers from a print server through Point and Print."
+detail = '''Sets HKLM\Software\Policies\Microsoft\Windows NT\Printers\PointAndPrint\RestrictDriverInstallationToAdministrators (REG_DWORD) to 1. Microsoft documents that updates released on August 10, 2021 and later already default to 1 when the value is absent, and that the value overrides all Point and Print Restrictions policy settings. A value of 0 lets non-administrators install signed and unsigned drivers, and Microsoft states there is no combination of mitigations equivalent to setting it to 1. No restart is required.'''
+level = "advanced"
+category = "security"
+direction = "hardens"
+side-effects = "Standard users can no longer install printer drivers from a print server. An administrator has to do it."
+source = "https://support.microsoft.com/help/5005652"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'Software\Policies\Microsoft\Windows NT\Printers\PointAndPrint', name = "RestrictDriverInstallationToAdministrators", data = { dword = 1 } }
+
+[[tweak]]
+id = "security.insecure-guest-logons"
+title = "Block insecure SMB guest logons"
+summary = "This PC refuses guest logons to SMB servers that need no credentials."
+detail = '''Policy: Computer Configuration > Administrative Templates > Network > Lanman Workstation > Enable insecure guest logons, disabled. Sets HKLM\Software\Policies\Microsoft\Windows\LanmanWorkstation\AllowInsecureGuestAuth (REG_DWORD) to 0 (the SMB client rejects insecure guest logons). Applies to Windows 10 1803 and later and Windows 11.'''
+level = "advanced"
+category = "security"
+direction = "hardens"
+side-effects = "Microsoft notes that consumer NAS appliances often rely on insecure guest logons, so they stop working until you give them credentials."
+source = "https://learn.microsoft.com/windows/client-management/mdm/policy-csp-lanmanworkstation#enableinsecureguestlogons"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'Software\Policies\Microsoft\Windows\LanmanWorkstation', name = "AllowInsecureGuestAuth", data = { dword = 0 } }
+
+[[tweak]]
+id = "security.autorun"
+title = "Turn off AutoRun on every drive type"
+summary = "Windows never runs the commands in an autorun.inf file when you insert a drive or disc."
+detail = '''Sets HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\NoDriveTypeAutoRun (REG_DWORD) to 255 (0xFF). The value is a bit mask in its first byte, and a set bit turns AutoRun off for that class of drive: 0x04 removable, 0x08 fixed, 0x10 network, 0x20 CD-ROM, 0x40 RAM disk. 255 sets every bit, including these five. Windows Explorer must be restarted before the change takes effect.'''
+level = "advanced"
+category = "security"
+direction = "hardens"
+side-effects = "Discs and drives that relied on AutoRun no longer start their installers by themselves."
+reboot = "sign-out"
+source = "https://learn.microsoft.com/windows/win32/shell/autoplay-reg"
+
+[[tweak.action]]
+registry = { scope = "user", key = 'Software\Microsoft\Windows\CurrentVersion\Policies\Explorer', name = "NoDriveTypeAutoRun", data = { dword = 255 } }
+
+[[tweak]]
+id = "security.solicited-remote-assistance"
+title = "Turn off solicited Remote Assistance"
+summary = "Nobody can ask for help through Remote Assistance on this PC, and instant messaging programs cannot be used to connect to it."
+detail = '''Policy: Computer Configuration > Administrative Templates > System > Remote Assistance > Configure Solicited Remote Assistance, disabled. Sets HKLM\Software\policies\Microsoft\Windows NT\Terminal Services\fAllowToGetHelp (REG_DWORD) to 0. With the policy disabled, users cannot use email or file transfer to ask someone for help, and cannot use instant messaging programs to allow connections to the computer.'''
+level = "advanced"
+category = "security"
+direction = "hardens"
+side-effects = "Remote Assistance invitations sent by email, file transfer or instant messaging no longer work."
+source = "https://learn.microsoft.com/windows/client-management/mdm/policy-csp-remoteassistance#solicitedremoteassistance"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'Software\policies\Microsoft\Windows NT\Terminal Services', name = "fAllowToGetHelp", data = { dword = 0 } }
+
+[[tweak]]
+id = "security.remote-desktop-nla"
+title = "Require NLA for incoming Remote Desktop connections"
+summary = "Remote Desktop users must authenticate before a session is created, which limits what an unauthenticated client can reach."
+detail = '''Policy: Computer Configuration > Administrative Templates > Windows Components > Remote Desktop Services > Remote Desktop Session Host > Security > Require user authentication for remote connections by using Network Level Authentication, enabled. Sets HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services\UserAuthentication (REG_DWORD) to 1. Only client computers that support Network Level Authentication can then connect. Microsoft warns that disabling the policy provides less security because authentication happens later in the connection process.'''
+level = "advanced"
+category = "security"
+direction = "hardens"
+side-effects = "Remote Desktop clients that do not support Network Level Authentication can no longer connect."
+source = "https://learn.microsoft.com/windows/client-management/mdm/policy-csp-admx-terminalserver#ts_user_authentication_policy"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services', name = "UserAuthentication", data = { dword = 1 } }
+
+[[tweak]]
+id = "security.speculative-execution-mitigations"
+title = "Turn off Spectre variant 2 and Meltdown mitigations"
+summary = "Windows stops applying its mitigations for the Spectre variant 2 (CVE-2017-5715) and Meltdown (CVE-2017-5754) CPU vulnerabilities."
+detail = '''Sets two REG_DWORD values under HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management: FeatureSettingsOverride to 3 and FeatureSettingsOverrideMask to 3. Microsoft documents this pair as the way to disable the mitigations for CVE-2017-5715 and CVE-2017-5754 on Windows clients. The mask value 3 is the same for the enable and the disable setting; the enable setting uses FeatureSettingsOverride = 0.'''
+level = "advanced"
+category = "security"
+direction = "weakens"
+risk = "Programs running on this PC, including malicious ones, can read memory they should not be able to see, such as passwords and keys from other programs or from the kernel, through CPU side-channel attacks."
+reboot = "restart"
+source = "https://support.microsoft.com/topic/kb4073119-windows-client-guidance-for-it-pros-to-protect-against-silicon-based-microarchitectural-and-speculative-execution-side-channel-vulnerabilities-35820a8a-ae13-1299-88cc-357f104f5b11"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management', name = "FeatureSettingsOverride", data = { dword = 3 } }
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management', name = "FeatureSettingsOverrideMask", data = { dword = 3 } }
+
+[[tweak]]
+id = "security.audit-secure-boot"
+title = "Check that Secure Boot is on"
+summary = "Reports whether Secure Boot is enabled. Windows cannot turn it on, so it is only checked; change it in the firmware settings."
+detail = '''Reads HKLM\SYSTEM\CurrentControlSet\Control\SecureBoot\State\UEFISecureBootEnabled (REG_DWORD), where 1 means enabled. Microsoft's Secure Boot inventory script uses this value as the registry fallback when the Confirm-SecureBootUEFI cmdlet is unavailable. The value is absent on a PC without UEFI Secure Boot.'''
+level = "advanced"
+category = "security"
+direction = "hardens"
+audit = true
+source = "https://support.microsoft.com/topic/sample-secure-boot-inventory-data-collection-script-d02971d2-d4b5-42c9-b58a-8527f0ffa30b"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SYSTEM\CurrentControlSet\Control\SecureBoot\State', name = "UEFISecureBootEnabled", data = { dword = 1 } }
+
+[[tweak]]
+id = "security.audit-secure-boot-certificates"
+title = "Check that Secure Boot certificates are updated"
+summary = "Reports whether the Windows UEFI CA 2023 Secure Boot certificates are installed. Windows and the PC maker control that update, so it is only checked."
+detail = '''Reads HKLM\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing\UEFICA2023Status (REG_SZ), which Microsoft's Secure Boot inventory script treats as complete when it reads Updated.'''
+level = "advanced"
+category = "security"
+direction = "hardens"
+audit = true
+source = "https://support.microsoft.com/topic/sample-secure-boot-inventory-data-collection-script-d02971d2-d4b5-42c9-b58a-8527f0ffa30b"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing', name = "UEFICA2023Status", data = { sz = "Updated" } }
+
+[[tweak]]
+id = "security.audit-uac-enabled"
+title = "Check that UAC is on"
+summary = "Reports whether User Account Control runs all administrators in Admin Approval Mode. It is only checked, never changed."
+detail = '''Reads HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\EnableLUA (REG_DWORD), the setting "Run all administrators in Admin Approval Mode": 0 is disabled, 1 is enabled (the default).'''
+level = "advanced"
+category = "security"
+direction = "hardens"
+audit = true
+source = "https://learn.microsoft.com/windows/security/application-security/application-control/user-account-control/settings-and-configuration"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System', name = "EnableLUA", data = { dword = 1 } }
+
+[[tweak]]
+id = "security.audit-uac-secure-desktop"
+title = "Check that UAC prompts use the secure desktop"
+summary = "Reports whether elevation prompts appear on the secure desktop. It is only checked, never changed."
+detail = '''Reads HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\PromptOnSecureDesktop (REG_DWORD), the setting "Switch to the secure desktop when prompting for elevation": 0 is disabled, 1 is enabled (the default).'''
+level = "advanced"
+category = "security"
+direction = "hardens"
+audit = true
+source = "https://learn.microsoft.com/windows/security/application-security/application-control/user-account-control/settings-and-configuration"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System', name = "PromptOnSecureDesktop", data = { dword = 1 } }
+
+[[tweak]]
+id = "security.audit-uac-secure-ui-paths"
+title = "Check that UIAccess apps elevate only from secure paths"
+summary = "Reports whether UAC elevates UIAccess applications only when they are installed in secure locations. It is only checked, never changed."
+detail = '''Reads HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\EnableSecureUIAPaths (REG_DWORD), the setting "Only elevate UIAccess applications that are installed in secure locations": 0 is disabled, 1 is enabled (the default).'''
+level = "advanced"
+category = "security"
+direction = "hardens"
+audit = true
+source = "https://learn.microsoft.com/windows/security/application-security/application-control/user-account-control/settings-and-configuration"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System', name = "EnableSecureUIAPaths", data = { dword = 1 } }

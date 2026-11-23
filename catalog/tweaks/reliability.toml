@@ -1,0 +1,81 @@
+# Reliability: stability, recoverability and update behavior.
+# Rules for every entry are in docs/tweak-catalog.md.
+
+[[tweak]]
+id = "reliability.fast-startup"
+title = "Turn off fast startup"
+summary = "Shut down fully shuts Windows down, so the next start loads everything fresh."
+detail = '''Sets HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power\HiberbootEnabled (REG_DWORD) to 0 (0 = disabled, 1 = enabled). Microsoft documents this value as the way to disable fast startup.'''
+level = "advanced"
+category = "reliability"
+side-effects = "Starting the PC after Shut down takes longer."
+source = "https://learn.microsoft.com/windows/configuration/unified-write-filter/hibernate-once-resume-many-horm"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SYSTEM\CurrentControlSet\Control\Session Manager\Power', name = "HiberbootEnabled", data = { dword = 0 } }
+
+[[tweak]]
+id = "reliability.crash-dump-automatic"
+title = "Write an automatic memory dump on a crash"
+summary = "After a system crash, Windows saves an automatic memory dump that you can use to find the cause."
+detail = '''Sets HKLM\System\CurrentControlSet\Control\CrashControl\CrashDumpEnabled (REG_DWORD) to 0x7 (automatic memory dump). Other documented values: 0x0 none, 0x1 complete memory dump, 0x2 kernel memory dump, 0x3 small memory dump (64 KB).'''
+level = "advanced"
+category = "reliability"
+side-effects = "A dump file is written to disk after every crash."
+reboot = "restart"
+source = "https://support.microsoft.com/help/254649"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'System\CurrentControlSet\Control\CrashControl', name = "CrashDumpEnabled", data = { dword = 7 } }
+
+[[tweak]]
+id = "reliability.long-paths"
+title = "Allow file paths longer than 260 characters"
+summary = "Apps that support it can open files whose full path is longer than 260 characters."
+detail = '''Policy: Computer Configuration > Administrative Templates > System > Filesystem > Enable Win32 long paths. Sets HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled (REG_DWORD) to 1. Only applications whose manifest declares them long path aware are affected. The system caches the value per process on the first affected file call, so a restart may be needed for every app to see it.'''
+level = "advanced"
+category = "reliability"
+reboot = "restart"
+source = "https://learn.microsoft.com/windows/win32/fileio/maximum-file-path-limitation"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SYSTEM\CurrentControlSet\Control\FileSystem', name = "LongPathsEnabled", data = { dword = 1 } }
+
+[[tweak]]
+id = "reliability.update-no-auto-restart"
+title = "Do not restart automatically while someone is signed in"
+summary = "Windows Update does not restart the PC by itself while a user is signed in."
+detail = '''Sets HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU\NoAutoRebootWithLoggedOnUsers (REG_DWORD) to 1. With the value at 1, Automatic Updates does not automatically restart a computer while users are logged on.'''
+level = "advanced"
+category = "reliability"
+side-effects = "Updates stay unfinished until someone restarts the PC, which delays the fixes they contain."
+source = "https://learn.microsoft.com/windows/deployment/update/waas-wu-settings"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU', name = "NoAutoRebootWithLoggedOnUsers", data = { dword = 1 } }
+
+[[tweak]]
+id = "reliability.update-exclude-drivers"
+title = "Exclude drivers from Windows Update"
+summary = "Windows Update stops installing driver updates together with quality updates, so a bad driver update cannot arrive unannounced."
+detail = '''Policy: Computer Configuration > Administrative Templates > Windows Components > Windows Update > Manage updates offered from Windows Update > Do not include drivers with Windows Updates. Sets HKLM\Software\Policies\Microsoft\Windows\WindowsUpdate\ExcludeWUDriversInQualityUpdate (REG_DWORD) to 1 (exclude Windows Update drivers). Applies to Windows 10 1607 and later and Windows 11.'''
+level = "advanced"
+category = "reliability"
+side-effects = "You have to install driver updates yourself, including security fixes in drivers, from the PC maker or the device maker."
+source = "https://learn.microsoft.com/windows/client-management/mdm/policy-csp-update#excludewudriversinqualityupdate"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'Software\Policies\Microsoft\Windows\WindowsUpdate', name = "ExcludeWUDriversInQualityUpdate", data = { dword = 1 } }
+
+[[tweak]]
+id = "reliability.storage-sense"
+title = "Turn on Storage Sense"
+summary = "Windows frees disk space on its own when the disk runs low on free space."
+detail = '''Policy: Computer Configuration > Administrative Templates > System > Storage Sense > Allow Storage Sense, enabled. Sets HKLM\Software\Policies\Microsoft\Windows\StorageSense\AllowStorageSenseGlobal (REG_DWORD) to 1 (allow). Storage Sense is then on with the default cadence "during low free disk space", and users can change the cadence but cannot turn it off. Applies to Windows 10 1903 and later and Windows 11.'''
+level = "advanced"
+category = "reliability"
+side-effects = "Storage Sense can clean up some of the user's files to free disk space, and users cannot turn it off while the policy is set."
+source = "https://learn.microsoft.com/windows/client-management/mdm/policy-csp-storage#allowstoragesenseglobal"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'Software\Policies\Microsoft\Windows\StorageSense', name = "AllowStorageSenseGlobal", data = { dword = 1 } }
