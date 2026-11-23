@@ -77,6 +77,12 @@ Windows refuses is shown as *Blocked by Windows*, with the reason. Changing
 anything needs an administrator; without one the app shows everything and
 offers to restart elevated.
 
+The Advanced level also has a Fans page: each fan's speed and duty, its curve
+and whether SysPilot follows it. Releases only show fans; following curves
+waits for a board to be validated (see [fan curves](docs/fan-curves.md)).
+
+![The Fans page with curves, from the demo of a validated board](docs/images/fans.png)
+
 `syspilot --demo` runs the app on made-up data without a service, to look
 around without changing anything.
 
