@@ -11,7 +11,8 @@
 
 use std::io::{self, Read, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::time::{Duration, Instant};
 
 use syspilot_hw::{Provider, SensorSpec};
@@ -30,6 +31,11 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 const SAMPLE_TIMEOUT: Duration = Duration::from_millis(750);
 /// How long a worker gets to exit by itself before it is terminated.
 const EXIT_GRACE: Duration = Duration::from_secs(2);
+/// How long after a worker failed a new one is started. Long enough for a
+/// machine that is resuming or overloaded to settle.
+const RESTART_DELAY: Duration = Duration::from_secs(5);
+/// The wait doubles after each restart that fails, up to this.
+const RESTART_DELAY_LIMIT: Duration = Duration::from_secs(60);
 /// `CREATE_NO_WINDOW`: a console service must not flash a window.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -44,7 +50,7 @@ pub struct WorkerLink {
 }
 
 /// Starts workers.
-pub trait WorkerSpawner: Send {
+pub trait WorkerSpawner: Send + Sync {
     /// Starts one worker.
     fn spawn(&self) -> io::Result<WorkerLink>;
 }
@@ -116,6 +122,16 @@ impl Worker {
         }
     }
 
+    /// The worker's report if it has arrived, without waiting. `Some(None)`
+    /// means the worker will never send one.
+    fn probed_by_now(&mut self) -> Option<Option<Probed>> {
+        match self.frames.try_recv() {
+            Ok(WorkerFrame::Probed(probed)) => Some(Some(*probed)),
+            Ok(WorkerFrame::Sample(_)) | Err(TryRecvError::Disconnected) => Some(None),
+            Err(TryRecvError::Empty) => None,
+        }
+    }
+
     /// Asks for one sample. `None` when the worker is gone or too slow.
     fn sample(&mut self) -> Option<Vec<Option<f64>>> {
         let requests = self.requests.as_mut()?;
@@ -145,32 +161,104 @@ impl Drop for Worker {
     }
 }
 
+/// Where a provider stands with its worker.
+enum Link {
+    /// The worker answers.
+    Live(Worker),
+    /// The worker failed. A new one is started at `retry_at`; if that one
+    /// fails too, the next wait is `delay`.
+    Down { retry_at: Instant, delay: Duration },
+    /// A new worker was started and is probing the machine. Nobody waits
+    /// for it: each sample only looks whether its report has arrived.
+    Restarting { worker: Worker, since: Instant, delay: Duration },
+}
+
+/// The sensor specs a sensor list describes, in its order.
+fn specs_of(sensors: &SensorList) -> Vec<SensorSpec> {
+    sensors
+        .sensors
+        .iter()
+        .filter_map(|sensor| {
+            let device = sensors.devices.get(sensor.device as usize)?;
+            Some(SensorSpec {
+                device: device.name.clone(),
+                class: device.class,
+                key: sensor.key.clone(),
+                label: sensor.label.clone(),
+                kind: sensor.kind,
+            })
+        })
+        .collect()
+}
+
 /// The worker's sensors, presented to the service's hub as one provider.
 struct WorkerProvider {
-    /// `None` after the worker failed; the sensors then read nothing.
-    worker: Option<Worker>,
+    link: Link,
+    spawner: Arc<dyn WorkerSpawner>,
+    /// Wait before the first restart; doubled after each failed one.
+    restart_delay: Duration,
     specs: Vec<SensorSpec>,
     needs_driver: Vec<bool>,
 }
 
 impl WorkerProvider {
-    fn new(worker: Worker, sensors: &SensorList) -> Self {
-        let specs = sensors
-            .sensors
-            .iter()
-            .filter_map(|sensor| {
-                let device = sensors.devices.get(sensor.device as usize)?;
-                Some(SensorSpec {
-                    device: device.name.clone(),
-                    class: device.class,
-                    key: sensor.key.clone(),
-                    label: sensor.label.clone(),
-                    kind: sensor.kind,
-                })
-            })
-            .collect();
+    fn new(
+        worker: Worker,
+        sensors: &SensorList,
+        spawner: Arc<dyn WorkerSpawner>,
+        restart_delay: Duration,
+    ) -> Self {
         let needs_driver = sensors.sensors.iter().map(|sensor| sensor.driver).collect();
-        Self { worker: Some(worker), specs, needs_driver }
+        Self {
+            link: Link::Live(worker),
+            spawner,
+            restart_delay,
+            specs: specs_of(sensors),
+            needs_driver,
+        }
+    }
+
+    /// The state after a failure: no worker, and a restart after `delay`.
+    fn down(delay: Duration) -> Link {
+        Link::Down { retry_at: Instant::now() + delay, delay: (delay * 2).min(RESTART_DELAY_LIMIT) }
+    }
+
+    /// One step with the worker: its values, or `None` while there are none.
+    /// Only a live worker is ever waited for, and only once: after a missed
+    /// answer it is replaced, so a stuck device costs one stall per restart.
+    fn step(&mut self) -> Option<Vec<Option<f64>>> {
+        let link = std::mem::replace(&mut self.link, Self::down(self.restart_delay));
+        let (link, values) = match link {
+            Link::Live(mut worker) => match worker.sample() {
+                Some(values) if values.len() == self.specs.len() => {
+                    (Link::Live(worker), Some(values))
+                }
+                _ => (Self::down(self.restart_delay), None),
+            },
+            Link::Down { retry_at, delay } if Instant::now() >= retry_at => {
+                match self.spawner.spawn() {
+                    Ok(link) => {
+                        let worker = Worker::start(link);
+                        (Link::Restarting { worker, since: Instant::now(), delay }, None)
+                    }
+                    Err(_) => (Self::down(delay), None),
+                }
+            }
+            Link::Down { retry_at, delay } => (Link::Down { retry_at, delay }, None),
+            Link::Restarting { mut worker, since, delay } => match worker.probed_by_now() {
+                // The same sensors in the same order, or its values would
+                // land on the wrong IDs.
+                Some(Some(probed)) if specs_of(&probed.sensors) == self.specs => {
+                    let values = worker.sample();
+                    (Link::Live(worker), values)
+                }
+                Some(_) => (Self::down(delay), None),
+                None if since.elapsed() > PROBE_TIMEOUT => (Self::down(delay), None),
+                None => (Link::Restarting { worker, since, delay }, None),
+            },
+        };
+        self.link = link;
+        values.filter(|values| values.len() == self.specs.len())
     }
 }
 
@@ -180,15 +268,9 @@ impl Provider for WorkerProvider {
     }
 
     fn sample(&mut self, out: &mut Vec<Option<f64>>) {
-        let values = self.worker.as_mut().and_then(Worker::sample);
-        match values {
-            Some(values) if values.len() == self.specs.len() => out.extend(values),
-            _ => {
-                // A worker that is gone, slow or confused is not asked
-                // again: one stall per sensor set is the most it may cost.
-                self.worker = None;
-                out.extend(std::iter::repeat_n(None, self.specs.len()));
-            }
+        match self.step() {
+            Some(values) => out.extend(values),
+            None => out.extend(std::iter::repeat_n(None, self.specs.len())),
         }
     }
 
@@ -199,7 +281,9 @@ impl Provider for WorkerProvider {
 
 /// The machine's hardware, reached through workers.
 pub struct WorkerHardware {
-    spawner: Box<dyn WorkerSpawner>,
+    spawner: Arc<dyn WorkerSpawner>,
+    /// Wait before a failed worker is replaced; see [`WorkerProvider`].
+    restart_delay: Duration,
     /// Reads the installed driver version without opening the driver. A
     /// change means the last report is out of date.
     installed_driver: fn() -> Option<String>,
@@ -209,13 +293,13 @@ pub struct WorkerHardware {
 
 impl WorkerHardware {
     /// Hardware read by workers from `spawner`.
-    pub fn new(spawner: Box<dyn WorkerSpawner>, installed_driver: fn() -> Option<String>) -> Self {
-        Self { spawner, installed_driver, report: None }
+    pub fn new(spawner: Arc<dyn WorkerSpawner>, installed_driver: fn() -> Option<String>) -> Self {
+        Self { spawner, restart_delay: RESTART_DELAY, installed_driver, report: None }
     }
 
     /// The real machine.
     pub fn machine() -> Self {
-        Self::new(Box::new(ProcessSpawner), syspilot_pawnio::installed_version)
+        Self::new(Arc::new(ProcessSpawner), syspilot_pawnio::installed_version)
     }
 
     fn start(&mut self) -> Result<(Worker, Probed), String> {
@@ -265,7 +349,12 @@ impl Hardware for WorkerHardware {
     fn providers(&mut self) -> Vec<Box<dyn Provider>> {
         match self.start() {
             Ok((worker, probed)) => {
-                let provider = WorkerProvider::new(worker, &probed.sensors);
+                let provider = WorkerProvider::new(
+                    worker,
+                    &probed.sensors,
+                    self.spawner.clone(),
+                    self.restart_delay,
+                );
                 self.remember(Ok(probed));
                 if provider.specs.is_empty() { Vec::new() } else { vec![Box::new(provider)] }
             }
@@ -346,6 +435,8 @@ mod tests {
         Works,
         /// Reports, then never answers a sample request.
         StopsAnswering,
+        /// The first worker stops answering; the ones after it work.
+        OnlyFirstStopsAnswering,
         /// Cannot be started.
         FailsToStart,
     }
@@ -371,10 +462,15 @@ mod tests {
             if self.behaviour == Behaviour::FailsToStart {
                 return Err(io::Error::new(io::ErrorKind::NotFound, "no executable"));
             }
-            self.started.fetch_add(1, Ordering::Relaxed);
+            let earlier = self.started.fetch_add(1, Ordering::Relaxed);
             let (request_reader, request_writer) = io::pipe()?;
             let (frame_reader, mut frame_writer) = io::pipe()?;
-            if self.behaviour == Behaviour::Works {
+            let works = match self.behaviour {
+                Behaviour::Works => true,
+                Behaviour::OnlyFirstStopsAnswering => earlier > 0,
+                Behaviour::StopsAnswering | Behaviour::FailsToStart => false,
+            };
+            if works {
                 std::thread::spawn(move || fake_worker(request_reader, frame_writer));
             } else {
                 write_frame(&mut frame_writer, &WorkerFrame::Probed(Box::new(fake_report())))
@@ -397,7 +493,7 @@ mod tests {
 
     fn hardware(behaviour: Behaviour) -> (WorkerHardware, Arc<AtomicU32>) {
         let (spawner, started) = FakeSpawner::new(behaviour);
-        (WorkerHardware::new(Box::new(spawner), no_driver), started)
+        (WorkerHardware::new(Arc::new(spawner), no_driver), started)
     }
 
     #[test]
@@ -461,9 +557,52 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_worker_is_replaced_without_waiting_and_the_values_come_back() {
+        let (mut hardware, started) = hardware(Behaviour::OnlyFirstStopsAnswering);
+        hardware.restart_delay = Duration::ZERO;
+        let mut providers = hardware.providers();
+        let mut values = Vec::new();
+        providers[0].sample(&mut values);
+        assert_eq!(values, [None, None], "the first worker missed its answer");
+
+        // The replacement reports on its own thread; no sample waits for it.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            values.clear();
+            let before = Instant::now();
+            providers[0].sample(&mut values);
+            assert!(
+                before.elapsed() < SAMPLE_TIMEOUT,
+                "(worker provider): expected a restart not to block a sample | waited: {:?}",
+                before.elapsed()
+            );
+            if values == FAKE_VALUES {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "(worker provider): expected values from the replacement worker | received: {values:?}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(started.load(Ordering::Relaxed), 2, "exactly one replacement");
+    }
+
+    #[test]
+    fn a_replacement_that_cannot_start_is_retried_ever_later() {
+        let first = WorkerProvider::down(Duration::from_secs(5));
+        let Link::Down { delay, .. } = first else { panic!("expected the down state") };
+        assert_eq!(delay, Duration::from_secs(10), "the next wait is doubled");
+        let Link::Down { delay, .. } = WorkerProvider::down(Duration::from_secs(45)) else {
+            panic!("expected the down state")
+        };
+        assert_eq!(delay, RESTART_DELAY_LIMIT, "and capped");
+    }
+
+    #[test]
     fn a_worker_that_cannot_start_is_reported_once_and_not_retried() {
         let (spawner, started) = FakeSpawner::new(Behaviour::FailsToStart);
-        let mut installed = WorkerHardware::new(Box::new(spawner), || Some("2.2.0".into()));
+        let mut installed = WorkerHardware::new(Arc::new(spawner), || Some("2.2.0".into()));
         assert!(installed.providers().is_empty());
         let DriverState::Failed { error } = installed.driver().state else {
             panic!("(worker hardware): expected a failed driver state when the worker is missing");
@@ -483,7 +622,7 @@ mod tests {
             (INSTALLED.load(Ordering::Relaxed) == 1).then(|| "2.2.0".to_owned())
         }
         let (spawner, started) = FakeSpawner::new(Behaviour::Works);
-        let mut hardware = WorkerHardware::new(Box::new(spawner), installed);
+        let mut hardware = WorkerHardware::new(Arc::new(spawner), installed);
         hardware.driver();
         hardware.driver();
         assert_eq!(started.load(Ordering::Relaxed), 1);

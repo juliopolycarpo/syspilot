@@ -102,7 +102,8 @@ worker is told to exit and sampling stops.
 The split keeps the resident service small (see the
 [overhead budget](overhead.md)) and keeps its event loop out of reach of a
 bus or driver that stalls: a worker that does not answer within 750 ms is
-dropped and its sensors read nothing until the next time they are opened.
+dropped, its sensors read nothing, and a new worker is started in the
+background after 5 s (doubling up to a minute if that one fails too).
 
 Whether the PawnIO driver is installed is checked on every status request, so
 installing it while the service runs is picked up without a restart.
