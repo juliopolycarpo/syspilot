@@ -19,6 +19,8 @@ fn hide_button(sensor: &SensorInfo, context: &ViewContext<App>) -> View {
     let name = format!("Hide {}", sensor.label);
     Button::new()
         .style(ButtonStyle::Subtle)
+        // Secondary to the reading, like a caption; hover still shows it.
+        .opacity(widgets::DIM)
         .automation_name(name.clone())
         .on_click(context.message(Message::HideSensor(sensor.key.clone(), true)))
         .content(FontIcon::new().glyph(HIDE_GLYPH))
