@@ -107,6 +107,7 @@ mod real {
     use syspilot_hw::chips::Detected;
     use syspilot_hw::driver::{Platform, SystemPlatform};
     use syspilot_hw::fan::board::BoardCatalog;
+    use syspilot_hw::fan::failsafe::OriginalStore;
     use syspilot_hw::fan::session::FanSession;
     use syspilot_hw::fan::store::FileOriginalStore;
     use syspilot_proto::profile::FanCurve;
@@ -128,7 +129,7 @@ mod real {
             &mut self,
             curves: &[FanCurve],
             store_directory: &Path,
-        ) -> Result<FanSession, String> {
+        ) -> Result<Option<FanSession>, String> {
             let catalog = BoardCatalog::shipped().map_err(|error| error.to_string())?;
             let Detected::Nuvoton { chip, .. } = &self.chip else {
                 return Err(format!(
@@ -139,9 +140,16 @@ mod real {
             let grant = catalog
                 .offer(&self.manufacturer, &self.product, *chip)
                 .map_err(|reason| reason.to_string())?;
-            let io = self.platform.super_io().map_err(|error| error.plain())?;
-            let store = FileOriginalStore::in_directory(store_directory)
+            let mut store = FileOriginalStore::in_directory(store_directory)
                 .map_err(|error| error.to_string())?;
+            // An empty plan with nothing to hand back never touches the
+            // driver: no handle is opened for it.
+            if curves.iter().all(|curve| !curve.enabled)
+                && store.channels().map_err(|error| error.to_string())?.is_empty()
+            {
+                return Ok(None);
+            }
+            let io = self.platform.super_io().map_err(|error| error.plain())?;
             FanSession::start(
                 &grant,
                 &self.chip,

@@ -93,9 +93,11 @@ pub struct Host<S> {
     /// Whether the hardware said "later" to something since the last check.
     look_pending: bool,
     started: Instant,
-    /// The curves the hardware was last told to follow. Empty until there
-    /// are any, so a service without curves never mentions fans to a worker.
-    fan_plan: Vec<FanCurve>,
+    /// The curves the hardware was last told to follow; `None` until the
+    /// first plan, which a service that accepts curves sends even when it
+    /// has none, so that a worker hands back what a crash left (see
+    /// [`FanPlan`]). A service that does not accept curves sends no plan.
+    fan_plan: Option<Vec<FanCurve>>,
     /// What clients were last told about the fan controller.
     fan_watch: fans::Watch,
 }
@@ -131,7 +133,7 @@ impl<S: StateStore + Clone + 'static> Host<S> {
             waiting: Vec::new(),
             look_pending: false,
             started: Instant::now(),
-            fan_plan: Vec::new(),
+            fan_plan: None,
             fan_watch: fans::Watch::default(),
         })
     }
@@ -392,11 +394,14 @@ impl<S: StateStore + Clone + 'static> Host<S> {
     }
 
     /// Hands the hardware the curves when they differ from the last ones.
+    /// The first plan goes out even when it has no curve: the worker that
+    /// receives it hands back any channel a crashed worker left in manual
+    /// mode, and a plan with no curve is how it learns where the record is.
     fn sync_fan_plan(&mut self, curves: &[FanCurve]) {
-        if self.fan_plan == curves {
+        if !self.core.fan_control() || self.fan_plan.as_deref() == Some(curves) {
             return;
         }
-        self.fan_plan = curves.to_vec();
+        self.fan_plan = Some(curves.to_vec());
         let plan = FanPlan {
             store_directory: self.parts.fan_store_directory.clone(),
             curves: curves.to_vec(),
@@ -842,16 +847,39 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
         }]
     }
 
+    fn plan_of(curves: Vec<FanCurve>) -> FanPlan {
+        FanPlan { store_directory: FAN_STORE.into(), curves }
+    }
+
     #[test]
-    fn a_service_without_curves_never_mentions_fans_to_the_hardware() {
+    fn a_service_without_curves_sends_one_empty_plan_so_a_worker_can_hand_back_a_crash() {
         let host = RunningHost::start_with(true);
+        host.hardware.set_fan_layout(board_layout(FanAvailability::Controllable));
+        let mut client = host.client();
+        enable_scratch(&mut client);
+        assert!(!client.status().unwrap().sampling, "no worker is kept for the fans");
+        let _sensors = host.subscribe(true);
+        assert!(client.status().unwrap().sampling);
+        assert_eq!(
+            host.hardware.fan_plans(),
+            [plan_of(Vec::new())],
+            "(fan plan): expected one plan with no curve, which names the store | received"
+        );
+        assert!(!client.status().unwrap().fans.channels[0].active);
+    }
+
+    // A build with the feature always accepts curves, so only a default build
+    // can be the service that does not.
+    #[cfg(not(feature = "fan-control"))]
+    #[test]
+    fn a_service_that_does_not_accept_curves_never_mentions_fans_to_the_hardware() {
+        let host = RunningHost::start();
         host.hardware.set_fan_layout(board_layout(FanAvailability::Controllable));
         let mut client = host.client();
         enable_scratch(&mut client);
         let _sensors = host.subscribe(true);
         assert!(client.status().unwrap().sampling);
         assert_eq!(host.hardware.fan_plans(), Vec::<FanPlan>::new());
-        assert!(!client.status().unwrap().fans.channels[0].active);
     }
 
     #[test]
@@ -864,12 +892,13 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
         assert!(client.status().unwrap().sampling, "a curve needs sensor values");
         assert_eq!(
             host.hardware.fan_plans(),
-            [FanPlan { store_directory: FAN_STORE.into(), curves: vec![curve_on(1)] }]
+            [plan_of(Vec::new()), plan_of(vec![curve_on(1)])],
+            "the empty first plan, then the curves"
         );
 
         // An unrelated change does not repeat the plan.
         enable_scratch(&mut client);
-        assert_eq!(host.hardware.fan_plans().len(), 1, "the same curves are not sent again");
+        assert_eq!(host.hardware.fan_plans().len(), 2, "the same curves are not sent again");
 
         let channel = &client.status().unwrap().fans.channels[0];
         assert!(channel.active);
@@ -881,8 +910,8 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
         // is served after the settling.
         let sampling = client.status().unwrap().sampling;
         let plans = host.hardware.fan_plans();
-        assert_eq!(plans.len(), 2);
-        assert!(plans[1].curves.is_empty(), "{plans:?}");
+        assert_eq!(plans.len(), 3);
+        assert!(plans[2].curves.is_empty(), "{plans:?}");
         assert!(!sampling, "nothing needs values any more");
     }
 
@@ -896,7 +925,11 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
         client.command(&Request::SetFans(vec![curve_on(1)])).unwrap();
         let status = client.status().unwrap();
         assert!(!status.sampling, "a board that cannot follow curves needs no worker");
-        assert_eq!(host.hardware.fan_plans(), Vec::<FanPlan>::new());
+        assert_eq!(
+            host.hardware.fan_plans(),
+            [plan_of(Vec::new())],
+            "(fan plan): expected no curve to reach a board that cannot follow them"
+        );
         assert_eq!(status.fans.availability, FanAvailability::ReadOnly { reason });
         let channel = &status.fans.channels[0];
         assert!(!channel.active);

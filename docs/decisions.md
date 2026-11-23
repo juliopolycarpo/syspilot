@@ -222,7 +222,9 @@ whose pipe closed can. The worker can also step by itself if the service
 stalls, and the panic hook that restores the fans belongs to the process that
 holds the controller (the release profile aborts on panic). The service
 stays free of hardware code, as decision 16 asked, and idle: with no enabled
-curve it keeps no worker, samples nothing and sends nothing.
+curve it keeps no worker and samples nothing. Its first plan goes out even
+with no curve, so that whichever worker runs hands back the channels a crash
+left in manual mode.
 
 **Cost.** The control loop lives in the process the service may replace when
 it misses a sample, so a replaced worker has to give the fans back in the

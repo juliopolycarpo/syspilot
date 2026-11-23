@@ -24,7 +24,9 @@
 //!    minimum duty if below, then handed back to the BIOS. A channel found in
 //!    manual mode with no stored original is never recorded as an original
 //!    (that state is the crashed program's, or another tool's): it is raised
-//!    to at least its minimum duty and left alone, blocked from control.
+//!    to at least its minimum duty and left alone, blocked from control. Every
+//!    channel in the store is visited, with a curve in the plan or not
+//!    ([`ChannelPlan::restore_only`]).
 //!
 //! The release profile builds with `panic = "abort"`, so `Drop` does not run
 //! on a panic there. The service has to install [`install_panic_release`];
@@ -39,7 +41,8 @@ use crate::bus::BusError;
 
 use super::board::BoardChannel;
 use super::curve::{
-    Curve, CurveError, CurveFollower, FollowerSettings, MAX_DUTY, Readings, TemperatureSource,
+    Curve, CurveError, CurveFollower, CurvePoint, FollowerSettings, MAX_DUTY, Readings,
+    TemperatureSource,
 };
 
 // ---------------------------------------------------------------------------
@@ -112,6 +115,11 @@ pub trait OriginalStore: Send {
 
     /// Forgets the original of `channel`, after it was restored.
     fn clear(&mut self, channel: &str) -> Result<(), StoreError>;
+
+    /// Every channel that has a saved original, in no particular order. Crash
+    /// recovery visits these whether or not the current plan has a curve for
+    /// them: a channel is only safe once its record is gone.
+    fn channels(&mut self) -> Result<Vec<String>, StoreError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -149,9 +157,39 @@ pub struct ChannelPlan {
     id: String,
     source: TemperatureSource,
     follower: CurveFollower,
+    /// Whether the controller may ever take the channel. `false` for a
+    /// channel that is only handed back to the BIOS ([`ChannelPlan::restore_only`]).
+    following: bool,
 }
 
 impl ChannelPlan {
+    /// A plan that never takes control: for a channel a crashed predecessor
+    /// recorded in the store and the current profile has no curve for. The
+    /// controller restores it, clears its record, retries a failed restore on
+    /// every tick, and writes nothing else.
+    ///
+    /// The curve and source are placeholders the controller never reads (a
+    /// plan that does not follow is skipped before them); the placeholder is
+    /// full duty, the safe answer should one ever be used.
+    pub fn restore_only(channel: &BoardChannel) -> Result<Self, CurveError> {
+        let point = |temperature, duty| CurvePoint { temperature, duty };
+        let settings = FollowerSettings {
+            hysteresis: 0.0,
+            min_duty: f64::from(channel.limits.min_duty),
+            max_rise_per_second: None,
+            max_fall_per_second: None,
+        };
+        Ok(Self {
+            id: format!("pwm{}", channel.pwm),
+            source: TemperatureSource::single(""),
+            follower: CurveFollower::new(
+                Curve::new(vec![point(0.0, MAX_DUTY), point(100.0, MAX_DUTY)])?,
+                settings,
+            )?,
+            following: false,
+        })
+    }
+
     /// A plan for a channel of a validated board: the minimum duty comes from
     /// the board entry's limits, so a user's curve cannot go below it.
     pub fn new(
@@ -170,6 +208,7 @@ impl ChannelPlan {
             id: format!("pwm{}", channel.pwm),
             source,
             follower: CurveFollower::new(curve, settings)?,
+            following: true,
         })
     }
 
@@ -495,6 +534,9 @@ impl ManagedChannel {
                 return;
             }
             Phase::Bios | Phase::Manual | Phase::FailSafe => {}
+        }
+        if !self.plan.following {
+            return;
         }
         // NaN is not a gap that can be trusted either.
         let reading = if elapsed_seconds.is_nan()
@@ -1014,6 +1056,11 @@ mod tests {
             self.check(StoreOperation::Clear)?;
             self.state.lock().unwrap().records.remove(channel);
             Ok(())
+        }
+
+        fn channels(&mut self) -> Result<Vec<String>, StoreError> {
+            self.check(StoreOperation::Load)?;
+            Ok(self.state.lock().unwrap().records.keys().cloned().collect())
         }
     }
 
@@ -1647,6 +1694,87 @@ may-stop = true
         assert!(rig.controller.recover().is_empty());
         assert!(rig.log.entries().is_empty());
         assert!(all_bios(&rig));
+    }
+
+    /// A controller whose only channel is `pwm` of the board, restore-only:
+    /// the shape of a channel the plan has no curve for.
+    fn restore_only_controller(
+        store: &FakeOriginalStore,
+        channel: &FakeFanChannel,
+        pwm: u8,
+    ) -> FanController {
+        let catalog = BoardCatalog::parse("test", BOARD).unwrap();
+        let grant = catalog.offer("ACME", "TEST BOARD", Chip::Nct6779D).unwrap();
+        let plan = ChannelPlan::restore_only(grant.channel(pwm).unwrap()).unwrap();
+        FanController::new(
+            FailSafePolicy::default(),
+            Box::new(store.clone()),
+            vec![(plan, Box::new(channel.clone()) as Box<dyn FanChannel>)],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_restore_only_channel_is_handed_back_by_recovery_and_never_taken_over() {
+        let (store, channels, log) = crashed_while_controlling();
+        let mut restarted = restore_only_controller(&store, &channels[1], 2);
+        log.clear();
+        let events = restarted.recover();
+
+        assert_eq!(
+            channels[1].registers(),
+            (BIOS_MODE, BIOS_DUTY),
+            "(recovery): expected pwm2 back with the BIOS | received a channel still in manual mode"
+        );
+        assert_eq!(store.record("pwm2"), None, "the record is cleared once restored");
+        assert!(store.record("pwm1").is_some(), "a channel nobody visits keeps its record");
+        assert!(
+            events.contains(&event(
+                "pwm2",
+                ChannelEvent::Released { reason: ReleaseReason::Recovery }
+            )),
+            "{events:?}"
+        );
+        assert_eq!(restarted.phase("pwm2"), Some(Phase::Bios));
+
+        // Good sensors for a long time: the channel is never read for an
+        // original, never written and never taken.
+        log.clear();
+        for _ in 0..10 {
+            restarted.tick(&good(), 1.0);
+        }
+        assert!(
+            log.entries().is_empty(),
+            "(restore-only channel): expected no I/O | {:?}",
+            log.entries()
+        );
+        assert_eq!(restarted.phase("pwm2"), Some(Phase::Bios));
+    }
+
+    #[test]
+    fn a_restore_only_channel_that_cannot_be_restored_stays_pending_and_is_retried_every_tick() {
+        let (store, channels, _log) = crashed_while_controlling();
+        channels[0].make_fail(FanOperation::Restore);
+        let mut restarted = restore_only_controller(&store, &channels[0], 1);
+        let events = restarted.recover();
+        assert!(problems(&events)[0].starts_with("pwm1: restoring the BIOS registers"));
+        assert_eq!(
+            restarted.phase("pwm1"),
+            Some(Phase::ReleasePending),
+            "a channel still in manual mode is not reported as the BIOS's"
+        );
+        assert!(store.record("pwm1").is_some(), "the record is kept for the retry");
+        assert!(channels[0].is_manual());
+
+        channels[0].make_work(FanOperation::Restore);
+        let events = restarted.tick(&good(), 1.0);
+        assert!(
+            events
+                .contains(&event("pwm1", ChannelEvent::Released { reason: ReleaseReason::Retry })),
+            "{events:?}"
+        );
+        assert_eq!(channels[0].registers(), (BIOS_MODE, BIOS_DUTY));
+        assert_eq!(store.record("pwm1"), None);
     }
 
     // -- Failures while taking control -----------------------------------

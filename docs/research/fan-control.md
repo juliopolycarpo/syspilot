@@ -92,6 +92,14 @@ leaves bank 0 selected, also when a step fails.
   least its minimum duty and restores the BIOS mode. A channel found in
   manual mode with no stored original is never recorded as the BIOS mode: it
   is raised to its minimum if below and left blocked.
+- Recovery visits every channel in `fan-originals.toml`, not only the ones
+  the new plan has a curve for. The session lists the store
+  (`OriginalStore::channels`) and gives each recorded channel that has no
+  curve a restore-only plan (`ChannelPlan::restore_only`): the controller
+  restores it, clears its record and retries a failed restore on every step,
+  and never takes it. A record for a channel the board entry does not list is
+  left untouched and reported as blocked. A restore that fails leaves the
+  channel in the "release pending" phase, never "BIOS".
 
 ## How it is wired (decision 18)
 
@@ -112,13 +120,19 @@ neither.
   from one. The reference board's entry stays `validated = false`.
 - **The plan** is the profile's enabled curves, sent by the service to the
   live worker (`FANS_REQUEST` and a `FanPlan` frame) when they change and to
-  every worker that replaces it. With no enabled curve the service sends
-  nothing, keeps no worker alive for the fans and the worker holds no
-  session. A board that cannot follow curves keeps no worker either.
+  every worker that replaces it. A service that accepts curves sends a first
+  plan even when it has no enabled curve: the plan carries the directory of
+  the store, which is how a worker learns where to look for what a crash
+  left. With no enabled curve the service keeps no worker alive for the fans
+  (a worker that runs for the sensors gets the empty plan and recovers), and
+  the worker holds a session only while something needs one. A board that
+  cannot follow curves keeps no worker either.
 - **The session** (`fan/session.rs`) opens the fan bus, puts each curve on its
-  channel, runs crash recovery before the first step and then steps from the
-  sensor samples: once per request, and by itself every two seconds if the
-  service stops asking. A curve for a channel the entry does not list is that
+  channel, runs crash recovery for every channel of the store before the
+  first step and then steps from the sensor samples: once per request, and by
+  itself every two seconds if the service stops asking. With no curve to run
+  and nothing in the store it opens nothing; with records and no curve it
+  recovers and is dropped, unless a restore failed and has to be retried. A curve for a channel the entry does not list is that
   channel's problem and the BIOS keeps it; the others run. The entry's
   minimum duty is a floor that a profile can raise and never lower.
 - **The original registers** are kept in `fan-originals.toml` in the
@@ -134,11 +148,11 @@ neither.
   | The service closes the pipe (stop, crash, uninstall) | Restores every channel before it exits |
   | The service stops asking for samples | Steps by itself every two seconds |
   | The plan changes | Restores the channels, then opens a session for the new curves |
-  | The plan has no enabled curve | Restores the channels and holds no session |
+  | The plan has no enabled curve | Restores the channels it holds and every channel the store still records, then holds no session (unless a restore failed and is being retried) |
   | The machine sleeps | Restores every channel at once and writes nothing until it wakes |
   | The machine wakes | Takes control again after a run of good readings |
   | A panic in the worker | The panic hook restores from the controller (the release profile aborts) |
-  | The worker is killed | Nothing runs. The chip keeps the last duty written, which is never below the minimum, until the next session restores the BIOS mode from the saved registers |
+  | The worker is killed | Nothing runs. The chip keeps the last duty written, which is never below the minimum, until the next worker that gets a plan restores the BIOS mode from the saved registers, whatever the plan holds. No worker is started only for that: with no curve and no one looking at the sensors, the channel waits for the next one |
   | A restore fails | The record is kept and the restore is retried on every step |
 
 - **What the status says**: `ServiceStatus.fans` joins the board's channels,

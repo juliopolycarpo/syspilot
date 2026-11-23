@@ -746,6 +746,10 @@ may-stop = false
             self.0.lock().unwrap().retain(|(id, _)| id != channel);
             Ok(())
         }
+
+        fn channels(&mut self) -> Result<Vec<String>, StoreError> {
+            Ok(self.0.lock().unwrap().iter().map(|(id, _)| id.clone()).collect())
+        }
     }
 
     fn readings(cpu: Option<f64>) -> Readings {

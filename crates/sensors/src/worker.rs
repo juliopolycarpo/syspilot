@@ -276,7 +276,9 @@ mod tests {
     #[cfg(feature = "fan-control")]
     mod fan_control {
         use super::*;
-        use crate::fan_fakes::{BIOS_MODE, CPU, ReplayHandles, curve, replay_access};
+        use crate::fan_fakes::{
+            BIOS_MODE, CPU, ReplayHandles, crashed_replay_access, curve, replay_access,
+        };
         use std::collections::VecDeque;
         use std::sync::{Arc, Mutex};
         use syspilot_proto::message::{FanPhase, FanRuntime};
@@ -359,6 +361,27 @@ mod tests {
             let reports = fan_frames(output);
             assert_eq!(reports.last().unwrap(), &Vec::<FanRuntime>::new());
             assert_eq!(handles.fan_writes().last(), Some(&(0x102, BIOS_MODE)));
+        }
+
+        #[test]
+        fn a_plan_without_enabled_curves_still_hands_back_what_a_crashed_worker_left() {
+            let (access, handles) = crashed_replay_access();
+            let mut machine = fake_machine();
+            machine.fan_access = Some(access);
+            let mut output = Vec::new();
+            run(move || machine, Cursor::new(plan_bytes(false)), &mut output).unwrap();
+
+            let writes = handles.fan_writes();
+            assert_eq!(
+                writes.last(),
+                Some(&(0x102, BIOS_MODE)),
+                "(recovery): expected the stored BIOS mode written back | received: {writes:?}"
+            );
+            assert_eq!(handles.stored_channels(), Vec::<String>::new());
+            let reports = fan_frames(output);
+            assert_eq!(reports.len(), 1, "{reports:?}");
+            assert_eq!(reports[0][0].channel, "board.pwm1");
+            assert_eq!(reports[0][0].phase, FanPhase::Bios);
         }
 
         /// A request stream the test feeds while the worker runs.

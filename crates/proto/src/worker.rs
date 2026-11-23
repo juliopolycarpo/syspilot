@@ -39,7 +39,8 @@ pub struct FanPlan {
     /// The directory where the worker keeps the BIOS registers it saved
     /// before its first write, so that a crash cannot lose them.
     pub store_directory: String,
-    /// The curves to follow. Empty hands every channel back to the BIOS.
+    /// The curves to follow. Empty follows nothing and hands back to the BIOS
+    /// every channel the worker holds or the store still records.
     pub curves: Vec<FanCurve>,
 }
 

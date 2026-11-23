@@ -39,19 +39,30 @@ min-duty = 20
 may-stop = false
 "#;
 
-/// An original store that keeps nothing between sessions.
-#[derive(Default)]
-struct ForgetfulStore;
+/// The records of an original store, shared by every session of one access,
+/// which is how a "restarted" worker finds what a "crashed" one saved.
+type Records = Arc<Mutex<Vec<(String, ControlSnapshot)>>>;
 
-impl OriginalStore for ForgetfulStore {
-    fn load(&mut self, _channel: &str) -> Result<Option<ControlSnapshot>, StoreError> {
-        Ok(None)
+/// An original store over [`Records`].
+struct SharedStore(Records);
+
+impl OriginalStore for SharedStore {
+    fn load(&mut self, channel: &str) -> Result<Option<ControlSnapshot>, StoreError> {
+        let records = locked(&self.0);
+        Ok(records.iter().find(|(id, _)| id == channel).map(|(_, record)| record.clone()))
     }
-    fn save(&mut self, _channel: &str, _original: &ControlSnapshot) -> Result<(), StoreError> {
+    fn save(&mut self, channel: &str, original: &ControlSnapshot) -> Result<(), StoreError> {
+        let mut records = locked(&self.0);
+        records.retain(|(id, _)| id != channel);
+        records.push((channel.to_owned(), original.clone()));
         Ok(())
     }
-    fn clear(&mut self, _channel: &str) -> Result<(), StoreError> {
+    fn clear(&mut self, channel: &str) -> Result<(), StoreError> {
+        locked(&self.0).retain(|(id, _)| id != channel);
         Ok(())
+    }
+    fn channels(&mut self) -> Result<Vec<String>, StoreError> {
+        Ok(locked(&self.0).iter().map(|(id, _)| id.clone()).collect())
     }
 }
 
@@ -63,9 +74,15 @@ type WriteLog = Arc<Mutex<Vec<SuperIoWrite>>>;
 pub struct ReplayHandles {
     logs: Arc<Mutex<Vec<WriteLog>>>,
     directories: Arc<Mutex<Vec<String>>>,
+    records: Records,
 }
 
 impl ReplayHandles {
+    /// The channels the store holds a saved original for.
+    pub fn stored_channels(&self) -> Vec<String> {
+        locked(&self.records).iter().map(|(id, _)| id.clone()).collect()
+    }
+
     /// The fan registers written so far, over every session, as
     /// `(address, value)`.
     pub fn fan_writes(&self) -> Vec<(u16, u8)> {
@@ -95,16 +112,22 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 struct ReplayAccess {
     handles: ReplayHandles,
     refuse: Option<String>,
+    /// The chip's mode register as each fresh replayed chip holds it.
+    mode: u8,
 }
 
 impl FanAccess for ReplayAccess {
-    fn open(&mut self, curves: &[FanCurve], store_directory: &Path) -> Result<FanSession, String> {
+    fn open(
+        &mut self,
+        curves: &[FanCurve],
+        store_directory: &Path,
+    ) -> Result<Option<FanSession>, String> {
         locked(&self.handles.directories).push(store_directory.display().to_string());
         if let Some(refusal) = &self.refuse {
             return Err(refusal.clone());
         }
         let mut fixture = Fixture::new();
-        for (address, value) in [(0x102u16, BIOS_MODE), (0x109, BIOS_DUTY), (0x001, BIOS_DUTY)] {
+        for (address, value) in [(0x102u16, self.mode), (0x109, BIOS_DUTY), (0x001, BIOS_DUTY)] {
             fixture.set(
                 superio_hwm_key(SuperIoSlot::Primary, (address >> 8) as u8, address as u8),
                 u64::from(value),
@@ -129,7 +152,7 @@ impl FanAccess for ReplayAccess {
             curves,
             Box::new(io),
             Arc::new(FakeBusLocks::free()),
-            Box::new(ForgetfulStore),
+            Box::new(SharedStore(self.handles.records.clone())),
         )
         .map_err(|error| error.to_string())
     }
@@ -138,13 +161,28 @@ impl FanAccess for ReplayAccess {
 /// An access on the replayed validated board, and the handles to inspect it.
 pub fn replay_access() -> (Access, ReplayHandles) {
     let handles = ReplayHandles::default();
-    (Box::new(ReplayAccess { handles: handles.clone(), refuse: None }), handles)
+    let access = ReplayAccess { handles: handles.clone(), refuse: None, mode: BIOS_MODE };
+    (Box::new(access), handles)
+}
+
+/// An access on the replayed board as a crashed worker left it: output 1 in
+/// manual mode (the mode register with its high nibble cleared) and its saved
+/// BIOS registers still in the store.
+pub fn crashed_replay_access() -> (Access, ReplayHandles) {
+    let handles = ReplayHandles::default();
+    locked(&handles.records).push((
+        "pwm1".into(),
+        ControlSnapshot { registers: vec![(0x109, BIOS_DUTY), (0x102, BIOS_MODE)] },
+    ));
+    let access = ReplayAccess { handles: handles.clone(), refuse: None, mode: BIOS_MODE & 0x0F };
+    (Box::new(access), handles)
 }
 
 /// An access that always refuses with `reason`, as a busy bus would.
 pub fn refusing_access(reason: &str) -> (Access, ReplayHandles) {
     let handles = ReplayHandles::default();
-    let access = ReplayAccess { handles: handles.clone(), refuse: Some(reason.to_owned()) };
+    let access =
+        ReplayAccess { handles: handles.clone(), refuse: Some(reason.to_owned()), mode: BIOS_MODE };
     (Box::new(access), handles)
 }
 

@@ -162,7 +162,7 @@ build, so it carries no version.
 | Worker to service | Once, first: a `Probed` frame with the driver state, the features, the system inventory, the sensor list and the `FanStatus` the board allows (channels, availability and reason, no curves yet). |
 | Service to worker | The byte `s` for each sample wanted. Any other byte is ignored by an older worker. |
 | Worker to service | One `Sample` frame per `s`: one optional value per sensor, in the order of the sensor list. |
-| Service to worker | The byte `f` followed by a `FanPlan` frame (the state directory and the enabled curves). It replaces any earlier plan; an empty one hands every channel back to the BIOS. Sent only when the curves changed and to each new worker, and never when the profile has no enabled curve. |
+| Service to worker | The byte `f` followed by a `FanPlan` frame (the state directory and the enabled curves). It replaces any earlier plan; an empty one follows nothing and hands every channel back to the BIOS, including any the state directory still records from a crashed worker. Sent only when the curves changed and to each new worker; the first one goes out even when the profile has no enabled curve. |
 | Service to worker | The byte `z` when the machine is about to sleep: every channel goes back to the BIOS and nothing is written until `r`, the byte for the wake. |
 | Worker to service | A `Fans` frame, a `FanRuntime` per channel (phase, target duty, problem), whenever something in it changed. It may arrive between a `Sample` and the next one; the service keeps the latest. |
 

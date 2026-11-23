@@ -121,8 +121,9 @@ have neither). The service never touches a fan register. It does three things:
 
 - It hands the profile's enabled curves to the live worker, and to each worker
   that replaces it, and forwards sleep and wake. With no enabled curve it
-  mentions nothing, keeps no worker running for the fans and the process stays
-  as idle as before. A board the worker found read-only keeps none either.
+  sends one empty plan (so a worker hands back what a crash left in manual
+  mode), keeps no worker running for the fans and the process stays as idle
+  as before. A board the worker found read-only keeps none either.
 - It merges the board's layout (from the worker's probe), the profile's curves
   and the controller's reports into `ServiceStatus.fans`, and tells subscribers
   when a channel's phase, problem or rounded target changes.

@@ -115,6 +115,10 @@ impl OriginalStore for FileOriginalStore {
         }
         self.write(&records)
     }
+
+    fn channels(&mut self) -> Result<Vec<String>, StoreError> {
+        Ok(self.read()?.channel.into_keys().collect())
+    }
 }
 
 #[cfg(test)]
@@ -219,6 +223,26 @@ mod tests {
             "channel = 5 this is not toml",
             "(original store): expected the unreadable file to be left for inspection"
         );
+    }
+
+    #[test]
+    fn every_channel_with_a_record_is_listed_and_a_cleared_one_is_not() {
+        let scratch = Scratch::new("listed");
+        let mut store = scratch.store();
+        assert_eq!(store.channels().unwrap(), Vec::<String>::new(), "no file, no channels");
+        store.save("pwm3", &snapshot(3, 4)).unwrap();
+        store.save("pwm1", &snapshot(1, 2)).unwrap();
+        assert_eq!(store.channels().unwrap(), ["pwm1", "pwm3"]);
+        store.clear("pwm1").unwrap();
+        assert_eq!(store.channels().unwrap(), ["pwm3"]);
+    }
+
+    #[test]
+    fn listing_a_file_that_does_not_parse_is_an_error() {
+        let scratch = Scratch::new("list-corrupt");
+        fs::write(scratch.file(), "channel = 5 this is not toml").unwrap();
+        let error = scratch.store().channels().unwrap_err().to_string();
+        assert!(error.contains("could not parse"), "{error}");
     }
 
     #[test]

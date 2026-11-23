@@ -97,12 +97,15 @@ mod active {
     /// for a grant first; tests open one over the replay bus.
     pub trait FanAccess: Send {
         /// Opens a session for the enabled curves of `curves`, keeping the
-        /// saved BIOS registers in `store_directory`.
+        /// saved BIOS registers in `store_directory`. The session also hands
+        /// back every channel a crashed predecessor left recorded there,
+        /// whatever `curves` say. `Ok(None)` when there is nothing to run
+        /// and nothing to hand back.
         fn open(
             &mut self,
             curves: &[FanCurve],
             store_directory: &Path,
-        ) -> Result<FanSession, String>;
+        ) -> Result<Option<FanSession>, String>;
     }
 
     /// What opens a session.
@@ -140,7 +143,10 @@ mod active {
         }
 
         /// Replaces the curves being followed. The old session hands the fans
-        /// back before the new one takes anything.
+        /// back before the new one takes anything. A board that may be
+        /// controlled is opened even for a plan with no curve, so that a
+        /// channel a crashed predecessor left in manual mode is handed back
+        /// whether or not the plan mentions it.
         pub fn set_plan(&mut self, plan: FanPlan) {
             if let Some(mut old) = self.session.take() {
                 old.stop();
@@ -148,23 +154,28 @@ mod active {
             self.last_step = None;
             let enabled: Vec<&FanCurve> =
                 plan.curves.iter().filter(|curve| curve.enabled).collect();
-            if enabled.is_empty() {
-                return self.report(Vec::new());
-            }
             let Some(access) = self.access.as_mut() else {
                 // The board is read-only: the status already says why, and
                 // nothing is opened.
+                if enabled.is_empty() {
+                    self.report(Vec::new());
+                }
                 return;
             };
             match access.open(&plan.curves, Path::new(&plan.store_directory)) {
-                Ok(mut session) => {
-                    // A panic in this process must hand the fans back too.
-                    session.install_panic_hook();
+                Ok(None) => self.report(Vec::new()),
+                Ok(Some(mut session)) => {
                     if self.suspended {
                         session.suspend();
                     }
                     let runtime = session.runtime();
-                    self.session = Some(session);
+                    // Only a session with work left is kept: one that just
+                    // handed the channels back has nothing more to do.
+                    if session.has_work() {
+                        // A panic in this process must hand the fans back too.
+                        session.install_panic_hook();
+                        self.session = Some(session);
+                    }
                     self.report(runtime);
                 }
                 Err(problem) => {
@@ -206,6 +217,10 @@ mod active {
                 })
                 .collect();
             let runtime = session.tick(&readings, elapsed);
+            // A session kept only to retry a restore ends when it succeeds.
+            if !session.has_work() {
+                self.session = None;
+            }
             self.report(runtime);
         }
 
@@ -245,7 +260,8 @@ mod active {
     mod tests {
         use super::*;
         use crate::fan_fakes::{
-            BIOS_MODE, CPU, ReplayHandles, curve, refusing_access, replay_access,
+            BIOS_MODE, CPU, ReplayHandles, crashed_replay_access, curve, refusing_access,
+            replay_access,
         };
 
         const DIRECTORY: &str = r"C:\data\SysPilot";
@@ -357,6 +373,63 @@ mod active {
             assert_eq!(handles.fan_writes().last(), Some(&(0x102, BIOS_MODE)));
             assert_eq!(fans.take_changes(), Some(Vec::new()));
             assert!(!fans.needs_steps());
+        }
+
+        fn crashed_fans() -> (Fans, ReplayHandles) {
+            let (access, handles) = crashed_replay_access();
+            assert_eq!(handles.stored_channels(), ["pwm1"], "setup: the crash left a record");
+            (Fans::new(Some(access)), handles)
+        }
+
+        fn pwm1_in(phase: FanPhase) -> Vec<FanRuntime> {
+            vec![FanRuntime {
+                channel: "board.pwm1".into(),
+                phase,
+                target_duty_pct: None,
+                problem: None,
+            }]
+        }
+
+        #[test]
+        fn a_plan_without_curves_hands_back_a_channel_a_crashed_worker_left_in_manual_mode() {
+            let (mut fans, handles) = crashed_fans();
+            fans.set_plan(plan(Vec::new()));
+            assert_eq!(
+                handles.fan_writes().last(),
+                Some(&(0x102, BIOS_MODE)),
+                "(recovery): expected pwm1's BIOS mode written back | received: {:?}",
+                handles.fan_writes()
+            );
+            assert_eq!(handles.stored_channels(), Vec::<String>::new(), "the record is cleared");
+            assert_eq!(fans.take_changes(), Some(pwm1_in(FanPhase::Bios)));
+            assert!(!fans.needs_steps(), "nothing is left to follow, so no session is kept");
+        }
+
+        #[test]
+        fn a_plan_whose_only_curve_is_disabled_still_hands_the_crashed_channel_back() {
+            let (mut fans, handles) = crashed_fans();
+            fans.set_plan(plan(vec![curve(false)]));
+            assert_eq!(handles.fan_writes().last(), Some(&(0x102, BIOS_MODE)));
+            assert_eq!(handles.stored_channels(), Vec::<String>::new());
+            assert!(!fans.needs_steps());
+        }
+
+        #[test]
+        fn a_plan_with_nothing_to_follow_and_nothing_to_hand_back_writes_nothing() {
+            let (mut fans, handles) = fans_on_replay();
+            fans.set_plan(plan(Vec::new()));
+            assert!(handles.fan_writes().is_empty());
+            assert_eq!(fans.take_changes(), None, "an idle worker says nothing");
+            assert!(!fans.needs_steps());
+        }
+
+        #[test]
+        fn a_crashed_channel_is_handed_back_before_its_curve_takes_it() {
+            let (mut fans, handles) = crashed_fans();
+            fans.set_plan(plan(vec![curve(true)]));
+            assert_eq!(handles.fan_writes().last(), Some(&(0x102, BIOS_MODE)), "recovery first");
+            assert_eq!(handles.stored_channels(), Vec::<String>::new());
+            assert!(fans.needs_steps(), "the curve is followed from here");
         }
 
         #[test]

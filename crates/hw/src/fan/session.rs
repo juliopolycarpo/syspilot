@@ -3,7 +3,8 @@
 //! `fan-control` cargo feature.
 //!
 //! The sensor worker holds one session while the profile has an enabled
-//! curve. It feeds [`FanSession::tick`] the sensor readings once a control
+//! curve, or while a channel a crashed predecessor left in manual mode waits
+//! to be handed back. It feeds [`FanSession::tick`] the sensor readings once a control
 //! step and sends what comes back to the service as [`FanRuntime`]s. The
 //! session adds nothing to the controller's rules (full speed when a sensor
 //! fails, the BIOS mode back on stop, suspend, shutdown and panic); it
@@ -67,6 +68,14 @@ pub struct FanSession {
     controller: Arc<Mutex<FanController>>,
     tracked: Vec<Tracked>,
     sources: Vec<String>,
+    /// Whether any curve runs. A session without one exists only to hand
+    /// back what a crashed predecessor left in the store.
+    follows_curves: bool,
+}
+
+/// The pwm output number of a controller channel id (`pwm3` is 3).
+fn pwm_of_id(id: &str) -> Option<u8> {
+    id.strip_prefix("pwm")?.parse().ok()
 }
 
 fn lock(controller: &Mutex<FanController>) -> MutexGuard<'_, FanController> {
@@ -127,22 +136,31 @@ impl FanSession {
     /// problem and left to the BIOS; the others run. Crash recovery runs
     /// before the first tick, so a channel a dead predecessor left in manual
     /// mode is back with the BIOS (or raised to its minimum) first.
+    ///
+    /// Recovery covers every channel the store holds a record for, not only
+    /// the channels of `curves`: a channel whose curve was removed, disabled
+    /// or moved, or a profile with no curve at all, still gets its BIOS mode
+    /// back. Those channels are reported too, and a session may then exist
+    /// only for them (see [`FanSession::has_work`]).
+    ///
+    /// `Ok(None)` when there is nothing to do: no enabled curve and nothing
+    /// in the store. The bus is not opened and nothing is written.
     pub fn start(
         grant: &ControlGrant<'_>,
         detected: &Detected,
         curves: &[FanCurve],
         io: Box<dyn SuperIo>,
         locks: Arc<dyn BusLocks>,
-        store: Box<dyn OriginalStore>,
-    ) -> Result<Self, SessionError> {
+        mut store: Box<dyn OriginalStore>,
+    ) -> Result<Option<Self>, SessionError> {
         let enabled: Vec<&FanCurve> = curves.iter().filter(|curve| curve.enabled).collect();
-        if enabled.is_empty() {
-            return Err(SessionError::new("at least one enabled curve", "none"));
-        }
+        let stored = store.channels().map_err(|error| {
+            SessionError::new("the stored originals to be listed", error.to_string())
+        })?;
         let mut tracked = Vec::new();
         let mut planned: Vec<(ChannelPlan, &BoardChannel)> = Vec::new();
         let mut sources = BTreeSet::new();
-        for curve in enabled {
+        for curve in &enabled {
             let key = curve.channel.clone();
             let refuse = |problem: String| Tracked {
                 runtime: FanRuntime {
@@ -184,9 +202,51 @@ impl FanSession {
                 Err(problem) => tracked.push(refuse(problem)),
             }
         }
-        if planned.is_empty() {
+        // Every other channel with a record is handed back and never followed.
+        let mut restored: Vec<(ChannelPlan, &BoardChannel)> = Vec::new();
+        for id in stored {
+            if planned.iter().any(|(plan, _)| plan.id() == id) {
+                continue;
+            }
+            let Some(channel) = pwm_of_id(&id).and_then(|pwm| grant.channel(pwm)) else {
+                // A record the board's entry cannot explain stays untouched:
+                // nothing here knows which registers it was about.
+                tracked.push(Tracked {
+                    runtime: FanRuntime {
+                        channel: id.clone(),
+                        phase: FanPhase::Blocked,
+                        target_duty_pct: None,
+                        problem: Some(format!(
+                            "(fan recovery): expected a stored original of a channel of the board's entry | received: {id}; the record is kept"
+                        )),
+                    },
+                    controller_id: None,
+                });
+                continue;
+            };
+            let plan = ChannelPlan::restore_only(channel)
+                .map_err(|error| SessionError::new("a valid recovery plan", error.to_string()))?;
+            tracked.push(Tracked {
+                runtime: FanRuntime {
+                    channel: channel_key(channel.pwm),
+                    phase: FanPhase::Bios,
+                    target_duty_pct: None,
+                    problem: None,
+                },
+                controller_id: Some(plan.id().to_owned()),
+            });
+            restored.push((plan, channel));
+        }
+        if planned.is_empty() && restored.is_empty() {
+            if tracked.is_empty() {
+                return Ok(None);
+            }
             return Err(SessionError::new(
-                "at least one curve on a channel of the board's entry",
+                if enabled.is_empty() {
+                    "a stored original of a channel of the board's entry"
+                } else {
+                    "at least one curve on a channel of the board's entry"
+                },
                 tracked
                     .iter()
                     .filter_map(|entry| entry.runtime.problem.clone())
@@ -194,10 +254,11 @@ impl FanSession {
                     .join("; "),
             ));
         }
+        let follows_curves = !planned.is_empty();
         let bus = Nct677xFanBus::open(detected, grant, io, locks)
             .map_err(|error| SessionError::new("the fan bus to open", error.to_string()))?;
         let mut channels: Vec<(ChannelPlan, Box<dyn FanChannel>)> = Vec::new();
-        for (plan, channel) in planned {
+        for (plan, channel) in planned.into_iter().chain(restored) {
             let io = Nct677xChannel::new(bus.clone(), channel)
                 .map_err(|error| SessionError::new("a fan channel to open", error.to_string()))?;
             channels.push((plan, Box::new(io)));
@@ -208,10 +269,23 @@ impl FanSession {
             controller: Arc::new(Mutex::new(controller)),
             tracked,
             sources: sources.into_iter().collect(),
+            follows_curves,
         };
         let events = lock(&session.controller).recover();
         session.apply(&events);
-        Ok(session)
+        Ok(Some(session))
+    }
+
+    /// Whether the session still has a reason to exist: a curve runs, or a
+    /// channel waits for a restore that failed and is retried on every step.
+    /// A session that has neither can be dropped.
+    pub fn has_work(&self) -> bool {
+        let controller = lock(&self.controller);
+        self.follows_curves
+            || self.tracked.iter().any(|entry| {
+                entry.controller_id.as_deref().and_then(|id| controller.phase(id))
+                    == Some(Phase::ReleasePending)
+            })
     }
 
     /// Makes a panic anywhere in the process hand the fans back to the BIOS
@@ -370,6 +444,10 @@ may-stop = false
             self.0.lock().unwrap().retain(|(id, _)| id != channel);
             Ok(())
         }
+
+        fn channels(&mut self) -> Result<Vec<String>, StoreError> {
+            Ok(self.0.lock().unwrap().iter().map(|(id, _)| id.clone()).collect())
+        }
     }
 
     fn detected() -> Detected {
@@ -410,7 +488,11 @@ may-stop = false
 
     impl Rig {
         fn new() -> Self {
-            let io = ReplaySuperIo::new(chip_fixture());
+            Self::over(chip_fixture())
+        }
+
+        fn over(fixture: Fixture) -> Self {
+            let io = ReplaySuperIo::new(fixture);
             Self {
                 catalog: BoardCatalog::parse("test", BOARD).unwrap(),
                 io_log: io.write_log(),
@@ -420,7 +502,29 @@ may-stop = false
             }
         }
 
-        fn start(&mut self, curves: &[FanCurve]) -> Result<FanSession, SessionError> {
+        /// A chip a crashed predecessor left with output 3 in manual mode at
+        /// 6 % (below its 25 % minimum), and the store still holding the
+        /// BIOS registers it saved for it.
+        fn crashed_on_pwm3() -> Self {
+            let mut fixture = chip_fixture();
+            for (address, value) in [(0x302u16, BIOS_MODE & 0x0F), (0x309, 0x10), (0x011, 0x10)] {
+                fixture.set(
+                    superio_hwm_key(SuperIoSlot::Primary, (address >> 8) as u8, address as u8),
+                    u64::from(value),
+                );
+            }
+            let rig = Self::over(fixture);
+            rig.store.0.lock().unwrap().push((
+                "pwm3".into(),
+                ControlSnapshot { registers: vec![(0x309, BIOS_DUTY), (0x302, BIOS_MODE)] },
+            ));
+            rig
+        }
+
+        fn start_if_any(
+            &mut self,
+            curves: &[FanCurve],
+        ) -> Result<Option<FanSession>, SessionError> {
             let grant = self.catalog.offer("ACME", "TEST BOARD", Chip::Nct6779D).unwrap();
             let io = self.io.take().expect("a rig starts one session");
             FanSession::start(
@@ -431,6 +535,10 @@ may-stop = false
                 self.locks.clone(),
                 Box::new(self.store.clone()),
             )
+        }
+
+        fn start(&mut self, curves: &[FanCurve]) -> Result<FanSession, SessionError> {
+            self.start_if_any(curves).map(|session| session.expect("the rig has work to do"))
         }
 
         /// The fan registers written so far, as `(address, value)`.
@@ -621,16 +729,7 @@ may-stop = false
     }
 
     #[test]
-    fn a_session_needs_one_enabled_curve_on_a_channel_of_the_board() {
-        let mut off = curve("board.pwm1");
-        off.enabled = false;
-        let mut rig = Rig::new();
-        let error = rig.start(&[off]).err().unwrap();
-        assert_eq!(
-            error.to_string(),
-            "(fan session): expected at least one enabled curve | received: none"
-        );
-
+    fn a_curve_only_on_a_channel_the_board_lacks_refuses_the_session_and_opens_no_bus() {
         let mut rig = Rig::new();
         let error = rig.start(&[curve("board.pwm5")]).err().unwrap().to_string();
         assert!(
@@ -641,6 +740,146 @@ may-stop = false
         );
         assert!(rig.fan_writes().is_empty());
         assert!(rig.io_log.lock().unwrap().is_empty(), "the bus was not even opened");
+    }
+
+    /// The writes to output 3's registers, which no curve of these tests
+    /// follows.
+    fn pwm3_writes(rig: &Rig) -> Vec<(u16, u8)> {
+        rig.fan_writes()
+            .into_iter()
+            .filter(|(address, _)| [0x302, 0x309].contains(address))
+            .collect()
+    }
+
+    #[test]
+    fn a_plan_with_no_enabled_curve_and_an_empty_store_opens_nothing() {
+        let mut off = curve("board.pwm1");
+        off.enabled = false;
+        for curves in [vec![], vec![off]] {
+            let mut rig = Rig::new();
+            let session = rig.start_if_any(&curves).unwrap();
+            assert!(session.is_none(), "(fan session): expected no session | received one");
+            assert!(rig.io_log.lock().unwrap().is_empty(), "the bus was not even opened");
+        }
+    }
+
+    #[test]
+    fn a_crashed_channel_is_restored_when_the_plan_has_no_curves_at_all() {
+        let mut rig = Rig::crashed_on_pwm3();
+        let session = rig.start(&[]).unwrap();
+
+        let writes = pwm3_writes(&rig);
+        assert_eq!(
+            writes.last(),
+            Some(&(0x302, BIOS_MODE)),
+            "(recovery): expected pwm3's BIOS mode to be the last write | received: {writes:?}"
+        );
+        assert_eq!(
+            writes.first(),
+            Some(&(0x309, 64)),
+            "(recovery): expected pwm3 raised to its 25 % minimum first | received: {writes:?}"
+        );
+        assert!(
+            rig.store.0.lock().unwrap().is_empty(),
+            "(recovery): expected pwm3's record cleared once restored"
+        );
+        assert_eq!(
+            session.runtime(),
+            [FanRuntime {
+                channel: "board.pwm3".into(),
+                phase: FanPhase::Bios,
+                target_duty_pct: None,
+                problem: None,
+            }]
+        );
+        assert!(!session.has_work(), "nothing is left to follow or retry");
+    }
+
+    #[test]
+    fn a_crashed_channel_whose_curve_moved_is_restored_and_never_followed() {
+        let mut rig = Rig::crashed_on_pwm3();
+        let mut session = rig.start(&[curve("board.pwm1")]).unwrap();
+        let after_recovery = pwm3_writes(&rig);
+        assert_eq!(after_recovery.last(), Some(&(0x302, BIOS_MODE)), "{after_recovery:?}");
+        assert!(rig.store.0.lock().unwrap().is_empty());
+
+        let runtime = steps(&mut session, Some(45.0), 6);
+        assert_eq!(
+            runtime.iter().map(|entry| (entry.channel.as_str(), entry.phase)).collect::<Vec<_>>(),
+            [("board.pwm1", FanPhase::Manual), ("board.pwm3", FanPhase::Bios)]
+        );
+        assert_eq!(pwm3_writes(&rig), after_recovery, "pwm3 is never written after recovery");
+        assert!(session.has_work(), "pwm1 still follows its curve");
+    }
+
+    #[test]
+    fn a_stored_original_the_board_cannot_explain_is_reported_blocked_and_kept() {
+        let mut rig = Rig::new();
+        rig.store
+            .0
+            .lock()
+            .unwrap()
+            .push(("pwm9".into(), ControlSnapshot { registers: vec![(0x909, 1), (0x902, 2)] }));
+        let session = rig.start(&[curve("board.pwm1")]).unwrap();
+        let runtime = session.runtime();
+        assert_eq!(runtime[1].channel, "pwm9");
+        assert_eq!(runtime[1].phase, FanPhase::Blocked);
+        assert!(runtime[1].problem.as_deref().unwrap().contains("received: pwm9"), "{runtime:?}");
+        assert_eq!(rig.store.0.lock().unwrap().len(), 1, "the record is kept");
+        assert!(rig.fan_writes().is_empty(), "nothing is written for a channel nobody knows");
+
+        // With no curve to run, that alone is not a session.
+        let mut rig = Rig::new();
+        rig.store
+            .0
+            .lock()
+            .unwrap()
+            .push(("pwm9".into(), ControlSnapshot { registers: vec![(0x909, 1), (0x902, 2)] }));
+        let error = rig.start(&[]).err().unwrap().to_string();
+        assert!(
+            error.starts_with(
+                "(fan session): expected a stored original of a channel of the board's entry"
+            ) && error.contains("received: (fan recovery)"),
+            "{error}"
+        );
+        assert!(rig.io_log.lock().unwrap().is_empty(), "the bus was not opened");
+    }
+
+    #[test]
+    fn a_stored_original_that_cannot_be_listed_refuses_the_session() {
+        struct UnreadableStore;
+        impl OriginalStore for UnreadableStore {
+            fn load(&mut self, _: &str) -> Result<Option<ControlSnapshot>, StoreError> {
+                Err(StoreError("an injected load failure".into()))
+            }
+            fn save(&mut self, _: &str, _: &ControlSnapshot) -> Result<(), StoreError> {
+                Err(StoreError("an injected save failure".into()))
+            }
+            fn clear(&mut self, _: &str) -> Result<(), StoreError> {
+                Err(StoreError("an injected clear failure".into()))
+            }
+            fn channels(&mut self) -> Result<Vec<String>, StoreError> {
+                Err(StoreError("an injected list failure".into()))
+            }
+        }
+        let rig = Rig::new();
+        let grant = rig.catalog.offer("ACME", "TEST BOARD", Chip::Nct6779D).unwrap();
+        let error = FanSession::start(
+            &grant,
+            &detected(),
+            &[curve("board.pwm1")],
+            Box::new(ReplaySuperIo::new(chip_fixture())),
+            rig.locks.clone(),
+            Box::new(UnreadableStore),
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(
+            error.starts_with("(fan session): expected the stored originals to be listed")
+                && error.contains("an injected list failure"),
+            "{error}"
+        );
     }
 
     #[test]
