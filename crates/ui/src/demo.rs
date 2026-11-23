@@ -11,10 +11,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use syspilot_proto::action::{Action, RegData, RegistryAction, Scope};
 use syspilot_proto::catalog::Catalog;
 use syspilot_proto::message::{
-    ActionState, ActionStatus, DriverState, EntryStatus, FanStatus, Feature, HistoryEvent,
-    HistoryKind, InfoSection, Request, ServiceStatus, SystemInfo, SystemSummary,
+    ActionState, ActionStatus, DriverState, EntryStatus, FanAvailability, FanChannelStatus,
+    FanPhase, FanStatus, Feature, HistoryEvent, HistoryKind, InfoSection, Request, ServiceStatus,
+    SystemInfo, SystemSummary,
 };
-use syspilot_proto::profile::{CustomAction, Profile};
+use syspilot_proto::profile::{CurvePoint, CustomAction, Profile};
 use syspilot_proto::sensor::{DeviceClass, DeviceInfo, Sample, SensorInfo, SensorKind, SensorList};
 
 use crate::backend::{Backend, Change, Failure, Listener};
@@ -40,6 +41,16 @@ pub enum Scenario {
     StandardUser,
     /// The service is not running.
     Stopped,
+    /// A build with fan control, on a board whose entry is validated: three
+    /// channels with a curve each, one of them in fail-safe.
+    FanControl,
+    /// A build with fan control, on a board whose entry is not validated:
+    /// the curves are shown and not followed.
+    FanReadOnly,
+    /// A build with fan control, but PawnIO is not installed.
+    FanNoDriver,
+    /// A build with fan control, on a board that is not in the catalog.
+    FanUnknownBoard,
 }
 
 impl Scenario {
@@ -50,8 +61,26 @@ impl Scenario {
             "no-driver" => Some(Self::NoDriver),
             "standard-user" => Some(Self::StandardUser),
             "stopped" => Some(Self::Stopped),
+            "fan-control" => Some(Self::FanControl),
+            "fan-read-only" => Some(Self::FanReadOnly),
+            "fan-no-driver" => Some(Self::FanNoDriver),
+            "fan-unknown-board" => Some(Self::FanUnknownBoard),
             _ => None,
         }
+    }
+
+    /// Whether PawnIO is installed in this scenario, and with it the
+    /// sensors that need it.
+    fn driver_ready(self) -> bool {
+        !matches!(self, Self::NoDriver | Self::FanNoDriver)
+    }
+
+    /// Whether the build has fan control in this scenario.
+    fn has_fan_control(self) -> bool {
+        matches!(
+            self,
+            Self::FanControl | Self::FanReadOnly | Self::FanNoDriver | Self::FanUnknownBoard
+        )
     }
 }
 
@@ -90,7 +119,7 @@ const DEVICES: [(&str, DeviceClass); 6] = [
     ("Ethernet", DeviceClass::Network),
 ];
 
-const WAVES: [Wave; 22] = [
+const WAVES: [Wave; 25] = [
     wave(0, "cpu0.load", "Total load", SensorKind::Load, false, (18.0, 14.0, 23.0)),
     wave(0, "cpu0.package.temp", "Package", SensorKind::Temperature, true, (52.0, 9.0, 31.0)),
     wave(0, "cpu0.package.power", "Package power", SensorKind::Power, true, (38.0, 22.0, 23.0)),
@@ -114,15 +143,37 @@ const WAVES: [Wave; 22] = [
     wave(3, "disk0.write", "Write", SensorKind::Throughput, false, (3.0 * MIB, 3.0 * MIB, 7.0)),
     wave(4, "board.fan1", "CPU fan", SensorKind::Fan, true, (910.0, 160.0, 31.0)),
     wave(4, "board.fan2", "Rear fan", SensorKind::Fan, true, (640.0, 60.0, 43.0)),
+    wave(4, "board.fan3", "Front fan", SensorKind::Fan, true, (700.0, 50.0, 29.0)),
     wave(4, "board.temp1", "Motherboard", SensorKind::Temperature, true, (36.0, 1.5, 71.0)),
     // Raw inputs as a real chip reports them, including one nothing is
     // wired to: the app must fold these away and not call 103 °C hot.
     wave(4, "board.temp.auxtin1", "AUXTIN1", SensorKind::Temperature, true, (103.0, 0.0, 1.0)),
     wave(4, "board.vin0", "VIN0", SensorKind::Voltage, true, (1.2, 0.01, 17.0)),
+    wave(4, "board.pwm1", "Fan 1 duty", SensorKind::Duty, true, (46.0, 3.0, 31.0)),
     wave(4, "board.pwm2", "Fan 2 duty", SensorKind::Duty, true, (42.0, 4.0, 43.0)),
+    wave(4, "board.pwm3", "Fan 3 duty", SensorKind::Duty, true, (35.0, 3.0, 29.0)),
     wave(5, "net0.down", "Download", SensorKind::Throughput, false, (0.6 * MIB, 0.6 * MIB, 9.0)),
     wave(5, "net0.up", "Upload", SensorKind::Throughput, false, (0.05 * MIB, 0.05 * MIB, 5.0)),
 ];
+
+/// Fan 3 while its channel is in fail-safe: duty and speed pinned high, as a
+/// fan held at full speed reads.
+const FAIL_SAFE_WAVES: [Wave; 2] = [
+    wave(4, "board.fan3", "Front fan", SensorKind::Fan, true, (1780.0, 15.0, 19.0)),
+    wave(4, "board.pwm3", "Fan 3 duty", SensorKind::Duty, true, (100.0, 0.0, 1.0)),
+];
+
+/// The waves a scenario plays, in sensor ID order.
+fn waves_for(scenario: Scenario) -> Vec<&'static Wave> {
+    WAVES
+        .iter()
+        .filter(|wave| scenario.driver_ready() || !wave.driver)
+        .map(|wave| {
+            let held = FAIL_SAFE_WAVES.iter().find(|held| held.key == wave.key);
+            if scenario == Scenario::FanControl { held.unwrap_or(wave) } else { wave }
+        })
+        .collect()
+}
 
 /// Mutable part of the demo.
 struct DemoState {
@@ -303,16 +354,15 @@ fn history() -> Vec<HistoryEvent> {
     ]
 }
 
-fn sensors(with_driver: bool) -> SensorList {
+fn sensors(scenario: Scenario) -> SensorList {
     SensorList {
         generation: 1,
         devices: DEVICES
             .iter()
             .map(|(name, class)| DeviceInfo { name: (*name).to_owned(), class: *class })
             .collect(),
-        sensors: WAVES
-            .iter()
-            .filter(|wave| with_driver || !wave.driver)
+        sensors: waves_for(scenario)
+            .into_iter()
             .enumerate()
             .map(|(id, wave)| SensorInfo {
                 id: id as u32,
@@ -327,10 +377,9 @@ fn sensors(with_driver: bool) -> SensorList {
 }
 
 /// The readings `tick` seconds into the demo.
-fn sample(with_driver: bool, tick: u64) -> Vec<Sample> {
-    WAVES
-        .iter()
-        .filter(|wave| with_driver || !wave.driver)
+fn sample(scenario: Scenario, tick: u64) -> Vec<Sample> {
+    waves_for(scenario)
+        .into_iter()
         .enumerate()
         .map(|(id, wave)| {
             let phase = tick as f64 / wave.period_secs * std::f64::consts::TAU;
@@ -341,8 +390,102 @@ fn sample(with_driver: bool, tick: u64) -> Vec<Sample> {
         .collect()
 }
 
+/// One channel of the demo board. The key is the duty sensor's, as in the
+/// real service.
+fn fan_channel(output: u8, label: &str, curve: &[(u8, u8)], sources: &[&str]) -> FanChannelStatus {
+    FanChannelStatus {
+        channel: format!("board.pwm{output}"),
+        label: label.to_owned(),
+        tach_sensor: Some(format!("board.fan{output}")),
+        min_duty_pct: 30,
+        curve: curve.iter().map(|&(temperature, duty)| CurvePoint(temperature, duty)).collect(),
+        sources: sources.iter().map(|key| (*key).to_owned()).collect(),
+        active: false,
+        target_duty_pct: None,
+        phase: FanPhase::Bios,
+        problem: None,
+    }
+}
+
+/// What the service would say about fans in `scenario`.
+fn fans(scenario: Scenario) -> FanStatus {
+    let cpu_curve = [(40, 30), (55, 45), (70, 75), (85, 100)];
+    let case_curve = [(30, 30), (45, 40), (60, 70), (75, 100)];
+    let board = "Example Z790 board";
+    match scenario {
+        Scenario::FanControl => {
+            let following = |mut channel: FanChannelStatus, target| {
+                channel.active = true;
+                channel.phase = FanPhase::Manual;
+                channel.target_duty_pct = Some(target);
+                channel
+            };
+            let mut held =
+                fan_channel(3, "Front fan", &[(35, 30), (60, 60), (80, 100)], &["board.temp2"]);
+            held.active = true;
+            held.phase = FanPhase::FailSafe;
+            held.target_duty_pct = Some(100);
+            held.problem = Some("The temperature sensor board.temp2 stopped answering".into());
+            FanStatus {
+                availability: FanAvailability::Controllable,
+                board: board.into(),
+                channels: vec![
+                    following(fan_channel(1, "CPU fan", &cpu_curve, &["cpu0.package.temp"]), 46),
+                    following(
+                        fan_channel(
+                            2,
+                            "Rear fan",
+                            &case_curve,
+                            &["board.temp1", "cpu0.package.temp"],
+                        ),
+                        42,
+                    ),
+                    held,
+                ],
+            }
+        }
+        Scenario::FanReadOnly | Scenario::FanNoDriver => FanStatus {
+            availability: FanAvailability::ReadOnly {
+                reason: if scenario == Scenario::FanNoDriver {
+                    "PawnIO is not installed".into()
+                } else {
+                    "the board's entry has not been validated".into()
+                },
+            },
+            board: board.into(),
+            // As the board catalog lists them: curves on the first two, none
+            // on the third. Nothing is followed.
+            channels: vec![
+                fan_channel(1, "Fan 1 (unverified)", &cpu_curve, &["cpu0.package.temp"]),
+                fan_channel(2, "Fan 2 (unverified)", &case_curve, &["board.temp1"]),
+                fan_channel(3, "Fan 3 (unverified)", &[], &[]),
+            ],
+        },
+        Scenario::FanUnknownBoard => FanStatus {
+            availability: FanAvailability::ReadOnly {
+                reason: "the board catalog has no entry for it".into(),
+            },
+            board: String::new(),
+            channels: Vec::new(),
+        },
+        _ => FanStatus::default(),
+    }
+}
+
+/// The detail of the "Fan control" feature row.
+fn fan_feature_detail(scenario: Scenario) -> (bool, &'static str) {
+    match scenario {
+        Scenario::FanControl => (true, "Example Z790 board, 3 fans"),
+        Scenario::FanReadOnly | Scenario::FanUnknownBoard => {
+            (false, "Speeds are shown; nothing is written")
+        }
+        Scenario::FanNoDriver => (false, "Needs PawnIO"),
+        _ => (false, "Not part of this version"),
+    }
+}
+
 fn status(scenario: Scenario) -> ServiceStatus {
-    let with_driver = scenario != Scenario::NoDriver;
+    let with_driver = scenario.driver_ready();
     let feature = |key: &str, title: &str, available: bool, detail: &str| Feature {
         key: key.to_owned(),
         title: title.to_owned(),
@@ -350,6 +493,7 @@ fn status(scenario: Scenario) -> ServiceStatus {
         detail: detail.to_owned(),
     };
     let needs_driver = "Needs PawnIO";
+    let (fan_available, fan_detail) = fan_feature_detail(scenario);
     ServiceStatus {
         version: env!("CARGO_PKG_VERSION").to_owned(),
         instance: "SysPilot-Demo".into(),
@@ -390,14 +534,14 @@ fn status(scenario: Scenario) -> ServiceStatus {
                 with_driver,
                 if with_driver { "Example PCH, PCI thermal BAR0" } else { needs_driver },
             ),
-            feature("fan-control", "Fan control", false, "Not part of this version"),
+            feature("fan-control", "Fan control", fan_available, fan_detail),
         ],
         subscribers: 1,
         sampling: true,
         os_build: 26_200,
         log_dir: r"C:\ProgramData\SysPilot\logs".into(),
-        fan_control: false,
-        fans: FanStatus::default(),
+        fan_control: scenario.has_fan_control(),
+        fans: fans(scenario),
         problems: Vec::new(),
     }
 }
@@ -473,7 +617,7 @@ impl DemoBackend {
             status: Some(status(scenario)),
             profile: elevated.then(|| profile_for(&states)),
             history: if elevated { history() } else { Vec::new() },
-            sensors: sensors(scenario != Scenario::NoDriver),
+            sensors: sensors(scenario),
             system: system(),
             catalog,
             states,
@@ -577,18 +721,14 @@ impl Backend for DemoBackend {
         }
         let (sender, changes) = mpsc::channel();
         self.state().listeners.push(sender);
-        Ok(Box::new(DemoListener {
-            changes,
-            with_driver: self.scenario != Scenario::NoDriver,
-            tick: 0,
-        }))
+        Ok(Box::new(DemoListener { changes, scenario: self.scenario, tick: 0 }))
     }
 }
 
 /// Produces a sample every second and relays data changes in between.
 struct DemoListener {
     changes: mpsc::Receiver<()>,
-    with_driver: bool,
+    scenario: Scenario,
     tick: u64,
 }
 
@@ -598,7 +738,7 @@ impl Listener for DemoListener {
             Ok(()) => Ok(Change::Data),
             Err(RecvTimeoutError::Timeout) => {
                 self.tick += 1;
-                Ok(Change::Sample { generation: 1, samples: sample(self.with_driver, self.tick) })
+                Ok(Change::Sample { generation: 1, samples: sample(self.scenario, self.tick) })
             }
             Err(RecvTimeoutError::Disconnected) => Err(Failure::NotRunning),
         }
@@ -687,7 +827,7 @@ mod tests {
         let snapshot = DemoBackend::new(Scenario::NoDriver).load().unwrap();
         assert!(snapshot.sensors.sensors.iter().all(|sensor| !sensor.driver));
         assert_eq!(snapshot.status.unwrap().driver, DriverState::Missing);
-        let ids: Vec<u32> = sample(false, 3).iter().map(|sample| sample.id).collect();
+        let ids: Vec<u32> = sample(Scenario::NoDriver, 3).iter().map(|sample| sample.id).collect();
         let listed: Vec<u32> = snapshot.sensors.sensors.iter().map(|sensor| sensor.id).collect();
         assert_eq!(ids, listed, "samples and metadata use the same IDs");
     }
@@ -704,8 +844,93 @@ mod tests {
         assert!(samples.iter().all(|sample| sample.value.is_some_and(|value| value >= 0.0)));
     }
 
+    fn fan_status_of(scenario: Scenario) -> FanStatus {
+        DemoBackend::new(scenario).load().unwrap().status.unwrap().fans
+    }
+
+    #[test]
+    fn the_controllable_board_has_three_channels_one_in_fail_safe() {
+        let fans = fan_status_of(Scenario::FanControl);
+        assert_eq!(fans.availability, FanAvailability::Controllable);
+        assert_eq!(fans.channels.len(), 3);
+        let phases: Vec<FanPhase> = fans.channels.iter().map(|channel| channel.phase).collect();
+        assert_eq!(phases, [FanPhase::Manual, FanPhase::Manual, FanPhase::FailSafe]);
+        let held = &fans.channels[2];
+        assert_eq!(held.target_duty_pct, Some(100));
+        assert!(held.problem.is_some(), "(held channel): expected a problem text | received: none");
+        for channel in &fans.channels {
+            assert!(channel.active, "(active of {}): expected true", channel.channel);
+            let temperatures: Vec<u8> = channel.curve.iter().map(|point| point.temp_c()).collect();
+            assert!(
+                temperatures.windows(2).all(|pair| pair[0] < pair[1]),
+                "(curve of {}): expected strictly rising temperatures | received: {temperatures:?}",
+                channel.channel
+            );
+        }
+    }
+
+    #[test]
+    fn every_demo_channel_is_joined_to_live_sensors_of_the_right_kind() {
+        let snapshot = DemoBackend::new(Scenario::FanControl).load().unwrap();
+        let fans = snapshot.status.unwrap().fans;
+        let mut trends = model::Trends::default();
+        trends.push(1, &sample(Scenario::FanControl, 7));
+        for channel in &fans.channels {
+            let readings = model::fan_readings(channel, &snapshot.sensors, &trends);
+            assert!(
+                readings.speed.is_some() && readings.duty.is_some(),
+                "(readings of {}): expected a speed and a duty | received: {readings:?}",
+                channel.channel
+            );
+        }
+        // The held channel reads full duty, like a fan held at 100 %.
+        let held = model::fan_readings(&fans.channels[2], &snapshot.sensors, &trends);
+        assert_eq!(held.duty, Some(100.0));
+        assert_eq!(held.temperature, None, "its source sensor failed, so it has no reading");
+    }
+
+    #[test]
+    fn the_read_only_board_shows_curves_it_does_not_follow() {
+        let fans = fan_status_of(Scenario::FanReadOnly);
+        assert_eq!(
+            fans.availability,
+            FanAvailability::ReadOnly { reason: "the board's entry has not been validated".into() }
+        );
+        assert_eq!(fans.channels.len(), 3);
+        assert!(fans.channels.iter().all(|channel| !channel.active
+            && channel.phase == FanPhase::Bios
+            && channel.target_duty_pct.is_none()));
+        let drawn: Vec<bool> = fans.channels.iter().map(|c| !c.curve.is_empty()).collect();
+        assert_eq!(drawn, [true, true, false], "two curves and one channel without");
+    }
+
+    #[test]
+    fn without_the_driver_the_fan_channels_stay_listed_but_have_no_live_sensors() {
+        let snapshot = DemoBackend::new(Scenario::FanNoDriver).load().unwrap();
+        let status = snapshot.status.unwrap();
+        assert_eq!(status.driver, DriverState::Missing);
+        assert!(status.fan_control, "the build has the feature; the driver is what is missing");
+        assert_eq!(status.fans.channels.len(), 3);
+        assert!(snapshot.sensors.sensors.iter().all(|sensor| !sensor.key.starts_with("board.")));
+    }
+
+    #[test]
+    fn an_unknown_board_has_no_channels_and_the_other_scenarios_have_no_fan_control() {
+        let unknown = fan_status_of(Scenario::FanUnknownBoard);
+        assert!(unknown.channels.is_empty() && unknown.board.is_empty(), "{unknown:?}");
+        for scenario in [Scenario::Healthy, Scenario::NoDriver, Scenario::StandardUser] {
+            let status = DemoBackend::new(scenario).load().unwrap().status.unwrap();
+            assert_eq!(status.fans, FanStatus::default(), "{scenario:?}");
+            assert!(!status.fan_control, "{scenario:?}");
+        }
+    }
+
     #[test]
     fn scenario_names_parse() {
+        assert_eq!(Scenario::parse("fan-control"), Some(Scenario::FanControl));
+        assert_eq!(Scenario::parse("fan-read-only"), Some(Scenario::FanReadOnly));
+        assert_eq!(Scenario::parse("fan-no-driver"), Some(Scenario::FanNoDriver));
+        assert_eq!(Scenario::parse("fan-unknown-board"), Some(Scenario::FanUnknownBoard));
         assert_eq!(Scenario::parse("no-driver"), Some(Scenario::NoDriver));
         assert_eq!(Scenario::parse("standard-user"), Some(Scenario::StandardUser));
         assert_eq!(Scenario::parse("nonsense"), None);

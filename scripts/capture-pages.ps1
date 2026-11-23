@@ -11,11 +11,16 @@
 .EXAMPLE
     ./scripts/capture-pages.ps1
     ./scripts/capture-pages.ps1 -Pages home,privacy -Levels advanced -Scenario no-driver
+
+.EXAMPLE
+    # The fans page in each fan scenario: fan-control, fan-read-only,
+    # fan-no-driver, fan-unknown-board.
+    ./scripts/capture-pages.ps1 -Pages fans -Levels advanced -Scenario fan-control
 #>
 [CmdletBinding()]
 param(
     [string[]] $Pages = @('home', 'performance', 'privacy', 'security', 'reliability',
-        'look-and-feel', 'sensors', 'system', 'custom-actions', 'history', 'settings'),
+        'look-and-feel', 'sensors', 'fans', 'system', 'custom-actions', 'history', 'settings'),
     [string[]] $Levels = @('simple', 'advanced'),
     [string[]] $Themes = @('dark', 'light'),
     [string] $Scenario = 'healthy',
@@ -34,8 +39,8 @@ if (-not (Test-Path $app)) {
 foreach ($theme in $Themes) {
     foreach ($level in $Levels) {
         foreach ($page in $Pages) {
-            # These two pages only exist at the Advanced level.
-            if ($level -eq 'simple' -and $page -in 'custom-actions', 'history') { continue }
+            # These pages only exist at the Advanced level.
+            if ($level -eq 'simple' -and $page -in 'fans', 'custom-actions', 'history') { continue }
             $process = Start-Process $app -PassThru -ArgumentList '--demo', $Scenario,
                 '--page', $page, '--level', $level, '--theme', $theme
             try {
