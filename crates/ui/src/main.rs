@@ -25,6 +25,7 @@ use crate::app::{App, Launch, Page};
 use crate::backend::{Backend, BackendHandle, ServiceBackend};
 use crate::demo::{DemoBackend, Scenario};
 use crate::model::ViewLevel;
+use crate::preferences::Theme;
 
 /// What the command line asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,15 +38,29 @@ struct Options {
     page: Page,
     /// Level for this run.
     level: Option<ViewLevel>,
+    /// Colours for this run.
+    theme: Option<Theme>,
+}
+
+impl Options {
+    /// What no arguments mean: the product's service, as the user left it.
+    fn plain() -> Self {
+        Self {
+            instance: Instance::product(),
+            demo: None,
+            page: Page::Home,
+            level: None,
+            theme: None,
+        }
+    }
 }
 
 /// Parses the arguments after the program name.
 ///
 /// `--instance <name>`, `--demo [scenario]`, `--page <tag>`,
-/// `--level simple|advanced`.
+/// `--level simple|advanced`, `--theme light|dark`.
 fn parse(arguments: &[String]) -> Result<Options, String> {
-    let mut options =
-        Options { instance: Instance::product(), demo: None, page: Page::Home, level: None };
+    let mut options = Options::plain();
     let mut rest = arguments.iter().peekable();
     while let Some(argument) = rest.next() {
         let mut value = |what: &str| {
@@ -76,6 +91,17 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                     }
                 });
             }
+            "--theme" => {
+                options.theme = Some(match value("light or dark")?.as_str() {
+                    "light" => Theme::Light,
+                    "dark" => Theme::Dark,
+                    other => {
+                        return Err(format!(
+                            "(--theme): expected light | dark | received: {other}"
+                        ));
+                    }
+                });
+            }
             "--demo" => {
                 // The scenario is optional: `--demo --page home` is valid.
                 let named = rest.peek().and_then(|next| Scenario::parse(next));
@@ -86,7 +112,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
             }
             other => {
                 return Err(format!(
-                    "(argument): expected --instance, --demo, --page or --level | received: {other}"
+                    "(argument): expected --instance, --demo, --page, --level or --theme | received: {other}"
                 ));
             }
         }
@@ -110,6 +136,7 @@ fn launch(options: &Options, arguments: Vec<String>) -> Launch {
         preferences_file,
         page: options.page,
         level: options.level,
+        theme: options.theme,
         arguments,
         install_arguments: vec![
             "--instance".to_owned(),
@@ -123,12 +150,7 @@ fn main() {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     // A windowed program has no console to complain on; a bad argument is
     // ignored in favour of starting normally.
-    let options = parse(&arguments).unwrap_or_else(|_| Options {
-        instance: Instance::product(),
-        demo: None,
-        page: Page::Home,
-        level: None,
-    });
+    let options = parse(&arguments).unwrap_or_else(|_| Options::plain());
     if let Err(error) = Reactor::run_component::<App>(launch(&options, arguments)) {
         eprintln!("{error:?}");
         std::process::exit(1);
@@ -153,9 +175,15 @@ mod tests {
 
     #[test]
     fn every_option_is_understood() {
-        let options =
-            parse(&arguments("--instance SysPilot-Test.ui --page privacy --level advanced"))
-                .unwrap();
+        let options = parse(&arguments(
+            "--instance SysPilot-Test.ui --page privacy --level advanced --theme light",
+        ))
+        .unwrap();
+        assert_eq!(options.theme, Some(Theme::Light));
+        assert_eq!(
+            parse(&arguments("--theme pink")).unwrap_err(),
+            "(--theme): expected light | dark | received: pink"
+        );
         assert_eq!(options.instance.name(), "SysPilot-Test.ui");
         assert_eq!(options.page, Page::Tweaks(Category::Privacy));
         assert_eq!(options.level, Some(ViewLevel::Advanced));

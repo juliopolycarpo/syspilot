@@ -33,6 +33,8 @@ pub struct Launch {
     pub page: Page,
     /// Level to use for this run instead of the stored one.
     pub level: Option<ViewLevel>,
+    /// Colours to use for this run instead of the stored ones.
+    pub theme: Option<Theme>,
     /// Arguments to start the app again with, e.g. elevated.
     pub arguments: Vec<String>,
     /// Arguments for the service executable to install and start the
@@ -515,6 +517,9 @@ impl Component for App {
             launch.preferences_file.as_deref().map(preferences::load).unwrap_or_default();
         if let Some(level) = launch.level {
             preferences.level = level;
+        }
+        if let Some(theme) = launch.theme {
+            preferences.theme = theme;
         }
         let mut app = Self {
             backend: Arc::clone(&launch.backend.0),

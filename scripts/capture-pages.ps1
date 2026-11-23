@@ -17,6 +17,7 @@ param(
     [string[]] $Pages = @('home', 'performance', 'privacy', 'security', 'reliability',
         'look-and-feel', 'sensors', 'system', 'custom-actions', 'history', 'settings'),
     [string[]] $Levels = @('simple', 'advanced'),
+    [string[]] $Themes = @('dark', 'light'),
     [string] $Scenario = 'healthy',
     [string] $Profile = 'debug',
     # Seconds to let the page settle before the capture.
@@ -30,17 +31,20 @@ if (-not (Test-Path $app)) {
     throw "(app): expected a built app at $app | received: nothing. Run cargo build -p syspilot-ui first."
 }
 
-foreach ($level in $Levels) {
-    foreach ($page in $Pages) {
-        # These two pages only exist at the Advanced level.
-        if ($level -eq 'simple' -and $page -in 'custom-actions', 'history') { continue }
-        $process = Start-Process $app -PassThru -ArgumentList '--demo', $Scenario, '--page', $page, '--level', $level
-        try {
-            Start-Sleep -Seconds $SettleSeconds
-            & (Join-Path $PSScriptRoot 'capture-window.ps1') -ProcessId $process.Id `
-                -Path "target/ui-shots/$Scenario-$level-$page.png"
-        } finally {
-            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+foreach ($theme in $Themes) {
+    foreach ($level in $Levels) {
+        foreach ($page in $Pages) {
+            # These two pages only exist at the Advanced level.
+            if ($level -eq 'simple' -and $page -in 'custom-actions', 'history') { continue }
+            $process = Start-Process $app -PassThru -ArgumentList '--demo', $Scenario,
+                '--page', $page, '--level', $level, '--theme', $theme
+            try {
+                Start-Sleep -Seconds $SettleSeconds
+                & (Join-Path $PSScriptRoot 'capture-window.ps1') -ProcessId $process.Id `
+                    -Path "target/ui-shots/$Scenario-$theme-$level-$page.png"
+            } finally {
+                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            }
         }
     }
 }
