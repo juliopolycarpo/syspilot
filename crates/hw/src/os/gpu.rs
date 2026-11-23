@@ -465,6 +465,34 @@ impl Provider for GpuProvider {
     }
 }
 
+/// Reads of the perf data tried when deciding which sensors an adapter has.
+const DECLARATION_ATTEMPTS: usize = 5;
+/// Pause before each further attempt: back-to-back reads tend to repeat the
+/// same empty answer.
+const DECLARATION_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// The perf data an adapter is declared from. The driver sometimes answers
+/// a successful query with an all-zero reading (seen on an RX 550 when
+/// several threads query at once), and a temperature sensor that is missed
+/// at probe time stays missing for the whole session, so a reading without a
+/// temperature is read again a few times. An adapter that really has no
+/// sensor pays [`DECLARATION_ATTEMPTS`] cheap kernel calls, once.
+fn read_for_declaration(source: &mut dyn PerfSource) -> PerfReading {
+    let mut latest = PerfReading::default();
+    for attempt in 0..DECLARATION_ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(DECLARATION_RETRY_DELAY);
+        }
+        if let Some(reading) = source.read() {
+            latest = reading;
+            if reading.temperature().is_some() {
+                break;
+            }
+        }
+    }
+    latest
+}
+
 /// The GPU provider, if the machine has a hardware adapter with at least one
 /// readable sensor.
 pub fn probe() -> Vec<Box<dyn Provider>> {
@@ -485,7 +513,7 @@ pub fn probe() -> Vec<Box<dyn Provider>> {
     for (adapter, name) in hardware.into_iter().zip(names) {
         let max_fan_rpm = max_fan_rpm(&adapter.handle);
         let mut perf = KernelPerf { handle: adapter.handle };
-        let reading = perf.read().unwrap_or_default();
+        let reading = read_for_declaration(&mut perf);
         let declared = Declared {
             temperature: reading.temperature().is_some(),
             fan: declares_fan(&reading, max_fan_rpm),
@@ -616,6 +644,67 @@ mod tests {
         fn read(&mut self) -> Option<PerfReading> {
             self.reading
         }
+    }
+
+    /// Answers each read from a script (a failed query is `None`) and
+    /// counts the reads; the last answer repeats.
+    struct ScriptedPerf {
+        answers: VecDeque<Option<PerfReading>>,
+        reads: usize,
+    }
+
+    impl PerfSource for ScriptedPerf {
+        fn read(&mut self) -> Option<PerfReading> {
+            self.reads += 1;
+            if self.answers.len() > 1 {
+                self.answers.pop_front().flatten()
+            } else {
+                self.answers.front().copied().flatten()
+            }
+        }
+    }
+
+    fn scripted_perf(answers: &[Option<PerfReading>]) -> ScriptedPerf {
+        ScriptedPerf { answers: answers.iter().copied().collect(), reads: 0 }
+    }
+
+    const EMPTY_READING: PerfReading = PerfReading { deci_celsius: 0, fan_rpm: 0 };
+    const WARM_READING: PerfReading = PerfReading { deci_celsius: 412, fan_rpm: 900 };
+
+    #[test]
+    fn declaration_reading_stops_at_the_first_one_with_a_temperature() {
+        let mut source = scripted_perf(&[Some(WARM_READING)]);
+        assert_eq!(read_for_declaration(&mut source), WARM_READING);
+        assert_eq!(source.reads, 1);
+    }
+
+    #[test]
+    fn declaration_reading_retries_an_empty_answer_until_a_temperature_appears() {
+        let mut source = scripted_perf(&[Some(EMPTY_READING), None, Some(WARM_READING)]);
+        assert_eq!(read_for_declaration(&mut source), WARM_READING);
+        assert_eq!(source.reads, 3, "empty answer and failed query are both retried");
+    }
+
+    #[test]
+    fn declaration_reading_gives_up_after_the_attempt_limit() {
+        let mut source = scripted_perf(&[Some(EMPTY_READING)]);
+        assert_eq!(read_for_declaration(&mut source), EMPTY_READING);
+        assert_eq!(source.reads, DECLARATION_ATTEMPTS);
+    }
+
+    #[test]
+    fn declaration_reading_of_an_adapter_whose_query_always_fails_is_empty() {
+        let mut source = scripted_perf(&[None]);
+        assert_eq!(read_for_declaration(&mut source), PerfReading::default());
+        assert_eq!(source.reads, DECLARATION_ATTEMPTS);
+    }
+
+    #[test]
+    fn declaration_reading_keeps_the_fan_of_the_last_successful_answer() {
+        // No temperature sensor, but the fan spins: the reading still counts.
+        let fan_only = PerfReading { deci_celsius: 0, fan_rpm: 700 };
+        let mut source = scripted_perf(&[Some(fan_only), None]);
+        assert_eq!(read_for_declaration(&mut source), fan_only);
     }
 
     /// One scripted PDH collection.
