@@ -411,6 +411,13 @@ impl<'a> ControlGrant<'a> {
     }
 }
 
+/// The catalog files compiled into the binary, by file name. A new file in
+/// `catalog/boards/` is added here too; a test compares the two lists.
+const SHIPPED_FILES: [(&str, &str); 1] = [(
+    "machinist-e5-mr9a-pro.toml",
+    include_str!("../../../../catalog/boards/machinist-e5-mr9a-pro.toml"),
+)];
+
 /// Boards read from the catalog files.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BoardCatalog {
@@ -434,6 +441,20 @@ impl BoardCatalog {
         let mut catalog = Self::empty();
         for raw in file.board {
             catalog.add(source, validate_board(source, raw)?)?;
+        }
+        Ok(catalog)
+    }
+
+    /// The catalog compiled into the binary: the files of `catalog/boards/`
+    /// as they were at build time, like the tweak catalog (decision 5). What
+    /// the program may control is fixed by the binary, not by a file an
+    /// administrator-owned directory could change.
+    pub fn shipped() -> Result<Self, CatalogError> {
+        let mut catalog = Self::empty();
+        for (source, text) in SHIPPED_FILES {
+            for board in Self::parse(source, text)?.boards {
+                catalog.add(source, board)?;
+            }
         }
         Ok(catalog)
     }
@@ -871,6 +892,23 @@ may-stop = true
                 ReadOnlyReason::NotValidated
             );
         }
+    }
+
+    #[test]
+    fn the_catalog_compiled_into_the_binary_is_the_directory_and_stays_unvalidated() {
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/boards");
+        let on_disk = BoardCatalog::load_directory(&directory).unwrap();
+        let shipped = BoardCatalog::shipped().unwrap();
+        assert_eq!(
+            shipped, on_disk,
+            "(catalog/boards): expected every file of the directory in SHIPPED_FILES | received: a difference"
+        );
+        // The reference board is the one the project owner has; it stays
+        // read-only until its checklist is done (docs/research/fan-control.md).
+        let reference = shipped
+            .find("MACHINIST", "E5-MR9A PRO")
+            .expect("the reference board is in the shipped catalog");
+        assert_eq!(reference.validation(), &Validation::Unvalidated);
     }
 
     #[test]
