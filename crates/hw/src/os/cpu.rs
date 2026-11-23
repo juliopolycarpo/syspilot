@@ -21,7 +21,7 @@ use crate::hub::{Provider, SensorSpec};
 
 /// Registry key of the first logical processor; every processor reports the
 /// same brand string and nominal clock.
-const PROCESSOR_KEY: &str = r"HARDWARE\DESCRIPTION\System\CentralProcessor\0";
+pub(crate) const PROCESSOR_KEY: &str = r"HARDWARE\DESCRIPTION\System\CentralProcessor\0";
 const PERFORMANCE_COUNTER: &str = r"\Processor Information(_Total)\% Processor Performance";
 /// Clocks outside this range come from a broken counter, not a CPU.
 const PLAUSIBLE_MHZ: std::ops::RangeInclusive<f64> = 1.0..=20_000.0;

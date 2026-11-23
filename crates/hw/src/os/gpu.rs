@@ -15,10 +15,10 @@ use syspilot_proto::sensor::{DeviceClass, SensorKind};
 use windows_sys::Wdk::Graphics::Direct3D::{
     D3DKMT_ADAPTER_PERFDATA, D3DKMT_ADAPTER_PERFDATACAPS, D3DKMT_ADAPTERINFO,
     D3DKMT_ADAPTERREGISTRYINFO, D3DKMT_ADAPTERTYPE, D3DKMT_CLOSEADAPTER, D3DKMT_DRIVER_DESCRIPTION,
-    D3DKMT_ENUMADAPTERS2, D3DKMT_QUERYADAPTERINFO, D3DKMTCloseAdapter, D3DKMTEnumAdapters2,
-    D3DKMTQueryAdapterInfo, KMTQAITYPE_ADAPTERPERFDATA, KMTQAITYPE_ADAPTERPERFDATA_CAPS,
-    KMTQAITYPE_ADAPTERREGISTRYINFO, KMTQAITYPE_ADAPTERTYPE, KMTQAITYPE_DRIVER_DESCRIPTION,
-    KMTQUERYADAPTERINFOTYPE,
+    D3DKMT_ENUMADAPTERS2, D3DKMT_QUERYADAPTERINFO, D3DKMT_SEGMENTSIZEINFO, D3DKMTCloseAdapter,
+    D3DKMTEnumAdapters2, D3DKMTQueryAdapterInfo, KMTQAITYPE_ADAPTERPERFDATA,
+    KMTQAITYPE_ADAPTERPERFDATA_CAPS, KMTQAITYPE_ADAPTERREGISTRYINFO, KMTQAITYPE_ADAPTERTYPE,
+    KMTQAITYPE_DRIVER_DESCRIPTION, KMTQAITYPE_GETSEGMENTSIZE, KMTQUERYADAPTERINFOTYPE,
 };
 use windows_sys::Win32::Foundation::{LUID, STATUS_BUFFER_TOO_SMALL};
 
@@ -144,6 +144,36 @@ pub(crate) struct Adapter {
     pub luid: Luid,
     pub software: bool,
     handle: AdapterHandle,
+}
+
+/// Memory an adapter has, as its driver declares it, in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SegmentSizes {
+    /// On-board video memory.
+    pub dedicated_video: u64,
+    /// System memory set aside for the adapter at boot (integrated GPUs).
+    pub dedicated_system: u64,
+    /// System memory the adapter may borrow.
+    pub shared_system: u64,
+}
+
+impl Adapter {
+    /// The memory segments of the adapter, or `None` if the driver does not
+    /// answer the query.
+    pub(crate) fn segment_sizes(&self) -> Option<SegmentSizes> {
+        let mut info = D3DKMT_SEGMENTSIZEINFO {
+            DedicatedVideoMemorySize: 0,
+            DedicatedSystemMemorySize: 0,
+            SharedSystemMemorySize: 0,
+        };
+        query_adapter_info(&self.handle, KMTQAITYPE_GETSEGMENTSIZE, &mut info).then_some(
+            SegmentSizes {
+                dedicated_video: info.DedicatedVideoMemorySize,
+                dedicated_system: info.DedicatedSystemMemorySize,
+                shared_system: info.SharedSystemMemorySize,
+            },
+        )
+    }
 }
 
 /// Every adapter the graphics kernel knows, including software ones.
