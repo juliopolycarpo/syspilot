@@ -32,6 +32,7 @@ use windows_sys::Win32::System::Ioctl::{
     StorageDeviceProtocolSpecificProperty, StorageDeviceTemperatureProperty,
 };
 
+use super::bytes::{read_u16, read_u32, read_u64};
 use super::rate::RateTracker;
 use super::text::{clean_text, number_repeated_names};
 use crate::hub::{Provider, SensorSpec};
@@ -90,21 +91,6 @@ const _: () = {
     assert!(offset_of!(DISK_PERFORMANCE, BytesWritten) == 8);
     assert!(offset_of!(DISK_GEOMETRY_EX, DiskSize) == 24);
 };
-
-/// Little-endian `u16` at `offset`, if the buffer is long enough.
-fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(bytes.get(offset..offset.checked_add(2)?)?.try_into().ok()?))
-}
-
-/// Little-endian `u32` at `offset`, if the buffer is long enough.
-fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?))
-}
-
-/// Little-endian `u64` at `offset`, if the buffer is long enough.
-fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
-    Some(u64::from_le_bytes(bytes.get(offset..offset.checked_add(8)?)?.try_into().ok()?))
-}
 
 /// What a drive reports about itself.
 #[derive(Debug, Clone, PartialEq, Eq)]

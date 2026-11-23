@@ -7,6 +7,7 @@
 //! timer: every read happens inside [`Provider::sample`].
 
 pub mod battery;
+pub(crate) mod bytes;
 pub mod cpu;
 pub mod gpu;
 pub mod memory;
