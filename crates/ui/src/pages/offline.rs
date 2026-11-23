@@ -58,7 +58,7 @@ pub fn not_running(app: &App, context: &ViewContext<App>) -> View {
             Button::new()
                 .style(ButtonStyle::Accent)
                 .on_click(context.message(Message::StartService))
-                .content("Install and start the service"),
+                .content("Start the service"),
             ProgressRing::new()
                 .is_active(true)
                 .width(16.0)
@@ -66,7 +66,7 @@ pub fn not_running(app: &App, context: &ViewContext<App>) -> View {
                 .automation_name("Looking for the service"),
         )),
         widgets::caption(
-            "Windows asks for administrator rights. SysPilot keeps looking for the service and continues by itself once it answers. You can also run \"syspilot-svc install\" in an administrator terminal.",
+            "Windows asks for administrator rights. If the service is not installed yet, it is installed first. SysPilot keeps looking for the service and continues by itself once it answers. You can also run \"syspilot-svc install\" in an administrator terminal.",
         ),
         notice(app),
     ))

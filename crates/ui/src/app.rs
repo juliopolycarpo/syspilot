@@ -205,7 +205,7 @@ pub enum Message {
     PickTheme(Option<usize>),
     /// "Restart as administrator".
     Elevate,
-    /// "Install and start the service".
+    /// "Start the service", which installs it first if needed.
     StartService,
     /// Open a web page.
     OpenLink(String),
