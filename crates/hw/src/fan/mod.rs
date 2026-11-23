@@ -12,6 +12,9 @@
 //!   a sensor fails.
 //! - `nct677x` (feature `fan-control`): the channel on an NCT6776F or
 //!   NCT6779D, over the `SuperIo` fan write. Tested on the replay bus only.
+//! - `session` (feature `fan-control`): the profile's curves on the channels
+//!   of one validated board, run by the controller, with the state the status
+//!   view shows.
 //! - `store` (feature `fan-control`): the file that keeps the BIOS registers
 //!   across a crash.
 //!
@@ -26,5 +29,7 @@ pub mod failsafe;
 pub mod layout;
 #[cfg(feature = "fan-control")]
 pub mod nct677x;
+#[cfg(feature = "fan-control")]
+pub mod session;
 #[cfg(feature = "fan-control")]
 pub mod store;
