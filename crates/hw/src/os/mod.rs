@@ -6,6 +6,7 @@
 //! Probing may open handles and PDH queries but never starts a thread or a
 //! timer: every read happens inside [`Provider::sample`].
 
+pub mod battery;
 pub mod cpu;
 pub mod gpu;
 pub mod memory;
@@ -31,6 +32,7 @@ pub const PROBES: &[(&str, ProbeFn)] = &[
     ("storage", storage::probe),
     ("volumes", volumes::probe),
     ("network", network::probe),
+    ("battery", battery::probe),
 ];
 
 /// Constructs every provider that finds hardware on this machine.
