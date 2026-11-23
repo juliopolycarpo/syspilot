@@ -1,0 +1,9 @@
+/target/
+/dist/
+# PawnIO module blobs are fetched by `cargo xtask fetch-modules`, never committed.
+/pawnio-modules/
+*.pdb
+.vs/
+.idea/
+.vscode/
+.claude/

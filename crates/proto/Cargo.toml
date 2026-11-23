@@ -1,0 +1,15 @@
+[package]
+name = "syspilot-proto"
+description = "SysPilot IPC protocol: messages, framing, shared-memory layout and profile schema."
+license = "MIT OR Apache-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

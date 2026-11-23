@@ -1,0 +1,49 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "xtask"]
+default-members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+authors = ["Julio Polycarpo"]
+repository = "https://github.com/juliopolycarpo/syspilot"
+homepage = "https://github.com/juliopolycarpo/syspilot"
+# The product name lives here and in `crates/proto/src/product.rs` only.
+description = "SysPilot: Windows tweaks that stay applied, hardware monitoring and fan control with near-zero idle overhead."
+
+[workspace.dependencies]
+syspilot-proto = { path = "crates/proto" }
+syspilot-engine = { path = "crates/engine" }
+syspilot-hw = { path = "crates/hw" }
+syspilot-pawnio = { path = "crates/pawnio" }
+
+serde = { version = "1", default-features = false, features = ["derive", "alloc", "std"] }
+toml = { version = "1.2", default-features = false, features = ["parse", "display", "serde"] }
+postcard = { version = "1.2", default-features = false, features = ["use-std"] }
+windows-sys = "0.61"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+unwrap_used = "deny"
+dbg_macro = "deny"
+todo = "deny"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# The resident service is optimised for size: it must stay small in memory
+# and on disk (see docs/architecture/overhead.md).
+[profile.release.package.syspilot-svc]
+opt-level = "s"
+
+[profile.dev]
+debug = "line-tables-only"

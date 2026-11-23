@@ -1,0 +1,15 @@
+[package]
+name = "syspilot-svc"
+description = "SysPilot service and command-line interface."
+license = "GPL-3.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
