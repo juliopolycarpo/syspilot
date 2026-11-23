@@ -10,7 +10,7 @@
 | [Tweak catalog](tweak-catalog.md)                     | How to write and source a catalog entry.                      |
 | [Decisions](decisions.md)                             | Choices that were not obvious, with their reasons.            |
 | [Research: PawnIO](research/pawnio.md)                | The driver interface SysPilot talks to.                       |
-| [Research: UI toolkits](research/ui-toolkits.md)      | Why the app is built with Slint.                              |
+| [Research: UI toolkits](research/ui-toolkits.md)      | Why the app is built with windows-reactor (WinUI 3).          |
 
 Code-level documentation lives in the crates as rustdoc:
 `cargo doc --workspace --no-deps --open`.

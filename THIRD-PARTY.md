@@ -18,6 +18,20 @@ Build-time only (not part of any shipped binary): `serde_derive`,
 The exact versions are in `Cargo.lock`. `cargo tree -p syspilot-svc` prints the
 current list.
 
+## Linked into or shipped with the app
+
+| Component                                     | Licence             | Used for                          |
+| --------------------------------------------- | ------------------- | --------------------------------- |
+| [`windows-reactor`](https://crates.io/crates/windows-reactor) and the `windows-*` support crates it depends on | MIT OR Apache-2.0 | Declarative WinUI 3 views |
+| [`rustc-hash`](https://crates.io/crates/rustc-hash) | MIT OR Apache-2.0 | Hashing inside `windows-reactor` |
+| [Windows App SDK runtime](https://www.nuget.org/packages/Microsoft.WindowsAppSDK.Runtime) 2.4.0 | Microsoft licence terms, see the package page | WinUI 3. Shipped unmodified as separate files next to `syspilot.exe` |
+| [WebView2 projection](https://www.nuget.org/packages/Microsoft.Web.WebView2) (`Microsoft.Web.WebView2.Core.dll`) | Microsoft licence terms, see the package page | Staged by the toolkit's setup helper; SysPilot does not use WebView2 |
+
+The runtime files are fetched at build time by
+[`windows-reactor-setup`](https://crates.io/crates/windows-reactor-setup)
+(MIT OR Apache-2.0, build-time only) and are not stored in this repository.
+The service does not load any of them.
+
 ## Not distributed
 
 ### PawnIO

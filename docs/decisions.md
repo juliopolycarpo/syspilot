@@ -122,6 +122,8 @@ headless for review.
 **Cost.** Slint's free licence for this use is GPLv3, which fixes the licence
 of the app and the service.
 
+*Superseded by 15.*
+
 ## 12. No hardware writes in version 1
 
 **Decision.** Version 1 reads sensors and never writes to hardware. Fan control
@@ -144,3 +146,23 @@ its own signed installer and update path.
 **Decision.** Commits follow Conventional Commits, are SSH-signed and carry a
 DCO sign-off. Changes land by fast-forward, so every commit on `main` is signed
 by its author.
+
+## 15. windows-reactor (WinUI 3) for the app
+
+**Decision.** The desktop app uses `windows-reactor` with a self-contained
+Windows App SDK runtime. This supersedes decision 11.
+
+**Why.** The owner asked for it, and a spike showed that every gate holds on
+a real machine: elevated, unpackaged, nothing to install, talking to the
+service ([research/ui-toolkits.md](research/ui-toolkits.md)). Real WinUI
+controls bring the Windows look, text rendering, keyboard behaviour and
+accessibility tree for free.
+
+**Cost.** About 57 MB of runtime files next to the app executable; the
+service does not load them. The toolkit is a preview, so its version is pinned
+and a new release may need view changes. Building for the first time needs
+network access to fetch the runtime packages. Screenshots for the visual
+review need an interactive desktop.
+
+**Licence.** The toolkit no longer dictates one (Slint's free option was
+GPLv3). The app and the service stay GPL-3.0-or-later by choice.

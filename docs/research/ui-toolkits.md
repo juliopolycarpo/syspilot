@@ -72,18 +72,60 @@ toolkit is replaceable without touching the service.
 | Headless PNG of whole views | No | Yes |
 | API stability | Preview | 1.x |
 
+This table is from documentation alone. The Reactor column was then tested;
+see the spike below.
+
+## Spike: windows-reactor on a real machine
+
+The table above was filled in from documentation. The open gates were then
+tested with a one-screen app (navigation pane, a list of the service's
+catalog read over the pipe) built against windows-reactor 0.100.0 with
+`windows-reactor-setup` staging the runtime. Windows 11 build 26300.
+
+| Gate                                  | Result                                          |
+|---------------------------------------|-------------------------------------------------|
+| Runs elevated                         | Yes                                             |
+| Runs unpackaged                       | Yes, a plain `.exe` started from a terminal     |
+| Self-contained, nothing installed     | Yes: runtime files staged next to the `.exe`    |
+| Talks to the service                  | Yes: catalog listed through `proto::Client`     |
+| Follows the system theme              | Yes, without any code                           |
+| Whole-window capture for review       | Yes, with `PrintWindow` (`scripts/capture-window.ps1`) |
+
+| Measure                               | Value                                           |
+|---------------------------------------|-------------------------------------------------|
+| `syspilot.exe`, release               | 2.0 MB                                          |
+| Staged runtime                        | 32 files, 53.5 MB, plus 3.4 MB of locale data   |
+| Private memory, one page shown        | 53 MB (debug build)                             |
+| First build                           | Downloads the Windows App SDK runtime 2.4.0 and WebView2 projection packages from NuGet into `%LOCALAPPDATA%\windows-reactor-setup` |
+
+Two things differ from the documentation review:
+
+- The published 0.100.0 API is not the one in the repository's `master`
+  samples. Children of multi-slot controls are given through typed slots
+  (`NavigationViewSlot::MenuItems`). The samples at the release commit match.
+- Headless rendering is still canvas-only, but capturing the composed window
+  works and shows exactly what a user sees, which is what the review needs.
+
 ## Decision
 
-**Slint**, `fluent` style, with the project's own design tokens and shared
-components on top.
+**windows-reactor**, self-contained.
 
-windows-reactor is the only option with real WinUI controls, but it fails
-the self-contained gate in spirit (a 57 MB runtime payload for a tool whose
-service is budgeted at 1.5 MB), cannot render whole views for the
-screenshot harness, and is a preview. Because the UI holds no logic, it can
-be revisited when Reactor stabilises.
+Real WinUI 3 controls give the app the look, behaviour, text rendering,
+keyboard handling and UI Automation tree of Windows itself, which no drawn
+toolkit matches, and all gates pass in practice. The costs are accepted:
 
-Measured size, startup time and memory of the Slint UI are recorded in
+- about 57 MB of runtime files shipped next to a 2 MB executable. The
+  service is unaffected: it does not load the runtime and keeps its own
+  budget;
+- a preview API. The app holds no logic (it is a view over `proto`), so a
+  breaking release costs view code only. The version is pinned;
+- screenshots need an interactive desktop. The review loop runs on a
+  developer machine, not in CI.
+
+Slint remains the fallback if Reactor stalls. It was the earlier choice on
+paper, mainly for its single-file deployment and headless rendering.
+
+Measured size, startup time and memory of the app are recorded in
 [`docs/architecture/overhead.md`](../architecture/overhead.md).
 
 ## GPU telemetry without vendor SDKs
