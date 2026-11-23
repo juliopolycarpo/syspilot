@@ -13,9 +13,11 @@ use syspilot_pawnio::Executor;
 use windows_sys::Win32::System::SystemInformation::GROUP_AFFINITY;
 use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadGroupAffinity};
 
+#[cfg(feature = "spd-paging")]
+use super::SPD_PAGE_SELECT_ADDRESSES;
 use super::{
-    BusError, LogicalCpu, Msr, SMN_THERMAL_BLOCK, SPD_PAGE_SELECT_ADDRESSES, Smbus, Smn, SuperIo,
-    SuperIoSlot, Unlock, is_permitted_bank, is_permitted_smn_address,
+    BusError, LogicalCpu, Msr, SMN_THERMAL_BLOCK, Smbus, Smn, SuperIo, SuperIoSlot, Unlock,
+    is_permitted_bank, is_permitted_smn_address,
 };
 
 /// Pins the calling thread to one logical processor and restores the
@@ -268,7 +270,9 @@ pub struct PawnSmbus {
 }
 
 const SMBUS_READ: u64 = 1;
+#[cfg(feature = "spd-paging")]
 const SMBUS_WRITE: u64 = 0;
+#[cfg(feature = "spd-paging")]
 const PROTOCOL_BYTE: u64 = 1;
 const PROTOCOL_BYTE_DATA: u64 = 2;
 const PROTOCOL_WORD_DATA: u64 = 3;
@@ -285,37 +289,35 @@ impl PawnSmbus {
         Self { module }
     }
 
-    /// One transfer; the cells after `protocol` carry no data for the
-    /// protocols this layer uses.
-    fn transfer(
-        &self,
-        address: u8,
-        direction: u64,
-        command: u8,
-        protocol: u64,
-    ) -> Result<[u64; XFER_OUTPUT_CELLS], BusError> {
-        // Every write SysPilot makes on an SMBus goes through this function,
-        // so this is the one place that keeps it aimed at the SPD page-select
-        // devices: a write to any other address could reconfigure a clock
-        // generator or a voltage regulator.
-        assert!(
-            direction == SMBUS_READ || SPD_PAGE_SELECT_ADDRESSES.contains(&address),
-            "(smbus write): expected target 0x36 or 0x37 | received: {address:#04x}"
-        );
+    /// One transfer, given as address, direction, command and protocol; the
+    /// cells after `protocol` carry no data for the protocols this layer uses.
+    fn transfer(&self, head: [u64; 4]) -> Result<[u64; XFER_OUTPUT_CELLS], BusError> {
         let mut request = [0u64; XFER_INPUT_CELLS];
-        request[..4].copy_from_slice(&[
-            u64::from(address),
-            direction,
-            u64::from(command),
-            protocol,
-        ]);
+        request[..4].copy_from_slice(&head);
         let mut reply = [0u64; XFER_OUTPUT_CELLS];
         self.module.execute("ioctl_smbus_xfer", &request, &mut reply)?;
         Ok(reply)
     }
 
+    /// A read. The only transfer in the default build: no direction is
+    /// passed around, so no write can be built from here.
     fn read(&self, address: u8, command: u8, protocol: u64) -> Result<u64, BusError> {
-        Ok(self.transfer(address, SMBUS_READ, command, protocol)?[0])
+        Ok(self.transfer([u64::from(address), SMBUS_READ, u64::from(command), protocol])?[0])
+    }
+
+    /// "Write byte" with value 0 to a page-select device, which acts on its
+    /// own address and ignores the data. The one SMBus write SysPilot can
+    /// make, and the assert keeps it aimed at `0x36`/`0x37`: a write to any
+    /// other address could reconfigure a clock generator or a voltage
+    /// regulator.
+    #[cfg(feature = "spd-paging")]
+    fn write_page_select(&self, target: u8) -> Result<(), BusError> {
+        assert!(
+            SPD_PAGE_SELECT_ADDRESSES.contains(&target),
+            "(smbus write): expected target 0x36 or 0x37 | received: {target:#04x}"
+        );
+        self.transfer([u64::from(target), SMBUS_WRITE, 0, PROTOCOL_BYTE])?;
+        Ok(())
     }
 }
 
@@ -342,15 +344,12 @@ impl Smbus for PawnSmbus {
         })
     }
 
+    #[cfg(feature = "spd-paging")]
     fn select_spd_page(&mut self, page: u8) -> Result<(), BusError> {
         let target = *SPD_PAGE_SELECT_ADDRESSES.get(usize::from(page)).ok_or_else(|| {
             BusError::rejected("select_spd_page", "page 0 or 1", format!("page {page}"))
         })?;
-        // "Write byte" with value 0: the data byte is ignored by the page
-        // select device, which acts on its own address. This is the one
-        // SMBus write SysPilot makes.
-        self.transfer(target, SMBUS_WRITE, 0, PROTOCOL_BYTE)?;
-        Ok(())
+        self.write_page_select(target)
     }
 }
 
@@ -710,6 +709,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "spd-paging")]
     #[test]
     fn the_only_smbus_write_targets_a_page_select_address() {
         let (scripted, module) = scripted();
@@ -729,13 +729,14 @@ mod tests {
         assert_eq!(scripted.calls().len(), 2, "refused pages must not reach the driver");
     }
 
+    #[cfg(feature = "spd-paging")]
     #[test]
     #[should_panic(expected = "(smbus write): expected target 0x36 or 0x37 | received: 0x50")]
     fn a_write_to_a_device_address_trips_the_assertion_before_the_driver() {
         let (scripted, module) = scripted();
         let bus = PawnSmbus::new(module);
         // Only reachable from inside this module: the trait has no such method.
-        let _ = bus.transfer(0x50, SMBUS_WRITE, 0, PROTOCOL_BYTE);
+        let _ = bus.write_page_select(0x50);
         assert!(scripted.calls().is_empty());
     }
 

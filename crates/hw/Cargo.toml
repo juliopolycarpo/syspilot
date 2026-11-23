@@ -12,6 +12,16 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+# Reading the DDR4 SPD contents beyond page 0 (module manufacturer and part
+# number) and making sure the bus is on page 0 before the scan needs the one
+# SMBus write SysPilot has: a write to the page-select device at 0x36 or
+# 0x37. No temperature read needs it (the JC-42.4 sensors at 0x18-0x1F and the
+# SPD5118 hub registers are not paged), and decision 12 says version 1 never
+# writes to hardware, so the default build has no SMBus write at all: the
+# write method does not exist on the `Smbus` trait. Off in release builds.
+spd-paging = []
+
 [dependencies]
 syspilot-pawnio.workspace = true
 syspilot-proto.workspace = true

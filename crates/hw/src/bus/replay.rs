@@ -23,9 +23,10 @@ use std::sync::{Arc, Mutex};
 
 use syspilot_pawnio::Error as DriverError;
 
+#[cfg(feature = "spd-paging")]
+use super::SPD_PAGE_SELECT_ADDRESSES;
 use super::{
-    BusError, Fixture, LogicalCpu, Msr, SPD_PAGE_SELECT_ADDRESSES, Smbus, Smn, SuperIo,
-    SuperIoSlot, Unlock, is_permitted_bank,
+    BusError, Fixture, LogicalCpu, Msr, Smbus, Smn, SuperIo, SuperIoSlot, Unlock, is_permitted_bank,
 };
 
 /// A fixture shared between a recorder and the code that saves it.
@@ -681,13 +682,16 @@ pub fn smbus_word_key(address: u8, command: u8) -> String {
 /// An SMBus replayed from a recording.
 ///
 /// Addresses with no entry do not acknowledge, exactly like empty DIMM
-/// slots. The only write is the SPD page select.
+/// slots. With the `spd-paging` feature the only write is the SPD page
+/// select; without it there is no write.
 #[derive(Debug)]
 pub struct ReplaySmbus {
     fixture: Fixture,
     present: BTreeSet<u8>,
     page: u8,
+    #[cfg(feature = "spd-paging")]
     page_select_acknowledged: bool,
+    #[cfg(feature = "spd-paging")]
     page_selects: Arc<Mutex<Vec<u8>>>,
 }
 
@@ -707,19 +711,23 @@ impl ReplaySmbus {
             fixture,
             present,
             page: 0,
+            #[cfg(feature = "spd-paging")]
             page_select_acknowledged: true,
+            #[cfg(feature = "spd-paging")]
             page_selects: Arc::default(),
         }
     }
 
     /// Makes the page-select addresses not acknowledge, as some controllers
     /// and modules behave. The page still changes.
+    #[cfg(feature = "spd-paging")]
     pub fn without_page_select_acknowledge(mut self) -> Self {
         self.page_select_acknowledged = false;
         self
     }
 
     /// Handle to the page numbers selected so far, in order.
+    #[cfg(feature = "spd-paging")]
     pub fn page_select_log(&self) -> Arc<Mutex<Vec<u8>>> {
         self.page_selects.clone()
     }
@@ -754,6 +762,7 @@ impl Smbus for ReplaySmbus {
         Ok(self.recorded(address, smbus_word_key(address, command))? as u16)
     }
 
+    #[cfg(feature = "spd-paging")]
     fn select_spd_page(&mut self, page: u8) -> Result<(), BusError> {
         let target =
             SPD_PAGE_SELECT_ADDRESSES.get(usize::from(page)).copied().ok_or_else(|| {
@@ -799,6 +808,7 @@ impl<B: Smbus> Smbus for RecordingSmbus<B> {
         Ok(value)
     }
 
+    #[cfg(feature = "spd-paging")]
     fn select_spd_page(&mut self, page: u8) -> Result<(), BusError> {
         let outcome = self.inner.select_spd_page(page);
         // A page select that was not acknowledged may still have switched the
@@ -1168,6 +1178,7 @@ mod tests {
         assert!(error.to_string().contains("smbus.byte.0x50.0.0x77"), "{error}");
     }
 
+    #[cfg(feature = "spd-paging")]
     #[test]
     fn the_spd_page_changes_what_an_eeprom_returns() {
         let mut bus = ReplaySmbus::new(dimm_fixture());
@@ -1180,6 +1191,7 @@ mod tests {
         assert_eq!(*log.lock().unwrap(), [1, 0]);
     }
 
+    #[cfg(feature = "spd-paging")]
     #[test]
     fn a_write_to_any_page_but_zero_or_one_is_rejected() {
         let mut bus = ReplaySmbus::new(dimm_fixture());
@@ -1189,6 +1201,7 @@ mod tests {
         assert!(bus.page_select_log().lock().unwrap().is_empty());
     }
 
+    #[cfg(feature = "spd-paging")]
     #[test]
     fn an_unacknowledged_page_select_reports_no_device_but_still_switches() {
         let mut bus = ReplaySmbus::new(dimm_fixture()).without_page_select_acknowledge();
@@ -1202,13 +1215,23 @@ mod tests {
         let mut recorder = RecordingSmbus::new(ReplaySmbus::new(dimm_fixture()), fixture.clone());
         recorder.read_byte_data(0x50, 2).unwrap();
         recorder.read_byte_data(0x50, 0).unwrap();
-        recorder.select_spd_page(1).unwrap();
-        recorder.read_byte_data(0x50, 0).unwrap();
-        recorder.select_spd_page(0).unwrap();
+        // Page 1 is part of the recording only where the page select exists.
+        #[cfg(feature = "spd-paging")]
+        {
+            recorder.select_spd_page(1).unwrap();
+            recorder.read_byte_data(0x50, 0).unwrap();
+            recorder.select_spd_page(0).unwrap();
+        }
         recorder.read_word_data(0x18, 5).unwrap();
         assert!(recorder.read_byte_data(0x52, 0).is_err());
 
-        assert_eq!(*fixture.lock().unwrap(), dimm_fixture());
+        let mut expected = Fixture::new();
+        for (key, value) in dimm_fixture().entries() {
+            if cfg!(feature = "spd-paging") || key != smbus_byte_key(0x50, 1, 0) {
+                expected.set(key, value);
+            }
+        }
+        assert_eq!(*fixture.lock().unwrap(), expected);
     }
 
     #[test]

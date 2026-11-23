@@ -3,8 +3,9 @@
 //! The traits are deliberately narrow. A provider cannot write an arbitrary
 //! register: the only write operations that exist are the ones a read needs
 //! (entering and leaving Super I/O configuration mode, selecting a logical
-//! device, setting a hardware-monitor index or bank, selecting a DDR4 SPD
-//! page). Everything else is a read. That makes "SysPilot only reads"
+//! device, setting a hardware-monitor index or bank, and, only with the
+//! `spd-paging` feature, selecting a DDR4 SPD page). Everything else is a
+//! read. That makes "SysPilot only reads"
 //! something the type system enforces and the replay fakes can audit,
 //! instead of a convention each provider has to keep.
 //!
@@ -176,8 +177,9 @@ pub fn is_permitted_bank(bank: u8) -> bool {
 /// An SMBus host controller. Callers hold the [`BusKind::Smbus`] guard.
 ///
 /// There is no general write: a write on an SMBus can reconfigure any chip
-/// on it (a clock generator, a voltage regulator). The one write that
-/// exists selects the DDR4 SPD page.
+/// on it (a clock generator, a voltage regulator). In the default build there
+/// is no write at all. With the `spd-paging` feature the one write that exists
+/// selects the DDR4 SPD page.
 pub trait Smbus: Send {
     /// Reads the byte at `command` of the device at 7-bit `address`.
     fn read_byte_data(&mut self, address: u8, command: u8) -> Result<u8, BusError>;
@@ -188,8 +190,13 @@ pub trait Smbus: Send {
 
     /// Selects DDR4 SPD page 0 or 1 by addressing the page-select pseudo
     /// device `0x36 + page`. All modules on the bus switch page together.
+    ///
+    /// This is a write to the bus, so it exists only with the `spd-paging`
+    /// feature.
+    #[cfg(feature = "spd-paging")]
     fn select_spd_page(&mut self, page: u8) -> Result<(), BusError>;
 }
 
 /// The SPD page-select addresses (`SPA0`, `SPA1`).
+#[cfg(feature = "spd-paging")]
 pub const SPD_PAGE_SELECT_ADDRESSES: [u8; 2] = [0x36, 0x37];

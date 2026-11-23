@@ -3,8 +3,9 @@
 //! They run only with `SYSPILOT_TEST_PAWNIO=1`, from an elevated shell, on a
 //! machine with PawnIO installed and the modules fetched by
 //! `cargo xtask fetch-modules`; otherwise each test prints why it is skipped
-//! and passes. Every access is a read, apart from the index writes and the
-//! SPD page select the bus layer documents.
+//! and passes. Every access is a read, apart from the index writes the bus
+//! layer documents. Never run them with the `spd-paging` feature on a machine
+//! that has memory modules on the SMBus: that feature adds an SMBus write.
 
 use std::path::PathBuf;
 use std::sync::Arc;

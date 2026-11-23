@@ -7,10 +7,24 @@
 //!   `0x51 0x18`. The hub has the temperature sensor built in (register
 //!   `0x31`). Its SPD contents sit behind a page register that is written,
 //!   so only the hub registers are read.
-//! - DDR3 and DDR4 modules are EEPROMs. DDR4 has two 256-byte pages; one
-//!   write to the page-select device (`0x36`/`0x37`) chooses the page for all
-//!   modules, and is the only SMBus write made. The optional temperature
-//!   sensor is a separate chip at `0x18 | slot`.
+//! - DDR3 and DDR4 modules are EEPROMs. DDR4 has two 256-byte pages. The
+//!   optional temperature sensor is a separate chip at `0x18 | slot`.
+//!
+//! # No temperature read writes
+//!
+//! The JC-42.4 sensor registers and the SPD5118 hub registers are not paged,
+//! so reading a temperature never needs the page select. The default build
+//! therefore makes no SMBus write at all (decision 12), and reads only SPD
+//! page 0, which holds the memory type, the geometry and the byte that
+//! declares a thermal sensor (byte 14, bit 7).
+//!
+//! The cost is that a bus another program left on page 1 shows the wrong
+//! bytes for those facts, so a DDR4 module can be listed as "not a memory
+//! module" and its sensor missed until the page is back on 0 (the EEPROMs
+//! power up on page 0). With the `spd-paging` feature the scan first selects
+//! page 0, reads page 1 once for the module manufacturer and part number, and
+//! selects page 0 again. That is the one SMBus write SysPilot has: a write to
+//! `0x36` or `0x37`, which all modules on the bus obey together.
 //!
 //! The scan runs once, at probe. Serial numbers, manufacturing dates and
 //! locations are never read: nothing here identifies one physical module.
@@ -264,11 +278,13 @@ fn ddr4_form_factor(module_type_byte: u8) -> String {
 /// Leaves the SPD page selected as the modules expect it, page 0, however the
 /// reads in between ended. All DDR4 modules on the bus switch page together,
 /// so a page left on 1 would make every other tool read the wrong bytes.
+#[cfg(feature = "spd-paging")]
 struct PageOne<'a> {
     smbus: &'a mut dyn Smbus,
     restored: bool,
 }
 
+#[cfg(feature = "spd-paging")]
 impl<'a> PageOne<'a> {
     /// Selects page 1. A module that does not acknowledge the select still
     /// switches on some controllers; that is not an error, anything else is.
@@ -295,6 +311,7 @@ impl<'a> PageOne<'a> {
     }
 }
 
+#[cfg(feature = "spd-paging")]
 impl Drop for PageOne<'_> {
     fn drop(&mut self) {
         if !self.restored {
@@ -303,6 +320,7 @@ impl Drop for PageOne<'_> {
     }
 }
 
+#[cfg(feature = "spd-paging")]
 fn read_bytes(
     smbus: &mut dyn Smbus,
     address: u8,
@@ -355,7 +373,9 @@ pub fn survey(smbus: &mut dyn Smbus) -> Survey {
     let mut modules = Vec::new();
     if stopped.is_none() && !present.is_empty() {
         // DDR5 hubs need no page select; anything else might be a DDR4
-        // module that another tool left on page 1.
+        // module that another tool left on page 1. Without the `spd-paging`
+        // feature that case is not handled (see the module documentation).
+        #[cfg(feature = "spd-paging")]
         if present.iter().any(|module| !is_ddr5_hub(module))
             && let Err(error) = smbus.select_spd_page(0)
             && !error.is_no_device()
@@ -384,42 +404,59 @@ fn read_modules(
     for identification in present {
         match read_page_zero(smbus, identification) {
             Ok(module) => staged.push(module),
-            Err(error) => return Err((finish(staged, None), error)),
+            Err(error) => return Err((finish(staged, &[]), error)),
         }
     }
+    let (page_one, failure) = read_page_one(smbus, &staged);
+    let modules = finish(staged, &page_one);
+    match failure {
+        Some(error) => Err((modules, error)),
+        None => Ok(modules),
+    }
+}
+
+/// Bytes 320..=351 of the SPD of every DDR4 module (manufacturer, part
+/// number, revision, DRAM manufacturer), by slot, and the error that cut the
+/// reads short, if any. Bytes 322..=328 (location, date and serial number)
+/// are skipped on purpose. Needs the page select.
+#[cfg(feature = "spd-paging")]
+fn read_page_one(
+    smbus: &mut dyn Smbus,
+    staged: &[Staged],
+) -> (Vec<(u8, Vec<u8>)>, Option<BusError>) {
     let ddr4_slots: Vec<u8> = staged
         .iter()
         .filter(|module| matches!(module.generation, Generation::Ddr4))
         .map(|module| module.slot)
         .collect();
     let mut page_one: Vec<(u8, Vec<u8>)> = Vec::new();
-    if !ddr4_slots.is_empty() {
-        let mut guard = match PageOne::select(smbus) {
-            Ok(guard) => guard,
-            Err(error) => return Err((finish(staged, None), error)),
-        };
-        for slot in ddr4_slots {
-            // Bytes 320..=351 of the SPD: manufacturer, part number,
-            // revision, DRAM manufacturer. Bytes 322..=328 (location, date
-            // and serial number) are skipped on purpose.
-            match read_bytes(guard.smbus, FIRST_ADDRESS + slot, 64, 2).and_then(|head| {
-                let tail = read_bytes(guard.smbus, FIRST_ADDRESS + slot, 73, 23)?;
-                Ok([head, tail].concat())
-            }) {
-                Ok(bytes) => page_one.push((slot, bytes)),
-                Err(error) => {
-                    let restored = guard.restore();
-                    drop(guard);
-                    let _ = restored;
-                    return Err((finish(staged, Some(page_one)), error));
-                }
+    if ddr4_slots.is_empty() {
+        return (page_one, None);
+    }
+    let mut guard = match PageOne::select(smbus) {
+        Ok(guard) => guard,
+        Err(error) => return (page_one, Some(error)),
+    };
+    for slot in ddr4_slots {
+        match read_bytes(guard.smbus, FIRST_ADDRESS + slot, 64, 2).and_then(|head| {
+            let tail = read_bytes(guard.smbus, FIRST_ADDRESS + slot, 73, 23)?;
+            Ok([head, tail].concat())
+        }) {
+            Ok(bytes) => page_one.push((slot, bytes)),
+            Err(error) => {
+                let _ = guard.restore();
+                return (page_one, Some(error));
             }
         }
-        if let Err(error) = guard.restore() {
-            return Err((finish(staged, Some(page_one)), error));
-        }
     }
-    Ok(finish(staged, Some(page_one)))
+    let failure = guard.restore().err();
+    (page_one, failure)
+}
+
+/// Without the `spd-paging` feature page 1 is not read: it needs a bus write.
+#[cfg(not(feature = "spd-paging"))]
+fn read_page_one(_: &mut dyn Smbus, _: &[Staged]) -> (Vec<(u8, Vec<u8>)>, Option<BusError>) {
+    (Vec::new(), None)
 }
 
 /// A module whose page-0 facts are read, waiting for the page-1 ones.
@@ -430,14 +467,20 @@ struct Staged {
     sensor: Option<Sensor>,
 }
 
-fn finish(staged: Vec<Staged>, page_one: Option<Vec<(u8, Vec<u8>)>>) -> Vec<Module> {
+fn finish(staged: Vec<Staged>, page_one: &[(u8, Vec<u8>)]) -> Vec<Module> {
     staged
         .into_iter()
         .map(|mut module| {
             let bytes = page_one
-                .as_ref()
-                .and_then(|pages| pages.iter().find(|(slot, _)| *slot == module.slot))
+                .iter()
+                .find(|(slot, _)| *slot == module.slot)
                 .map(|(_, bytes)| bytes.as_slice());
+            if bytes.is_none() && module.generation == Generation::Ddr4 {
+                module.rows.push((
+                    "Manufacturer and part number".to_owned(),
+                    "not read (they sit on SPD page 1, which needs a bus write)".to_owned(),
+                ));
+            }
             if let Some(bytes) = bytes {
                 // bytes: [320, 321, 329..=351]
                 let (manufacturer, rest) = bytes.split_at(2);
@@ -1032,6 +1075,31 @@ mod tests {
     }
 
     #[test]
+    fn a_ddr4_module_s_sensor_and_page_zero_facts_are_read_without_a_page_select() {
+        let mut bus = ReplaySmbus::new(one_ddr4_module());
+        let survey = survey(&mut bus);
+        assert_eq!(survey.stopped, None);
+        let [module] = survey.modules.as_slice() else { panic!("{:?}", survey.modules) };
+        assert!(module.has_temperature_sensor());
+        let rows: std::collections::BTreeMap<_, _> = module.section.rows.iter().cloned().collect();
+        assert_eq!(rows["Capacity"], "8 GiB");
+        assert_eq!(rows["Speed"], "DDR4-2400");
+        assert_eq!(rows["Thermal sensor"], "TSE2004 at 0x18");
+        if cfg!(feature = "spd-paging") {
+            assert_eq!(rows["Module manufacturer"], "Micron");
+            assert!(!rows.contains_key("Manufacturer and part number"));
+        } else {
+            assert_eq!(
+                rows["Manufacturer and part number"],
+                "not read (they sit on SPD page 1, which needs a bus write)"
+            );
+            assert!(!rows.contains_key("Module manufacturer"), "{rows:?}");
+            assert!(!rows.contains_key("Part number"), "{rows:?}");
+        }
+    }
+
+    #[cfg(feature = "spd-paging")]
+    #[test]
     fn a_ddr4_module_is_described_from_its_two_spd_pages() {
         let mut bus = ReplaySmbus::new(one_ddr4_module());
         let survey = survey(&mut bus);
@@ -1056,6 +1124,7 @@ mod tests {
         assert_eq!(rows["SMBus address"], "0x50 (slot 0)");
     }
 
+    #[cfg(feature = "spd-paging")]
     #[test]
     fn the_survey_never_reads_the_serial_number_date_or_location_bytes() {
         let mut bus = ReplaySmbus::new(one_ddr4_module());
@@ -1070,6 +1139,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "spd-paging")]
     #[test]
     fn the_page_is_back_on_zero_after_a_survey() {
         let mut bus = ReplaySmbus::new(one_ddr4_module());
@@ -1078,6 +1148,7 @@ mod tests {
         assert_eq!(log.lock().unwrap().last(), Some(&0));
     }
 
+    #[cfg(feature = "spd-paging")]
     #[test]
     fn a_fault_while_page_one_is_selected_still_restores_page_zero() {
         let mut fixture = one_ddr4_module();
@@ -1099,6 +1170,7 @@ mod tests {
         assert_eq!(survey.modules.len(), 1);
     }
 
+    #[cfg(feature = "spd-paging")]
     #[test]
     fn an_unacknowledged_page_select_is_tolerated() {
         let mut bus = ReplaySmbus::new(one_ddr4_module()).without_page_select_acknowledge();
@@ -1112,6 +1184,7 @@ mod tests {
         let mut fixture = Fixture::new();
         add_ddr5_module(&mut fixture, 1, 100 << 2);
         let mut bus = ReplaySmbus::new(fixture);
+        #[cfg(feature = "spd-paging")]
         let log = bus.page_select_log();
         let survey = survey(&mut bus);
         assert_eq!(survey.stopped, None);
@@ -1123,6 +1196,7 @@ mod tests {
         assert_eq!(rows["Type"], "DDR5 SDRAM, SPD5118 hub");
         assert_eq!(rows["Hub manufacturer"], "Samsung");
         assert_eq!(rows["Thermal sensor"], "in the hub at 0x51");
+        #[cfg(feature = "spd-paging")]
         assert!(log.lock().unwrap().is_empty(), "no write of any kind for DDR5");
     }
 
@@ -1181,19 +1255,23 @@ mod tests {
         add_ddr4_module(&mut fixture, 0, 0x9401);
         add_ddr4_module(&mut fixture, 2, 0x8002);
         let mut bus = ReplaySmbus::new(fixture);
+        #[cfg(feature = "spd-paging")]
         let log = bus.page_select_log();
         let survey = survey(&mut bus);
         let slots: Vec<u8> = survey.modules.iter().map(|m| m.slot).collect();
         assert_eq!(slots, [0, 2]);
+        #[cfg(feature = "spd-paging")]
         assert_eq!(*log.lock().unwrap(), [0, 1, 0], "one page 1 pass for both modules");
     }
 
     #[test]
     fn an_empty_bus_finds_no_module_and_selects_no_page() {
         let mut bus = ReplaySmbus::new(Fixture::new());
+        #[cfg(feature = "spd-paging")]
         let log = bus.page_select_log();
         let survey = survey(&mut bus);
         assert_eq!(survey, Survey { modules: vec![], stopped: None });
+        #[cfg(feature = "spd-paging")]
         assert!(log.lock().unwrap().is_empty());
     }
 
@@ -1212,6 +1290,7 @@ mod tests {
             *self.transfers.lock().unwrap() += 1;
             Err(self.error.clone())
         }
+        #[cfg(feature = "spd-paging")]
         fn select_spd_page(&mut self, _: u8) -> Result<(), BusError> {
             *self.transfers.lock().unwrap() += 1;
             Err(self.error.clone())
@@ -1285,6 +1364,7 @@ mod tests {
         assert_eq!(locks.live_guards(), 0);
     }
 
+    #[cfg(feature = "spd-paging")]
     #[test]
     fn a_sample_makes_no_write_and_does_not_touch_the_spd_page() {
         let mut fixture = one_ddr4_module();
