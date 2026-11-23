@@ -1,8 +1,12 @@
 # PawnIO: device interface, modules and licences
 
 Research note. Facts were read from source at the stated tag or commit;
-anything not confirmed that way is marked **unverified**. Nothing here was
-confirmed by calling the driver; the driver integration tests do that.
+anything not confirmed that way is marked **unverified**. The driver
+integration tests (`crates/hw/tests/driver.rs`) call the driver on the
+[reference machine](reference-machine.md); what they exercised is listed
+under [Verification status](#verification-status) at the end, and everything
+else in the register sections below was written from the sources and checked
+by replay only.
 
 Sources:
 
@@ -138,7 +142,7 @@ affinity to the target core before each per-core read.
 
 ### AMDFamily17
 
-Families 17h to 1Ah.
+Families 17h to 1Ah. **Replay only**: no AMD machine has run this module.
 
 | Function | In → out | |
 |---|---|---|
@@ -187,8 +191,10 @@ bytes packed eight per cell after it.
 | `STATUS_IO_TIMEOUT` | The bus is held (for example by firmware). |
 | `STATUS_DEVICE_BUSY` | The host controller is busy. |
 
-`ioctl_smbus_xfer` can write to any device on the bus. SysPilot issues one
-kind of write: the DDR4 SPD page select.
+`ioctl_smbus_xfer` can write to any device on the bus. The default build of
+SysPilot issues no SMBus write. The one write it can make, the DDR4 SPD page
+select, exists only with the off-by-default `spd-paging` cargo feature of
+`syspilot-hw`.
 
 ## Reading hardware
 
@@ -218,8 +224,9 @@ LibreHardwareMonitor creates them with an ACL open to everyone and waits
   package, `0x639` cores, `0x619` DRAM) times the unit, divided by elapsed
   time.
 - On Haswell-EP and later server parts the DRAM domain uses a fixed unit of
-  15.3 µJ instead of the unit in `0x606` (**unverified** against Intel
-  documentation here; checked on hardware before the DRAM sensor is shown).
+  15.3 µJ instead of the unit in `0x606` (**unverified**: not checked against
+  Intel documentation, and the reference machine's DRAM counter reads 0, so
+  the sensor has never been shown on hardware).
 
 ### Nuvoton NCT67xx Super I/O
 
@@ -240,7 +247,7 @@ LibreHardwareMonitor creates them with an ACL open to everyone and waits
 |---|---|
 | `0xB4` / `0x7x` | NCT6771F |
 | `0xC3` / `0x30` | NCT6776F |
-| `0xC5` / `0x60` | NCT6779D |
+| `0xC5` / `0x6x` | NCT6779D (the reference machine reads revision `0x62`; the low nibble is ignored) |
 | `0xC8` / `0x03` | NCT6791D |
 | `0xC9` / `0x11`, `0x13` | NCT6792D, NCT6792D-A |
 | `0xD1` / `0x21` | NCT6793D |
@@ -258,10 +265,20 @@ NCT6779D and later:
   A count at or above `0x1FFF` means stopped; below `0x15` is invalid.
 - PWM read-back: `0x001`, `0x003`, `0x011`, `0x013`, `0x015`, `0x017`,
   `0x029`, percent = value / 2.55.
-- Temperatures (NCT6779D): integer register and half-degree register, bit 7:
-  CPUTIN `0x073`/`0x074`, SYSTIN `0x075`/`0x076`, AUXTIN0 `0x077`/`0x078`,
-  AUXTIN1 `0x079`/`0x07A`, AUXTIN2 `0x07B`/`0x07C`, AUXTIN3 `0x150`/`0x151`,
-  PECI 0 `0x027`. Readings outside −55…125 °C are dropped.
+- Temperatures (NCT6779D): seven slots, each an integer register, a
+  half-degree register (bit 7, none for the first) and a source-select
+  register: `0x027` (select `0x621`), `0x073`/`0x074` (`0x100`),
+  `0x075`/`0x076` (`0x200`), `0x077`/`0x078` (`0x300`), `0x079`/`0x07A`
+  (`0x800`), `0x07B`/`0x07C` (`0x900`), `0x150`/`0x151` (`0x622`). Bits 4:0 of
+  the select register name the source the slot shows: 1 SYSTIN, 2 CPUTIN,
+  3 AUXTIN0, 4 AUXTIN1, 5 AUXTIN2, 6 AUXTIN3, `0x10` PECI 0. The first slot
+  with a plausible reading wins.
+- A source no slot routes is read from an integer-only alternate register
+  (SYSTIN `0x490`, CPUTIN `0x491`, AUXTIN0 to AUXTIN3 `0x492`–`0x495`), kept
+  when it reads 1…125 °C, as LibreHardwareMonitor does. The Linux driver does
+  not read them; see the [reference machine](reference-machine.md) for what
+  that does to unconnected AUXTIN inputs.
+- Readings outside −55…125 °C are dropped.
 
 ### ITE IT87xx Super I/O
 
@@ -280,16 +297,51 @@ NCT6779D and later:
 ### Memory modules over SMBus
 
 - SPD EEPROMs answer at `0x50`–`0x57`; byte 2 is the memory type (`0x0C`
-  DDR4, `0x12` DDR5).
+  DDR4, `0x12` DDR5). Byte 2 is read from page 0, which the EEPROMs power up
+  on.
 - DDR4: 512 bytes in two pages. Select page `p` by writing to address
   `0x36 + p`. Bit 7 of byte `0x0E` announces a thermal sensor at
   `0x18 | (spd address & 7)`; temperature is register `0x05`, big-endian
-  word, 13-bit two's complement in 1/16 °C.
+  word, 13-bit two's complement in 1/16 °C (the JC-42.4 / TSE2004 layout).
 - DDR5: the SPD5118 hub at the same `0x50`–`0x57` address reports the
-  temperature at register `0x31` in the same format.
+  temperature at register `0x31`. The SMBus word read returns the low byte
+  first, so the value is little-endian: bits 12:2 are an 11-bit two's
+  complement count in 0.25 °C, the low two bits are not part of the value
+  (the Linux `spd5118` driver computes `sign_extend32(reg >> 2, 10) * 250`
+  millidegrees). It is not the DDR4 format.
+- **No temperature read needs the page select.** The JC-42.4 sensors at
+  `0x18`–`0x1F` and the SPD5118 hub registers (below `0x80`) are not paged.
+  Only the SPD contents on page 1 (manufacturer, part number) need it, and
+  so does making sure the bus is on page 0 before reading byte 2 and byte
+  `0x0E`: without the select, a bus another tool left on page 1 shows the
+  wrong bytes and a DDR4 module can be missed. SysPilot therefore reads page
+  0 only and makes no SMBus write unless built with `spd-paging`.
 - On server platforms the DIMM bus can hang off the CPU's memory controller
-  instead of the PCH; `SmbusI801` then finds no modules. Verified per
-  machine by the driver tests.
+  instead of the PCH; `SmbusI801` then finds no modules. This is what the
+  reference machine shows.
+
+## Verification status
+
+Run on the [reference machine](reference-machine.md) (Xeon E5-2680 v4,
+NCT6779D, i801 SMBus with no module behind it) with driver 2.2.0 and modules
+0.2.12:
+
+- **Read on hardware**: the device interface (open, version, load, execute),
+  `IntelMSR` (temperatures, RAPL package counter), `LpcIO` with the NCT6779D
+  (detection, 26 sensors), and `SmbusI801` identity and the empty scan of
+  `0x50`–`0x57`.
+- **Replay only** (recorded or hand-written registers, no driver):
+  - the AMD provider and `AMDFamily17` (SMN thermal block, CCD layout, Tctl
+    offsets);
+  - DIMM decoding: DDR4 SPD, the JC-42.4 sensor and the SPD5118 hub;
+  - every Super I/O chip other than the NCT6779D: the ITE IT87xx family and
+    the NCT6791D to NCT6799D layouts, the NCT6771F and NCT6776F;
+  - the Intel DRAM energy unit and the PP0 domain;
+  - the `spd-paging` write path.
+- **Not exercised at all**: the driver's error statuses beyond what the
+  tests provoke (`STATUS_INVALID_SIGNATURE` at runtime, a stopped service),
+  and anything that writes (no write was issued apart from the Super I/O
+  index writes a read needs).
 
 ## Licences
 
