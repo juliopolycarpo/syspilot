@@ -1,0 +1,54 @@
+# Fan-control board catalog. The format is documented in
+# crates/hw/src/fan/board.rs.
+#
+# NOT VALIDATED. This entry only shows the format and gives the tests
+# something to load. Nobody has tried fan control on this board, so
+# `validated = false` and SysPilot offers no fan control for it. Nothing here
+# may be set to `validated = true` until a human has checked on the real board
+# that every `pwm` below is the header the label says, that the fan on it
+# reacts, and that the minimum duty keeps it turning (see
+# docs/research/fan-control.md for the checklist).
+#
+# The labels, the tach numbers and the minimum duties below are placeholders.
+
+[[board]]
+manufacturer = "MACHINIST"
+product = "E5-MR9A PRO"
+chip = "NCT6779D"
+validated = false
+note = "Placeholder channels: the header mapping and the minimum duties were not checked."
+
+[[board.channel]]
+pwm = 1
+tach = 1
+label = "Fan 1 (unverified)"
+min-duty = 30
+may-stop = false
+
+[[board.channel]]
+pwm = 2
+tach = 2
+label = "Fan 2 (unverified)"
+min-duty = 30
+may-stop = false
+
+[[board.channel]]
+pwm = 3
+tach = 3
+label = "Fan 3 (unverified)"
+min-duty = 30
+may-stop = false
+
+[[board.channel]]
+pwm = 4
+tach = 4
+label = "Fan 4 (unverified)"
+min-duty = 30
+may-stop = false
+
+[[board.channel]]
+pwm = 5
+tach = 5
+label = "Fan 5 (unverified)"
+min-duty = 30
+may-stop = false

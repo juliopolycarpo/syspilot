@@ -126,6 +126,25 @@ impl Chip {
     pub fn has_io_space_lock(self) -> bool {
         !matches!(self, Self::Nct6771F | Self::Nct6776F | Self::Nct6779D)
     }
+
+    /// The chip with marketing name `name` (as [`Chip::name`] writes it).
+    pub fn from_name(name: &str) -> Option<Chip> {
+        Self::ALL.into_iter().find(|chip| chip.name() == name)
+    }
+
+    /// How many fan duty (PWM) outputs the chip has: the duty registers this
+    /// module reads back.
+    pub fn pwm_channels(self) -> usize {
+        layout(self).duty.len()
+    }
+
+    /// How many fan tachometer inputs the chip has.
+    pub fn fan_tachometers(self) -> usize {
+        match layout(self).fans {
+            Fans::Counter13(registers) => registers.len(),
+            Fans::Rpm16 { registers, .. } => registers.len(),
+        }
+    }
 }
 
 /// The chip behind chip ID `id` and revision `revision` (configuration
@@ -809,6 +828,23 @@ mod tests {
         assert_eq!(identify(0xC8, 0x04), None, "NCT6791D needs revision exactly 0x03");
         assert_eq!(identify(0xC5, 0x50), None, "NCT6779D needs revision 0x6x");
         assert_eq!(identify(0xFF, 0xFF), None);
+    }
+
+    #[test]
+    fn a_chip_is_found_again_by_its_marketing_name() {
+        for chip in Chip::ALL {
+            assert_eq!(Chip::from_name(chip.name()), Some(chip));
+        }
+        assert_eq!(Chip::from_name("NCT6779d"), None, "names are matched exactly");
+        assert_eq!(Chip::from_name(""), None);
+    }
+
+    #[test]
+    fn the_chip_reports_how_many_pwm_outputs_and_tachometers_it_has() {
+        assert_eq!((Chip::Nct6776F.pwm_channels(), Chip::Nct6776F.fan_tachometers()), (3, 5));
+        assert_eq!((Chip::Nct6779D.pwm_channels(), Chip::Nct6779D.fan_tachometers()), (5, 5));
+        assert_eq!((Chip::Nct6791D.pwm_channels(), Chip::Nct6791D.fan_tachometers()), (6, 6));
+        assert_eq!((Chip::Nct6798D.pwm_channels(), Chip::Nct6798D.fan_tachometers()), (7, 7));
     }
 
     #[test]
