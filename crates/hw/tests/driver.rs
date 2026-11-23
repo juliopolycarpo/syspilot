@@ -11,9 +11,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use syspilot_hw::Provider;
-use syspilot_hw::bus::pawn::PawnMsr;
+use syspilot_hw::bus::pawn::{PawnMsr, PawnSuperIo};
+use syspilot_hw::bus::{BusKind, BusLocks, SystemBusLocks};
+use syspilot_hw::chips::{Detected, SuperIoProvider, detect};
 use syspilot_hw::cpu::{CpuIdentity, CpuTopology, IntelCpuProvider, SystemClock, Vendor};
 use syspilot_pawnio::{Error, Executor, PawnIo};
+use syspilot_proto::sensor::SensorKind;
 
 /// Whether the driver tests are enabled; prints the reason when not.
 fn enabled(test: &str) -> bool {
@@ -52,6 +55,63 @@ fn load_module(test: &str, file: &str) -> Option<Arc<dyn Executor>> {
         }
         Err(other) => panic!("(driver test): expected {file} to load | received: {other}"),
     }
+}
+
+#[test]
+fn the_super_io_provider_reads_plausible_board_sensors() {
+    let test = "the_super_io_provider_reads_plausible_board_sensors";
+    if !enabled(test) {
+        return;
+    }
+    let Some(module) = load_module(test, "LpcIO.bin") else { return };
+    let locks: Arc<dyn BusLocks> = Arc::new(SystemBusLocks::new());
+    let mut scanner = PawnSuperIo::new(module);
+    let detection = {
+        let _isa = locks.acquire(BusKind::Isa).expect("(driver test): expected the ISA bus mutex");
+        detect(&mut scanner)
+    };
+    assert_eq!(detection.problems, Vec::<String>::new(), "(detection): expected a clean scan");
+    for chip in &detection.chips {
+        eprintln!("detected: {}", chip.describe());
+    }
+    let Some(chip) =
+        detection.chips.iter().find(|chip| !matches!(chip, Detected::Unsupported { .. }))
+    else {
+        eprintln!("skipping {test}: no readable Super I/O chip on this machine");
+        return;
+    };
+    // The provider needs its own handle: the module remembers the slot and the I/O ranges.
+    let Some(own_module) = load_module(test, "LpcIO.bin") else { return };
+    let mut provider = SuperIoProvider::open(chip, Box::new(PawnSuperIo::new(own_module)), locks)
+        .unwrap_or_else(|error| {
+            panic!("(super io provider): expected to open | received: {error}")
+        });
+    eprintln!("probe: {}", provider.summary());
+
+    let sensors = provider.sensors();
+    let mut values = Vec::new();
+    provider.sample(&mut values);
+    assert_eq!(values.len(), sensors.len(), "one value per sensor");
+    let mut plausible_temperatures = 0;
+    for (sensor, value) in sensors.iter().zip(&values) {
+        eprintln!("{:<24} {:<16} {:?}", sensor.key, sensor.label, value);
+        let Some(value) = *value else { continue };
+        let range = match sensor.kind {
+            SensorKind::Temperature => -55.0..=125.0,
+            SensorKind::Voltage => 0.0..=20.0,
+            SensorKind::Fan => 0.0..=30_000.0,
+            SensorKind::Duty => 0.0..=100.0,
+            other => {
+                panic!("(super io provider): expected a board sensor kind | received: {other:?}")
+            }
+        };
+        assert!(range.contains(&value), "({}): expected {range:?} | received: {value}", sensor.key);
+        if sensor.kind == SensorKind::Temperature {
+            plausible_temperatures += 1;
+        }
+    }
+    assert!(plausible_temperatures > 0, "(super io provider): expected at least one temperature");
+    assert_eq!(provider.last_problem(), None);
 }
 
 #[test]
