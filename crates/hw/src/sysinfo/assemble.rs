@@ -214,7 +214,9 @@ fn processor_section(
             .map(|count| count.to_string()),
     );
     rows.show("Speed", record.and_then(|p| p.current_speed_mhz).map(format_megahertz));
-    rows.show("Max speed", record.and_then(|p| p.max_speed_mhz).map(format_megahertz));
+    // SMBIOS defines this as the fastest speed the system supports for the
+    // socket, not what the installed part can do, so the label says so.
+    rows.show("Socket max speed", record.and_then(|p| p.max_speed_mhz).map(format_megahertz));
     for group in topology.map(|t| t.caches.as_slice()).unwrap_or_default() {
         rows.show(&cache_label(group), Some(cache_value(group)));
     }
@@ -552,7 +554,7 @@ mod tests {
         assert_eq!(row(cpu, "Cores"), Some("14"));
         assert_eq!(row(cpu, "Logical processors"), Some("28"));
         assert_eq!(row(cpu, "Speed"), Some("2.4 GHz"));
-        assert_eq!(row(cpu, "Max speed"), Some("4 GHz"));
+        assert_eq!(row(cpu, "Socket max speed"), Some("4 GHz"));
         assert_eq!(row(cpu, "L1 data cache"), Some("14 x 32 KiB"));
         assert_eq!(row(cpu, "L1 instruction cache"), Some("14 x 32 KiB"));
         assert_eq!(row(cpu, "L2 cache"), Some("14 x 256 KiB"));

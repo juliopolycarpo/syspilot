@@ -100,7 +100,11 @@ pub struct ProcessorRecord {
     pub version: Option<String>,
     /// Whether a processor is installed in the socket.
     pub populated: bool,
+    /// The fastest the system supports for this socket. It describes the
+    /// socket, not the installed part: firmware often reports a figure above
+    /// what the processor can reach.
     pub max_speed_mhz: Option<u32>,
+    /// The speed at boot.
     pub current_speed_mhz: Option<u32>,
     pub core_count: Option<u32>,
     pub cores_enabled: Option<u32>,
