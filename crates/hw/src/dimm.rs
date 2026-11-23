@@ -794,11 +794,6 @@ impl DimmProvider {
         Ok(DimmProbe { provider, info, summary, modules })
     }
 
-    /// Why the most recent sample had no values, if it had none.
-    pub fn last_problem(&self) -> Option<&str> {
-        self.last_problem.as_deref()
-    }
-
     fn read_all(&mut self) -> Result<Vec<Option<f64>>, BusError> {
         let locks = Arc::clone(&self.locks);
         let _bus = locks.acquire(BusKind::Smbus)?;
@@ -882,6 +877,10 @@ impl Provider for DimmProvider {
 
     fn needs_driver(&self) -> bool {
         true
+    }
+
+    fn last_problem(&self) -> Option<&str> {
+        self.last_problem.as_deref()
     }
 }
 

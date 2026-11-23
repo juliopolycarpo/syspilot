@@ -151,11 +151,6 @@ impl SuperIoProvider {
         &self.summary
     }
 
-    /// Why the most recent sample had no values, if it had none.
-    pub fn last_problem(&self) -> Option<&str> {
-        self.last_problem.as_deref()
-    }
-
     /// Reads the chip once under the bus mutex.
     fn read_once(&mut self) -> Result<Vec<Option<f64>>, BusError> {
         let locks = Arc::clone(&self.locks);
@@ -227,6 +222,10 @@ impl Provider for SuperIoProvider {
 
     fn needs_driver(&self) -> bool {
         true
+    }
+
+    fn last_problem(&self) -> Option<&str> {
+        self.last_problem.as_deref()
     }
 }
 

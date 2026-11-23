@@ -49,6 +49,13 @@ pub trait Provider: Send {
     fn sensor_needs_driver(&self, _index: usize) -> bool {
         self.needs_driver()
     }
+
+    /// Why the most recent [`Provider::sample`] produced no values, or `None`
+    /// when it did or the provider does not track failures. A bus held by
+    /// another program counts as a reason.
+    fn last_problem(&self) -> Option<&str> {
+        None
+    }
 }
 
 struct Slot {
@@ -222,6 +229,12 @@ impl Provider for FakeProvider {
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn a_provider_that_does_not_track_failures_reports_no_problem() {
+        let provider: Box<dyn Provider> = Box::new(FakeProvider::temperatures(&[("a.temp", None)]));
+        assert_eq!(provider.last_problem(), None);
+    }
 
     #[test]
     fn hub_assigns_sequential_ids_and_groups_devices() {

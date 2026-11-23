@@ -350,11 +350,6 @@ impl AmdCpuProvider {
         &self.summary
     }
 
-    /// Why the most recent temperature read had no values, if it had none.
-    pub fn last_problem(&self) -> Option<&str> {
-        self.last_problem.as_deref()
-    }
-
     /// Tctl and the CCD temperatures, read under one hold of the PCI mutex.
     fn read_temperatures(&mut self) -> Result<(Option<f64>, Vec<Option<f64>>), BusError> {
         let locks = Arc::clone(&self.locks);
@@ -462,6 +457,11 @@ impl Provider for AmdCpuProvider {
 
     fn needs_driver(&self) -> bool {
         true
+    }
+
+    /// Why the most recent temperature read had no values, if it had none.
+    fn last_problem(&self) -> Option<&str> {
+        self.last_problem.as_deref()
     }
 }
 
