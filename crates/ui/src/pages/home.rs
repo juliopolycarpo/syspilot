@@ -77,7 +77,7 @@ fn readings(app: &App) -> View {
     let trends = app.trends();
     let tiles = model::vitals(&app.snapshot.sensors).into_iter().map(|vital| {
         let value = trends.latest(vital.sensor.id);
-        let tone = model::reading_tone(value, vital.sensor.kind);
+        let tone = model::reading_tone(&vital.sensor, value);
         let text = TextBlock::new()
             .text(model::reading_text(value, vital.sensor.kind))
             .font_size(TEXT_SUBTITLE)

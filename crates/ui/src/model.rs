@@ -553,19 +553,30 @@ pub fn is_per_unit_sensor(key: &str) -> bool {
     })
 }
 
+/// Whether a sensor is a raw input of the board's monitoring chip whose
+/// meaning depends on how the board is wired: an auxiliary temperature
+/// input may be connected to nothing and read over 100 °C, a voltage input
+/// has no fixed rail, a duty output may drive no fan. Until a description
+/// of the board says what they are, they are detail, and never coloured.
+pub fn is_raw_board_input(key: &str) -> bool {
+    ["board.temp.auxtin", "board.vin", "board.pwm"].iter().any(|raw| key.starts_with(raw))
+}
+
 /// The sensors of one device, split into the ones always shown and the
-/// per-unit ones.
+/// detail that is folded away: per-unit readings and raw board inputs.
 pub fn device_sensors(sensors: &SensorList, device: usize) -> (Vec<&SensorInfo>, Vec<&SensorInfo>) {
     sensors
         .sensors
         .iter()
         .filter(|sensor| sensor.device as usize == device)
-        .partition(|sensor| !is_per_unit_sensor(&sensor.key))
+        .partition(|sensor| !is_per_unit_sensor(&sensor.key) && !is_raw_board_input(&sensor.key))
 }
 
-/// Whether a temperature or load is high enough to colour.
-pub fn reading_tone(value: Option<f64>, kind: SensorKind) -> Tone {
-    match (value, kind) {
+/// Whether a temperature is high enough to colour. A raw board input is
+/// not: what it measures is not known, so neither is what is high for it.
+pub fn reading_tone(sensor: &SensorInfo, value: Option<f64>) -> Tone {
+    match (value, sensor.kind) {
+        _ if is_raw_board_input(&sensor.key) => Tone::Neutral,
         (Some(v), SensorKind::Temperature) if v >= 90.0 => Tone::Bad,
         (Some(v), SensorKind::Temperature) if v >= 80.0 => Tone::Caution,
         _ => Tone::Neutral,
@@ -922,10 +933,49 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
 
     #[test]
     fn only_hot_temperatures_are_coloured() {
-        assert_eq!(reading_tone(Some(95.0), SensorKind::Temperature), Tone::Bad);
-        assert_eq!(reading_tone(Some(82.0), SensorKind::Temperature), Tone::Caution);
-        assert_eq!(reading_tone(Some(60.0), SensorKind::Temperature), Tone::Neutral);
-        assert_eq!(reading_tone(Some(100.0), SensorKind::Load), Tone::Neutral);
+        let sensor = |key: &str, kind| SensorInfo {
+            id: 0,
+            device: 0,
+            key: key.into(),
+            label: key.into(),
+            kind,
+            driver: false,
+        };
+        let temperature = sensor("cpu.package.temp", SensorKind::Temperature);
+        assert_eq!(reading_tone(&temperature, Some(95.0)), Tone::Bad);
+        assert_eq!(reading_tone(&temperature, Some(82.0)), Tone::Caution);
+        assert_eq!(reading_tone(&temperature, Some(60.0)), Tone::Neutral);
+        assert_eq!(reading_tone(&sensor("cpu.load", SensorKind::Load), Some(100.0)), Tone::Neutral);
+        // An input nothing is wired to reads like this; it is not an alarm.
+        let floating = sensor("board.temp.auxtin1", SensorKind::Temperature);
+        assert_eq!(reading_tone(&floating, Some(109.0)), Tone::Neutral);
+    }
+
+    #[test]
+    fn raw_board_inputs_are_detail_and_known_board_readings_are_not() {
+        for key in
+            ["board.temp.auxtin0", "board.temp.auxtin3", "board.vin0", "board.vin14", "board.pwm2"]
+        {
+            assert!(is_raw_board_input(key), "{key}");
+        }
+        for key in ["board.temp.systin", "board.temp.peci0", "board.fan2", "cpu.package.temp"] {
+            assert!(!is_raw_board_input(key), "{key}");
+        }
+        let sensor = |id, key: &str| SensorInfo {
+            id,
+            device: 0,
+            key: key.into(),
+            label: key.into(),
+            kind: SensorKind::Temperature,
+            driver: true,
+        };
+        let sensors = SensorList {
+            generation: 1,
+            devices: Vec::new(),
+            sensors: vec![sensor(0, "board.temp.systin"), sensor(1, "board.temp.auxtin1")],
+        };
+        let (main, detail) = device_sensors(&sensors, 0);
+        assert_eq!((main[0].id, detail[0].id), (0, 1));
     }
 
     #[test]

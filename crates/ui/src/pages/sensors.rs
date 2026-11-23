@@ -49,7 +49,7 @@ fn reading(app: &App, sensor: &SensorInfo, trends: &Trends) -> KeyedView {
                 model::chart_scale(sensor.kind),
                 app.palette.chart(),
             )),
-            widgets::toned(text, model::reading_tone(value, sensor.kind), app.palette),
+            widgets::toned(text, model::reading_tone(sensor, value), app.palette),
             widgets::caption(range)
                 .horizontal_alignment(HorizontalAlignment::Right)
                 .vertical_alignment(VerticalAlignment::Center)
@@ -70,7 +70,7 @@ fn per_unit_readings(
 ) -> View {
     if app.level() == ViewLevel::Simple {
         return widgets::caption(format!(
-            "{} more readings, one per thread or core, are listed at the Advanced level.",
+            "{} more readings (each thread and core, raw board inputs) are listed at the Advanced level.",
             sensors.len()
         ))
         .into();
@@ -86,11 +86,11 @@ fn per_unit_readings(
         .is_expanded(unfolded)
         .on_is_expanded_changed(context.callback(move |open| Message::Unfold(name.clone(), open)))
         .horizontal_alignment(HorizontalAlignment::Stretch)
-        .automation_name(format!("Each thread and core of {}", device.name))
+        .automation_name(format!("More readings of {}", device.name))
         .slots([
             SlotView::new(
                 ExpanderSlot::Header,
-                widgets::body(format!("Each thread and core ({})", sensors.len())),
+                widgets::body(format!("More readings ({})", sensors.len())),
             ),
             SlotView::new(
                 ExpanderSlot::Content,
