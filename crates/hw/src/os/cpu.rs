@@ -175,21 +175,25 @@ impl CpuProvider {
 }
 
 /// Load over the interval between two reads of every processor, or `None`
-/// if the processor sets differ or a counter went backwards.
+/// if the processor sets differ.
+///
+/// A processor whose counters went backwards contributes nothing to the
+/// interval instead of voiding it. This happens on a healthy machine: the
+/// kernel accounts a processor's time in clock ticks (15.6 ms) and a read
+/// taken mid-tick can come out one or more ticks below the previous one, on
+/// idle and total alike (about one sample in thirty on a 28-thread CPU,
+/// measured at 60 ms intervals). Dropping the whole sample for that would
+/// leave the total load blinking out.
 fn total_load(previous: &[CpuTimes], current: &[CpuTimes]) -> Option<f64> {
     if previous.is_empty() || previous.len() != current.len() {
         return None;
     }
-    let (mut idle, mut total) = (Some(0u64), Some(0u64));
+    let (mut idle, mut total) = (0u64, 0u64);
     for (before, now) in previous.iter().zip(current) {
-        idle = idle
-            .zip(now.idle.checked_sub(before.idle))
-            .map(|(sum, delta)| sum.saturating_add(delta));
-        total = total
-            .zip(now.total.checked_sub(before.total))
-            .map(|(sum, delta)| sum.saturating_add(delta));
+        idle = idle.saturating_add(now.idle.saturating_sub(before.idle));
+        total = total.saturating_add(now.total.saturating_sub(before.total));
     }
-    busy_percent(idle, total)
+    busy_percent(Some(idle), Some(total))
 }
 
 fn thread_load(before: &CpuTimes, now: &CpuTimes) -> Option<f64> {
@@ -370,14 +374,37 @@ mod tests {
     }
 
     #[test]
-    fn thread_whose_counter_went_backwards_has_no_load_but_others_do() {
+    fn thread_whose_counter_went_backwards_has_no_load_but_others_and_the_total_do() {
         let reads = vec![
             Some(vec![times(50, 100), times(50, 100)]),
             Some(vec![times(10, 50), times(60, 200)]),
         ];
         let mut cpu = provider(reads, 2, None);
         sample(&mut cpu);
-        assert_eq!(sample(&mut cpu), [None, None, Some(90.0)]);
+        // The total ignores the processor that stepped back: 10 idle of 100.
+        assert_eq!(sample(&mut cpu), [Some(90.0), None, Some(90.0)]);
+    }
+
+    #[test]
+    fn one_processor_stepping_back_a_tick_does_not_blank_the_total() {
+        // Measured on a real machine: processor 17 read 156 250 units (one
+        // 15.6 ms tick) lower on both idle and total, 27 others advanced.
+        const TICK: u64 = 156_250;
+        let before: Vec<CpuTimes> = (0..28).map(|_| times(1_000_000, 1_100_000)).collect();
+        let mut after: Vec<CpuTimes> = (0..28).map(|_| times(1_900_000, 2_000_000)).collect();
+        after[17] = times(1_000_000 - TICK, 1_100_000 - TICK);
+        // 27 processors: 900 000 idle of 900 000 total.
+        assert_eq!(total_load(&before, &after), Some(0.0));
+        // Without the saturation the whole sample would have been None.
+        assert_eq!(thread_load(&before[17], &after[17]), None);
+        assert_eq!(thread_load(&before[0], &after[0]), Some(0.0));
+    }
+
+    #[test]
+    fn total_load_of_an_interval_where_every_counter_stepped_back_is_unknown() {
+        let before = [times(100, 200), times(100, 200)];
+        let after = [times(50, 150), times(50, 150)];
+        assert_eq!(total_load(&before, &after), None, "no elapsed ticks at all");
     }
 
     #[test]
