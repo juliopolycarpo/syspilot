@@ -161,6 +161,16 @@ mod tests {
     }
 
     #[test]
+    fn qword_value_that_exists_is_read() {
+        // `InstallTime` is a REG_QWORD (a FILETIME) on every Windows 10/11.
+        let install_time = read_u64(CURRENT_VERSION, "InstallTime").unwrap();
+        assert!(
+            install_time > 0,
+            "InstallTime: expected a FILETIME > 0 | received: {install_time}"
+        );
+    }
+
+    #[test]
     fn missing_key_or_value_is_none() {
         assert_eq!(read_string(r"SOFTWARE\SysPilot-Test\no-such-key", "x"), None);
         assert_eq!(read_string(CURRENT_VERSION, "NoSuchValue"), None);

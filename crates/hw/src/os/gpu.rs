@@ -737,6 +737,24 @@ mod tests {
         assert_eq!(read_for_declaration(&mut source), fan_only);
     }
 
+    #[test]
+    fn hardware_adapters_report_the_memory_they_have() {
+        // A machine with no display adapter (a build server) has nothing to
+        // check; one with an adapter must report some memory segment.
+        let hardware: Vec<_> = adapters().into_iter().filter(|adapter| !adapter.software).collect();
+        for adapter in &hardware {
+            let sizes = adapter.segment_sizes().unwrap_or_else(|| {
+                panic!("adapter {:?}: expected memory segment sizes | received: none", adapter.name)
+            });
+            let total = sizes.dedicated_video + sizes.dedicated_system + sizes.shared_system;
+            assert!(
+                total > 0,
+                "adapter {:?}: expected some memory in its segments | received: {sizes:?}",
+                adapter.name
+            );
+        }
+    }
+
     /// One scripted PDH collection.
     struct Frame {
         collected: bool,
