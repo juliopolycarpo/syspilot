@@ -358,6 +358,12 @@ impl Enforcer {
             .min()
     }
 
+    /// How long until [`Enforcer::next_deadline`], zero when it has passed.
+    pub fn time_until_deadline(&self) -> Option<Duration> {
+        let now = self.os.clock.monotonic();
+        self.next_deadline().map(|deadline| deadline.saturating_sub(now))
+    }
+
     /// The newest `limit` history events, newest first.
     pub fn history(&self, limit: usize) -> Vec<HistoryEvent> {
         self.history.iter().rev().take(limit).cloned().collect()
@@ -373,6 +379,12 @@ impl Enforcer {
     /// The last failure to persist state, if the most recent save failed.
     pub fn store_error(&self) -> Option<&str> {
         self.store_error.as_deref()
+    }
+
+    /// Number of applied settings that are waiting to be restored: per-user
+    /// settings of users who are not signed in, and reverts that failed.
+    pub fn pending_reverts(&self) -> usize {
+        self.applied.iter().filter(|unit| unit.revert_pending).count()
     }
 
     /// Whether `id` names a known entry.
@@ -1016,6 +1028,10 @@ mod tests {
         assert_eq!(restores, 3, "exactly the contest threshold, then it stops");
         assert_eq!(fixture.state(), ActionState::Contested { retry_in_secs: 60 });
         assert_eq!(fixture.enforcer.next_deadline(), Some(Duration::from_secs(60)));
+        fixture.fake.clock.advance(Duration::from_secs(45));
+        assert_eq!(fixture.enforcer.time_until_deadline(), Some(Duration::from_secs(15)));
+        fixture.fake.clock.advance(Duration::from_secs(45));
+        assert_eq!(fixture.enforcer.time_until_deadline(), Some(Duration::ZERO), "overdue is zero");
         assert_eq!(fixture.kinds().last(), Some(&HistoryKind::Contested));
     }
 
@@ -1246,9 +1262,11 @@ mod tests {
         enforcer.reconcile();
         assert_eq!(fake.registry.value(&alice, KEY, "Value"), Some(dword(1)));
         assert_eq!(fake.registry.value(&bob, KEY, "Value"), Some(dword(0)), "hive not loaded");
+        assert_eq!(enforcer.pending_reverts(), 1, "Bob's setting is still to be restored");
 
         fake.sessions.set(&[ALICE, BOB]);
         enforcer.trigger(&TriggerEvent::Logon { sid: BOB.into() });
+        assert_eq!(enforcer.pending_reverts(), 0);
         assert_eq!(fake.registry.value(&bob, KEY, "Value"), None, "it did not exist before");
         assert!(!fake.registry.has_key(&bob, KEY), "keys created for Bob are removed");
     }
