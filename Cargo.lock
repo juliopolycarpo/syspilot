@@ -157,9 +157,12 @@ dependencies = [
 name = "syspilot-ui"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "syspilot-proto",
+ "toml",
  "windows-reactor",
  "windows-reactor-setup",
+ "windows-sys",
 ]
 
 [[package]]

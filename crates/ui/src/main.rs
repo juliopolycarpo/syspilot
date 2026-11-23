@@ -1,86 +1,197 @@
 //! SysPilot desktop app.
+//!
+//! A view over what the service reports. It holds no logic about the
+//! system and changes nothing itself: every change is a request to the
+//! service, which decides whether this user may make it.
 #![windows_subsystem = "windows"]
 
-use syspilot_proto::{Client, Instance};
-use windows_reactor::*;
+mod app;
+mod backend;
+mod demo;
+mod form;
+mod launch;
+mod model;
+mod pages;
+mod preferences;
+mod widgets;
 
-/// Toolkit spike: one screen that connects to the service and lists tweaks.
-struct Spike {
-    lines: Vec<(String, String)>,
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use syspilot_proto::Instance;
+use windows_reactor::App as Reactor;
+
+use crate::app::{App, Launch, Page};
+use crate::backend::{Backend, BackendHandle, ServiceBackend};
+use crate::demo::{DemoBackend, Scenario};
+use crate::model::ViewLevel;
+
+/// What the command line asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Options {
+    /// Service instance to talk to.
+    instance: Instance,
+    /// Demo scenario to play instead of talking to a service.
+    demo: Option<Scenario>,
+    /// Page to open on.
+    page: Page,
+    /// Level for this run.
+    level: Option<ViewLevel>,
 }
 
-impl Component for Spike {
-    type Input = Instance;
-    type Message = ();
-
-    fn create(instance: &Instance, _context: &ComponentContext<Self>) -> Self {
-        let lines = match Client::connect(instance).and_then(|mut client| client.catalog()) {
-            Ok(catalog) => {
-                catalog.tweaks.into_iter().map(|tweak| (tweak.id, tweak.title)).collect()
+/// Parses the arguments after the program name.
+///
+/// `--instance <name>`, `--demo [scenario]`, `--page <tag>`,
+/// `--level simple|advanced`.
+fn parse(arguments: &[String]) -> Result<Options, String> {
+    let mut options =
+        Options { instance: Instance::product(), demo: None, page: Page::Home, level: None };
+    let mut rest = arguments.iter().peekable();
+    while let Some(argument) = rest.next() {
+        let mut value = |what: &str| {
+            rest.next()
+                .cloned()
+                .ok_or_else(|| format!("({argument}): expected {what} | received: nothing"))
+        };
+        match argument.as_str() {
+            "--instance" => {
+                let name = value("an instance name")?;
+                options.instance = Instance::named(&name).map_err(|error| error.to_string())?;
             }
-            Err(error) => vec![("error".to_owned(), error.to_string())],
-        };
-        Self { lines }
+            "--page" => {
+                let tag = value("a page name")?;
+                options.page = Page::from_tag(&tag).ok_or_else(|| {
+                    let known: Vec<&str> = Page::ALL.iter().map(|page| page.tag()).collect();
+                    format!("(--page): expected one of {} | received: {tag}", known.join(", "))
+                })?;
+            }
+            "--level" => {
+                options.level = Some(match value("simple or advanced")?.as_str() {
+                    "simple" => ViewLevel::Simple,
+                    "advanced" => ViewLevel::Advanced,
+                    other => {
+                        return Err(format!(
+                            "(--level): expected simple | advanced | received: {other}"
+                        ));
+                    }
+                });
+            }
+            "--demo" => {
+                // The scenario is optional: `--demo --page home` is valid.
+                let named = rest.peek().and_then(|next| Scenario::parse(next));
+                if named.is_some() {
+                    rest.next();
+                }
+                options.demo = Some(named.unwrap_or(Scenario::Healthy));
+            }
+            other => {
+                return Err(format!(
+                    "(argument): expected --instance, --demo, --page or --level | received: {other}"
+                ));
+            }
+        }
     }
+    Ok(options)
+}
 
-    fn view(&self, _input: &Instance, context: &mut ViewContext<Self>) -> View {
-        context.window_title("SysPilot");
-        context.window_visuals(
-            WindowVisuals::new().backdrop(WindowBackdrop::Mica).client_size(1100.0, 720.0),
-        );
-        let rows = self.lines.iter().map(|(id, title)| {
-            KeyedView::new(
-                id.clone(),
-                Border::new()
-                    .padding(12.0)
-                    .corner_radius(4.0)
-                    .border_thickness(1.0)
-                    .background(ThemeBrush::CardBackground)
-                    .border_brush(ThemeBrush::CardStroke)
-                    .content(
-                        Grid::new().columns([GridLength::Star(1.0), GridLength::Auto]).children((
-                            TextBlock::new().text(title.clone()).grid_column(0),
-                            ToggleSwitch::new().grid_column(1),
-                        )),
-                    ),
-            )
-        });
-        let page = ScrollViewer::new().content(
-            Border::new()
-                .padding(Thickness::new(36.0, 24.0, 36.0, 36.0))
-                .content(StackPanel::new().spacing(4.0).keyed_children(rows)),
-        );
-        let item = |tag: &str, label: &str, symbol: Symbol, selected: bool| {
-            KeyedView::new(
-                tag.to_owned(),
-                NavigationViewItem::new().tag(tag).is_selected(selected).slots([
-                    SlotView::new(NavigationViewItemSlot::Content, label),
-                    SlotView::new(NavigationViewItemSlot::Icon, SymbolIcon::new().symbol(symbol)),
-                ]),
-            )
-        };
-        NavigationView::new()
-            .is_settings_visible(false)
-            .is_back_button_visible(NavigationViewBackButtonVisible::Collapsed)
-            .slots([
-                SlotView::collection(
-                    NavigationViewSlot::MenuItems,
-                    [
-                        item("home", "Home", Symbol::Home, false),
-                        item("tweaks", "Tweaks", Symbol::Setting, true),
-                    ],
-                ),
-                SlotView::new(NavigationViewSlot::Content, page),
-            ])
+fn launch(options: &Options, arguments: Vec<String>) -> Launch {
+    let backend: Arc<dyn Backend> = match options.demo {
+        Some(scenario) => Arc::new(DemoBackend::new(scenario)),
+        None => Arc::new(ServiceBackend::new(options.instance.clone())),
+    };
+    // A demo must not change what the real app remembers.
+    let preferences_file = match options.demo {
+        Some(_) => None,
+        None => std::env::var_os("LOCALAPPDATA")
+            .map(|root| preferences::file_in(&PathBuf::from(root), options.instance.name())),
+    };
+    Launch {
+        backend: BackendHandle(backend),
+        preferences_file,
+        page: options.page,
+        level: options.level,
+        arguments,
+        install_arguments: vec![
+            "--instance".to_owned(),
+            options.instance.name().to_owned(),
+            "install".to_owned(),
+        ],
     }
 }
 
 fn main() {
-    let instance = std::env::args()
-        .nth(1)
-        .and_then(|name| Instance::named(&name).ok())
-        .unwrap_or_else(Instance::product);
-    if let Err(error) = App::run_component::<Spike>(instance) {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    // A windowed program has no console to complain on; a bad argument is
+    // ignored in favour of starting normally.
+    let options = parse(&arguments).unwrap_or_else(|_| Options {
+        instance: Instance::product(),
+        demo: None,
+        page: Page::Home,
+        level: None,
+    });
+    if let Err(error) = Reactor::run_component::<App>(launch(&options, arguments)) {
         eprintln!("{error:?}");
+        std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use syspilot_proto::catalog::Category;
+
+    fn arguments(text: &str) -> Vec<String> {
+        text.split_whitespace().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn no_arguments_mean_the_product_service_and_the_home_page() {
+        let options = parse(&[]).unwrap();
+        assert!(options.instance.is_product());
+        assert_eq!((options.demo, options.page, options.level), (None, Page::Home, None));
+    }
+
+    #[test]
+    fn every_option_is_understood() {
+        let options =
+            parse(&arguments("--instance SysPilot-Test.ui --page privacy --level advanced"))
+                .unwrap();
+        assert_eq!(options.instance.name(), "SysPilot-Test.ui");
+        assert_eq!(options.page, Page::Tweaks(Category::Privacy));
+        assert_eq!(options.level, Some(ViewLevel::Advanced));
+    }
+
+    #[test]
+    fn demo_scenario_is_optional() {
+        assert_eq!(parse(&arguments("--demo")).unwrap().demo, Some(Scenario::Healthy));
+        assert_eq!(parse(&arguments("--demo no-driver")).unwrap().demo, Some(Scenario::NoDriver));
+        let followed = parse(&arguments("--demo --page sensors")).unwrap();
+        assert_eq!((followed.demo, followed.page), (Some(Scenario::Healthy), Page::Sensors));
+    }
+
+    #[test]
+    fn mistakes_name_what_was_received_and_what_is_valid() {
+        assert_eq!(
+            parse(&arguments("--level expert")).unwrap_err(),
+            "(--level): expected simple | advanced | received: expert"
+        );
+        assert!(parse(&arguments("--page")).unwrap_err().contains("received: nothing"));
+        let unknown = parse(&arguments("--page nowhere")).unwrap_err();
+        assert!(
+            unknown.contains("look-and-feel") && unknown.ends_with("received: nowhere"),
+            "{unknown}"
+        );
+        assert!(parse(&arguments("--verbose")).unwrap_err().ends_with("received: --verbose"));
+    }
+
+    #[test]
+    fn a_demo_keeps_no_preferences_and_installs_its_own_instance() {
+        let demo = launch(&parse(&arguments("--demo")).unwrap(), Vec::new());
+        assert_eq!(demo.preferences_file, None);
+        let test = launch(&parse(&arguments("--instance SysPilot-Test.ui")).unwrap(), Vec::new());
+        assert_eq!(test.install_arguments, ["--instance", "SysPilot-Test.ui", "install"]);
+        if let Some(file) = test.preferences_file {
+            assert!(file.ends_with(r"SysPilot-Test.ui\app.toml"), "{file:?}");
+        }
     }
 }

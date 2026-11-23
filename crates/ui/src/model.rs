@@ -1,0 +1,876 @@
+//! What the views show, derived from what the service reports.
+//!
+//! Everything here is plain data and pure functions, so the wording and the
+//! state mapping are tested without a window.
+
+use std::collections::VecDeque;
+
+use syspilot_proto::catalog::{Catalog, Category, Direction, Level, Reboot, Tweak};
+use syspilot_proto::message::{
+    ActionState, DriverState, EntryStatus, HistoryEvent, HistoryKind, ServiceStatus, SystemInfo,
+};
+use syspilot_proto::profile::Profile;
+use syspilot_proto::sensor::{DeviceClass, Sample, SensorInfo, SensorKind, SensorList};
+
+/// Samples kept per sensor for the small trend lines: one minute.
+pub const TREND_LEN: usize = 60;
+
+/// Everything read from the service in one refresh.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Snapshot {
+    /// Whether the service treats this app as an elevated administrator.
+    pub elevated: bool,
+    /// Service, driver and feature status.
+    pub status: Option<ServiceStatus>,
+    /// The built-in tweaks.
+    pub catalog: Catalog,
+    /// State of every tweak and custom action.
+    pub states: Vec<EntryStatus>,
+    /// The stored profile. Only readable when elevated.
+    pub profile: Option<Profile>,
+    /// Recent enforcement events. Only readable when elevated.
+    pub history: Vec<HistoryEvent>,
+    /// Sensor metadata.
+    pub sensors: SensorList,
+    /// Hardware and software inventory.
+    pub system: SystemInfo,
+}
+
+/// Whether the app has data to show.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Link {
+    /// First load in progress.
+    Connecting,
+    /// Connected; the snapshot is current.
+    Ready,
+    /// The service is not installed or not started.
+    NotRunning,
+    /// Something else went wrong; the text says what.
+    Failed(String),
+}
+
+/// How much of the product is shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ViewLevel {
+    /// Common options in plain language.
+    Simple,
+    /// Everything, with technical detail.
+    Advanced,
+}
+
+/// Colour meaning of a badge or figure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    /// No judgement.
+    Neutral,
+    /// As intended.
+    Good,
+    /// Needs a look.
+    Caution,
+    /// Wrong or refused.
+    Bad,
+}
+
+/// A short state label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Badge {
+    /// Text, from the glossary in `docs/ui-glossary.md`.
+    pub text: &'static str,
+    /// Colour meaning.
+    pub tone: Tone,
+}
+
+const fn badge(text: &'static str, tone: Tone) -> Option<Badge> {
+    Some(Badge { text, tone })
+}
+
+/// The badge for an entry. `None` means nothing worth saying (off, and the
+/// system is in its usual state).
+pub fn entry_badge(status: &EntryStatus, audit: bool) -> Option<Badge> {
+    match (&status.state, status.enabled, audit) {
+        (ActionState::NotApplicable { .. }, _, _) => badge("Not available", Tone::Neutral),
+        (ActionState::Compliant, _, true) => badge("Passed", Tone::Good),
+        (ActionState::Different, _, true) => badge("Needs attention", Tone::Caution),
+        (_, _, true) => badge("Can't check", Tone::Neutral),
+        (ActionState::Compliant, true, _) => badge("Applied", Tone::Good),
+        (ActionState::Compliant, false, _) => badge("Already set", Tone::Neutral),
+        (_, false, _) => None,
+        (ActionState::Different, true, _) => badge("Not applied yet", Tone::Caution),
+        (ActionState::Contested { .. }, true, _) => badge("Contested", Tone::Caution),
+        (ActionState::NotEnforceable { .. }, true, _) => badge("Blocked by Windows", Tone::Bad),
+        (ActionState::Unknown, true, _) => badge("Can't check", Tone::Neutral),
+        (ActionState::Failed { .. }, true, _) => badge("Failed", Tone::Bad),
+    }
+}
+
+/// A sentence explaining a state that needs explaining.
+pub fn entry_note(status: &EntryStatus) -> Option<String> {
+    match &status.state {
+        ActionState::Contested { retry_in_secs } => Some(format!(
+            "Something else keeps changing this setting. SysPilot stopped restoring it and will try again in {}.",
+            duration_text(u64::from(*retry_in_secs))
+        )),
+        ActionState::NotEnforceable { reason } => {
+            Some(format!("Windows does not allow this change. {reason}"))
+        }
+        ActionState::NotApplicable { reason } => Some(sentence(reason)),
+        ActionState::Failed { error } => Some(format!("This could not be applied. {error}")),
+        ActionState::Unknown if status.enabled => Some(
+            "It is turned on, but its current state can't be read right now (for per-user settings, this is normal until that user signs in)."
+                .into(),
+        ),
+        _ => None,
+    }
+}
+
+/// Capitalises the first letter and ends with a full stop.
+fn sentence(text: &str) -> String {
+    let mut characters = text.trim().chars();
+    let Some(first) = characters.next() else { return String::new() };
+    let mut out: String = first.to_uppercase().chain(characters).collect();
+    if !out.ends_with(['.', '!', '?']) {
+        out.push('.');
+    }
+    out
+}
+
+/// `2 d 4 h`, `2 h 5 min`, `41 s`: the two most significant units.
+pub fn duration_text(seconds: u64) -> String {
+    let (days, hours, minutes) = (seconds / 86_400, seconds / 3600 % 24, seconds / 60 % 60);
+    match (days, hours, minutes) {
+        (0, 0, 0) => format!("{seconds} s"),
+        (0, 0, _) => format!("{minutes} min"),
+        (0, _, 0) => format!("{hours} h"),
+        (0, _, _) => format!("{hours} h {minutes} min"),
+        _ => format!("{days} d {hours} h"),
+    }
+}
+
+/// Display name of a category.
+pub fn category_name(category: Category) -> &'static str {
+    match category {
+        Category::Performance => "Performance",
+        Category::Privacy => "Privacy",
+        Category::Security => "Security",
+        Category::Reliability => "Reliability",
+        Category::Other => "Look and feel",
+    }
+}
+
+/// One line saying what a category is for.
+pub fn category_blurb(category: Category) -> &'static str {
+    match category {
+        Category::Performance => "Responsiveness, latency and background activity.",
+        Category::Privacy => "What Windows sends to Microsoft and shares with apps.",
+        Category::Security => "Attack surface, protections and checks of this PC's posture.",
+        Category::Reliability => "Updates, recovery and long-term stability.",
+        Category::Other => "How Windows looks and what it suggests.",
+    }
+}
+
+/// Whether `tweak` is shown at `level`.
+pub fn visible_at(tweak: &Tweak, level: ViewLevel) -> bool {
+    level == ViewLevel::Advanced || tweak.level == Level::Simple
+}
+
+/// A tweak with its state, ready to draw.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TweakRow {
+    /// Entry ID.
+    pub id: String,
+    /// Headline.
+    pub title: String,
+    /// What the user will notice.
+    pub summary: String,
+    /// Whether it is turned on.
+    pub enabled: bool,
+    /// Whether the switch can be used at all.
+    pub available: bool,
+    /// Checks have no switch.
+    pub audit: bool,
+    /// Turning it on lowers security and needs a confirmation.
+    pub weakens: bool,
+    /// State label.
+    pub badge: Option<Badge>,
+    /// Explanation of an unusual state.
+    pub note: Option<String>,
+    /// How often it was restored after something changed it.
+    pub restored: u32,
+    /// Extra facts for the Advanced level, as label and value.
+    pub facts: Vec<(&'static str, String)>,
+    /// The settings it writes with their current values.
+    pub settings: Vec<(String, String)>,
+    /// Microsoft's documentation for it.
+    pub source: String,
+}
+
+fn tweak_row(tweak: &Tweak, status: Option<&EntryStatus>) -> TweakRow {
+    let mut facts = Vec::new();
+    if !tweak.detail.is_empty() {
+        facts.push(("How it works", tweak.detail.clone()));
+    }
+    if let Some(risk) = &tweak.risk {
+        facts.push(("Risk", risk.clone()));
+    }
+    if !tweak.side_effects.is_empty() {
+        facts.push(("Side effects", tweak.side_effects.clone()));
+    }
+    match tweak.reboot {
+        Reboot::None => {}
+        Reboot::SignOut => facts.push(("Takes effect", "After you sign out and back in".into())),
+        Reboot::Restart => facts.push(("Takes effect", "After a restart".into())),
+    }
+    let settings = tweak
+        .actions
+        .iter()
+        .enumerate()
+        .map(|(index, action)| {
+            let current = status.and_then(|status| status.actions.get(index));
+            (action.describe(), current.map(|c| c.current.clone()).unwrap_or_default())
+        })
+        .collect();
+    let not_applicable =
+        status.is_some_and(|s| matches!(s.state, ActionState::NotApplicable { .. }));
+    TweakRow {
+        id: tweak.id.clone(),
+        title: tweak.title.clone(),
+        summary: tweak.summary.clone(),
+        enabled: status.is_some_and(|status| status.enabled),
+        available: !not_applicable && !tweak.audit,
+        audit: tweak.audit,
+        weakens: tweak.direction == Some(Direction::Weakens),
+        badge: status.and_then(|status| entry_badge(status, tweak.audit)),
+        note: status.and_then(entry_note),
+        restored: status.map_or(0, |status| status.drift_count),
+        facts,
+        settings,
+        source: tweak.source.clone(),
+    }
+}
+
+/// The tweaks of one category that are visible at `level`, matching
+/// `filter` (case-insensitive, in title, summary or ID).
+pub fn tweak_rows(
+    snapshot: &Snapshot,
+    category: Category,
+    level: ViewLevel,
+    filter: &str,
+) -> Vec<TweakRow> {
+    let needle = filter.trim().to_lowercase();
+    snapshot
+        .catalog
+        .tweaks
+        .iter()
+        .filter(|tweak| tweak.category == category && visible_at(tweak, level))
+        .filter(|tweak| {
+            needle.is_empty()
+                || [&tweak.title, &tweak.summary, &tweak.id]
+                    .iter()
+                    .any(|text| text.to_lowercase().contains(&needle))
+        })
+        .map(|tweak| tweak_row(tweak, snapshot.states.iter().find(|s| s.id == tweak.id)))
+        .collect()
+}
+
+/// Categories that have at least one tweak visible at `level`.
+pub fn categories(snapshot: &Snapshot, level: ViewLevel) -> Vec<Category> {
+    Category::ALL
+        .into_iter()
+        .filter(|category| {
+            snapshot.catalog.tweaks.iter().any(|t| t.category == *category && visible_at(t, level))
+        })
+        .collect()
+}
+
+/// The headline numbers of the home page.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Overview {
+    /// Tweaks and custom actions turned on.
+    pub enabled: usize,
+    /// Of those, how many are in place.
+    pub applied: usize,
+    /// Of those, how many are contested, blocked or failed.
+    pub problems: usize,
+    /// Security checks that passed.
+    pub checks_passed: usize,
+    /// Security checks in total.
+    pub checks_total: usize,
+    /// Times a setting was put back after something changed it.
+    pub restored: u32,
+}
+
+/// Summarises the entry states.
+pub fn overview(snapshot: &Snapshot) -> Overview {
+    let mut overview = Overview::default();
+    for status in &snapshot.states {
+        let audit = snapshot.catalog.get(&status.id).is_some_and(|tweak| tweak.audit);
+        if audit {
+            overview.checks_total += 1;
+            overview.checks_passed += usize::from(status.state == ActionState::Compliant);
+            continue;
+        }
+        overview.restored += status.drift_count;
+        if !status.enabled {
+            continue;
+        }
+        overview.enabled += 1;
+        match status.state {
+            ActionState::Compliant => overview.applied += 1,
+            ActionState::Contested { .. }
+            | ActionState::NotEnforceable { .. }
+            | ActionState::Failed { .. } => overview.problems += 1,
+            _ => {}
+        }
+    }
+    overview
+}
+
+/// Entries that need the user's attention, with the reason.
+pub fn attention(snapshot: &Snapshot) -> Vec<(String, Badge, String)> {
+    snapshot
+        .states
+        .iter()
+        .filter_map(|status| {
+            let tweak = snapshot.catalog.get(&status.id);
+            let audit = tweak.is_some_and(|tweak| tweak.audit);
+            let badge = entry_badge(status, audit)?;
+            if !matches!(badge.tone, Tone::Caution | Tone::Bad) {
+                return None;
+            }
+            let title = tweak.map_or_else(|| status.id.clone(), |tweak| tweak.title.clone());
+            let note = entry_note(status)
+                .or_else(|| tweak.filter(|_| audit).map(|tweak| tweak.summary.clone()))
+                .unwrap_or_default();
+            Some((title, badge, note))
+        })
+        .collect()
+}
+
+/// One sentence about the driver, and whether it is something to act on.
+pub fn driver_text(driver: &DriverState) -> (String, Tone) {
+    match driver {
+        DriverState::Missing => (
+            "PawnIO is not installed. Sensors that need hardware access are unavailable.".into(),
+            Tone::Caution,
+        ),
+        DriverState::Ready { version } => (format!("PawnIO {version} is ready."), Tone::Good),
+        DriverState::TooOld { version, required } => (
+            format!("PawnIO {version} is too old. Version {required} or later is needed."),
+            Tone::Caution,
+        ),
+        DriverState::Failed { error } => {
+            (format!("PawnIO is installed but can't be used. {}", sentence(error)), Tone::Bad)
+        }
+    }
+}
+
+/// Formats a reading with a sensible precision and its unit.
+pub fn reading_text(value: Option<f64>, kind: SensorKind) -> String {
+    let Some(value) = value else { return "—".into() };
+    match kind {
+        SensorKind::Data => bytes_text(value),
+        SensorKind::Throughput => format!("{}/s", bytes_text(value)),
+        SensorKind::Frequency if value >= 1000.0 => format!("{:.2} GHz", value / 1000.0),
+        SensorKind::Voltage => format!("{value:.3} V"),
+        SensorKind::Temperature | SensorKind::Load | SensorKind::Duty | SensorKind::Level => {
+            format!("{value:.0} {}", kind.unit())
+        }
+        _ if value.abs() >= 100.0 => format!("{value:.0} {}", kind.unit()),
+        _ => format!("{value:.1} {}", kind.unit()),
+    }
+}
+
+/// `1.5 GB`, `512 MB`: binary multiples with Windows' labels.
+pub fn bytes_text(bytes: f64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes.max(0.0);
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 || value >= 100.0 {
+        format!("{value:.0} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// Recent values of every sensor.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Trends {
+    generation: u32,
+    series: Vec<VecDeque<Option<f64>>>,
+}
+
+impl Trends {
+    /// Adds one sample. A new sensor set starts the history over, because
+    /// its IDs mean other sensors.
+    pub fn push(&mut self, generation: u32, samples: &[Sample]) {
+        if generation != self.generation {
+            self.generation = generation;
+            self.series.clear();
+        }
+        let sensor_count = samples.iter().map(|sample| sample.id as usize + 1).max().unwrap_or(0);
+        if self.series.len() < sensor_count {
+            self.series.resize_with(sensor_count, VecDeque::new);
+        }
+        for (id, series) in self.series.iter_mut().enumerate() {
+            if series.len() == TREND_LEN {
+                series.pop_front();
+            }
+            let sample = samples.iter().find(|sample| sample.id as usize == id);
+            series.push_back(sample.and_then(|sample| sample.value));
+        }
+    }
+
+    /// The latest value of a sensor.
+    pub fn latest(&self, id: u32) -> Option<f64> {
+        self.series.get(id as usize)?.back().copied().flatten()
+    }
+
+    /// The recent values of a sensor, oldest first.
+    pub fn series(&self, id: u32) -> Vec<Option<f64>> {
+        self.series.get(id as usize).map(|s| s.iter().copied().collect()).unwrap_or_default()
+    }
+
+    /// Lowest and highest recent value of a sensor.
+    pub fn range(&self, id: u32) -> Option<(f64, f64)> {
+        let values = self.series.get(id as usize)?.iter().flatten();
+        values.fold(None, |range, value| match range {
+            None => Some((*value, *value)),
+            Some((low, high)) => Some((low.min(*value), high.max(*value))),
+        })
+    }
+}
+
+/// A headline sensor for the home page.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Vital {
+    /// What it measures, e.g. `Processor load`.
+    pub label: &'static str,
+    /// The sensor behind it.
+    pub sensor: SensorInfo,
+}
+
+/// Picks the few sensors worth showing at a glance: one temperature and one
+/// load per processor and graphics card, memory in use, and the first fan.
+pub fn vitals(sensors: &SensorList) -> Vec<Vital> {
+    let pick = |class: DeviceClass, kind: SensorKind| {
+        sensors.sensors.iter().find(|sensor| {
+            sensor.kind == kind
+                && sensors.devices.get(sensor.device as usize).is_some_and(|d| d.class == class)
+        })
+    };
+    let wanted = [
+        ("Processor load", DeviceClass::Cpu, SensorKind::Load),
+        ("Processor temperature", DeviceClass::Cpu, SensorKind::Temperature),
+        ("Graphics load", DeviceClass::Gpu, SensorKind::Load),
+        ("Graphics temperature", DeviceClass::Gpu, SensorKind::Temperature),
+        ("Memory in use", DeviceClass::Memory, SensorKind::Load),
+        ("Storage temperature", DeviceClass::Storage, SensorKind::Temperature),
+        ("Fan speed", DeviceClass::Board, SensorKind::Fan),
+    ];
+    wanted
+        .into_iter()
+        .filter_map(|(label, class, kind)| {
+            pick(class, kind).map(|sensor| Vital { label, sensor: sensor.clone() })
+        })
+        .collect()
+}
+
+/// The value range a chart of `kind` always includes, so that a steady
+/// reading draws a calm line instead of magnified noise.
+pub fn chart_scale(kind: SensorKind) -> (Option<f64>, Option<f64>) {
+    match kind {
+        SensorKind::Load | SensorKind::Duty | SensorKind::Level => (Some(0.0), Some(100.0)),
+        SensorKind::Temperature => (Some(20.0), Some(100.0)),
+        _ => (Some(0.0), None),
+    }
+}
+
+/// `41 s ago`, `2 h 5 min ago`.
+pub fn ago_text(now_unix: u64, then_unix: u64) -> String {
+    match now_unix.saturating_sub(then_unix) {
+        0 => "Just now".into(),
+        seconds => format!("{} ago", duration_text(seconds)),
+    }
+}
+
+/// The badge for a line of history.
+pub fn history_badge(kind: HistoryKind) -> Badge {
+    let (text, tone) = match kind {
+        HistoryKind::Applied => ("Applied", Tone::Good),
+        HistoryKind::Restored => ("Restored", Tone::Good),
+        HistoryKind::Reverted => ("Turned off", Tone::Neutral),
+        HistoryKind::Contested => ("Contested", Tone::Caution),
+        HistoryKind::Refused => ("Blocked by Windows", Tone::Bad),
+        HistoryKind::Failed => ("Failed", Tone::Bad),
+    };
+    Badge { text, tone }
+}
+
+/// The name of an entry: its catalog title, its custom action title, or
+/// (for an entry that no longer exists) its ID.
+pub fn entry_title(snapshot: &Snapshot, id: &str) -> String {
+    let custom = || {
+        snapshot.profile.iter().flat_map(|profile| &profile.custom).find(|custom| custom.id == id)
+    };
+    snapshot
+        .catalog
+        .get(id)
+        .map(|tweak| tweak.title.clone())
+        .or_else(|| custom().map(|custom| custom.title.clone()))
+        .unwrap_or_else(|| id.to_owned())
+}
+
+/// How many tweaks of a category are on, and how many there are, counting
+/// what is visible at `level` and leaving out checks.
+pub fn category_count(snapshot: &Snapshot, category: Category, level: ViewLevel) -> (usize, usize) {
+    let tweaks = snapshot
+        .catalog
+        .tweaks
+        .iter()
+        .filter(|tweak| tweak.category == category && !tweak.audit && visible_at(tweak, level));
+    tweaks.fold((0, 0), |(on, all), tweak| {
+        let enabled = snapshot.states.iter().any(|status| status.id == tweak.id && status.enabled);
+        (on + usize::from(enabled), all + 1)
+    })
+}
+
+/// Whether a temperature or load is high enough to colour.
+pub fn reading_tone(value: Option<f64>, kind: SensorKind) -> Tone {
+    match (value, kind) {
+        (Some(v), SensorKind::Temperature) if v >= 90.0 => Tone::Bad,
+        (Some(v), SensorKind::Temperature) if v >= 80.0 => Tone::Caution,
+        _ => Tone::Neutral,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use syspilot_proto::message::ActionStatus;
+    use syspilot_proto::sensor::DeviceInfo;
+
+    const CATALOG: &str = r#"
+[[tweak]]
+id = "privacy.ads"
+title = "Turn off the advertising ID"
+summary = "Apps can no longer use your advertising ID."
+level = "simple"
+category = "privacy"
+side-effects = "Ads are less relevant."
+reboot = "sign-out"
+source = "https://learn.microsoft.com/windows/"
+[[tweak.action]]
+registry = { scope = "user", key = 'Software\Example', name = "Enabled", data = { dword = 0 } }
+
+[[tweak]]
+id = "security.mitigations"
+title = "Turn off mitigations"
+summary = "Removes a protection."
+level = "advanced"
+category = "security"
+direction = "weakens"
+risk = "Other programs could read memory they should not."
+source = "https://learn.microsoft.com/windows/"
+[[tweak.action]]
+registry = { scope = "machine", key = 'SYSTEM\Example', name = "Off", data = { dword = 1 } }
+
+[[tweak]]
+id = "security.check"
+title = "Check that Secure Boot is on"
+summary = "Secure Boot stops tampered boot software."
+level = "advanced"
+category = "security"
+direction = "hardens"
+audit = true
+source = "https://learn.microsoft.com/windows/"
+[[tweak.action]]
+registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dword = 1 } }
+"#;
+
+    fn status(id: &str, enabled: bool, state: ActionState) -> EntryStatus {
+        EntryStatus {
+            id: id.into(),
+            enabled,
+            state: state.clone(),
+            actions: vec![ActionStatus { state, current: "dword:1".into() }],
+            drift_count: 0,
+            last_drift_unix: None,
+        }
+    }
+
+    fn snapshot(states: Vec<EntryStatus>) -> Snapshot {
+        Snapshot { catalog: Catalog::parse(CATALOG).unwrap(), states, ..Snapshot::default() }
+    }
+
+    #[test]
+    fn every_state_maps_to_one_glossary_term() {
+        let text = |enabled, state, audit| {
+            entry_badge(&status("a.b", enabled, state), audit).map(|badge| badge.text)
+        };
+        assert_eq!(text(true, ActionState::Compliant, false), Some("Applied"));
+        assert_eq!(text(false, ActionState::Compliant, false), Some("Already set"));
+        assert_eq!(text(false, ActionState::Different, false), None);
+        assert_eq!(text(true, ActionState::Different, false), Some("Not applied yet"));
+        assert_eq!(
+            text(true, ActionState::Contested { retry_in_secs: 5 }, false),
+            Some("Contested")
+        );
+        let blocked = ActionState::NotEnforceable { reason: "x".into() };
+        assert_eq!(text(true, blocked, false), Some("Blocked by Windows"));
+        assert_eq!(text(true, ActionState::Failed { error: "x".into() }, false), Some("Failed"));
+        assert_eq!(text(true, ActionState::Unknown, false), Some("Can't check"));
+        let absent = ActionState::NotApplicable { reason: "x".into() };
+        assert_eq!(text(false, absent, false), Some("Not available"));
+        assert_eq!(text(false, ActionState::Compliant, true), Some("Passed"));
+        assert_eq!(text(false, ActionState::Different, true), Some("Needs attention"));
+        assert_eq!(text(false, ActionState::Unknown, true), Some("Can't check"));
+    }
+
+    #[test]
+    fn unusual_states_are_explained_in_a_sentence() {
+        let contested = status("a.b", true, ActionState::Contested { retry_in_secs: 125 });
+        assert!(entry_note(&contested).unwrap().ends_with("will try again in 2 min."));
+        let absent = ActionState::NotApplicable { reason: "needs Windows build 26100".into() };
+        assert_eq!(
+            entry_note(&status("a.b", false, absent)).unwrap(),
+            "Needs Windows build 26100."
+        );
+        assert_eq!(entry_note(&status("a.b", true, ActionState::Compliant)), None);
+        assert_eq!(entry_note(&status("a.b", false, ActionState::Unknown)), None);
+    }
+
+    #[test]
+    fn durations_read_naturally() {
+        assert_eq!(duration_text(41), "41 s");
+        assert_eq!(duration_text(125), "2 min");
+        assert_eq!(duration_text(3600), "1 h");
+        assert_eq!(duration_text(2 * 3600 + 300), "2 h 5 min");
+        assert_eq!(duration_text(3 * 86_400 + 4 * 3600), "3 d 4 h");
+    }
+
+    #[test]
+    fn simple_level_hides_advanced_tweaks_and_empty_categories() {
+        let snapshot = snapshot(vec![]);
+        assert_eq!(categories(&snapshot, ViewLevel::Simple), [Category::Privacy]);
+        assert_eq!(
+            categories(&snapshot, ViewLevel::Advanced),
+            [Category::Privacy, Category::Security]
+        );
+        assert!(tweak_rows(&snapshot, Category::Security, ViewLevel::Simple, "").is_empty());
+        assert_eq!(tweak_rows(&snapshot, Category::Security, ViewLevel::Advanced, "").len(), 2);
+    }
+
+    #[test]
+    fn rows_carry_state_flags_and_facts() {
+        let mut ads = status("privacy.ads", true, ActionState::Compliant);
+        ads.drift_count = 3;
+        let snapshot = snapshot(vec![ads]);
+        let row = &tweak_rows(&snapshot, Category::Privacy, ViewLevel::Simple, "")[0];
+        assert!(row.enabled && row.available && !row.audit && !row.weakens);
+        assert_eq!(row.badge.as_ref().unwrap().text, "Applied");
+        assert_eq!(row.restored, 3);
+        assert_eq!(
+            row.facts,
+            [
+                ("Side effects", "Ads are less relevant.".to_owned()),
+                ("Takes effect", "After you sign out and back in".to_owned()),
+            ]
+        );
+        assert_eq!(row.settings.len(), 1);
+        assert_eq!(row.settings[0].1, "dword:1");
+
+        let rows = tweak_rows(&snapshot, Category::Security, ViewLevel::Advanced, "");
+        assert!(rows[0].weakens, "a weakening tweak is flagged for confirmation");
+        assert!(rows[1].audit && !rows[1].available, "a check has no switch");
+    }
+
+    #[test]
+    fn filter_matches_title_summary_and_id_ignoring_case() {
+        let snapshot = snapshot(vec![]);
+        let found =
+            |filter| tweak_rows(&snapshot, Category::Security, ViewLevel::Advanced, filter).len();
+        assert_eq!(found("SECURE boot"), 1);
+        assert_eq!(found("protection"), 1);
+        assert_eq!(found("security."), 2);
+        assert_eq!(found("no such thing"), 0);
+    }
+
+    #[test]
+    fn overview_counts_tweaks_and_checks_separately() {
+        let mut restored = status("privacy.ads", true, ActionState::Compliant);
+        restored.drift_count = 4;
+        let snapshot = snapshot(vec![
+            restored,
+            status("security.mitigations", true, ActionState::Contested { retry_in_secs: 60 }),
+            status("security.check", false, ActionState::Compliant),
+            status("custom.mine", false, ActionState::Different),
+        ]);
+        assert_eq!(
+            overview(&snapshot),
+            Overview {
+                enabled: 2,
+                applied: 1,
+                problems: 1,
+                checks_passed: 1,
+                checks_total: 1,
+                restored: 4
+            }
+        );
+        let attention = attention(&snapshot);
+        assert_eq!(attention.len(), 1);
+        assert_eq!(attention[0].0, "Turn off mitigations");
+        assert_eq!(attention[0].1.text, "Contested");
+    }
+
+    #[test]
+    fn failed_check_asks_for_attention_with_its_summary() {
+        let snapshot = snapshot(vec![status("security.check", false, ActionState::Different)]);
+        let attention = attention(&snapshot);
+        assert_eq!(attention[0].1.text, "Needs attention");
+        assert_eq!(attention[0].2, "Secure Boot stops tampered boot software.");
+    }
+
+    #[test]
+    fn readings_use_fitting_precision_and_units() {
+        assert_eq!(reading_text(Some(45.4), SensorKind::Temperature), "45 °C");
+        assert_eq!(reading_text(Some(12.34), SensorKind::Power), "12.3 W");
+        assert_eq!(reading_text(Some(1234.4), SensorKind::Fan), "1234 RPM");
+        assert_eq!(reading_text(Some(4200.0), SensorKind::Frequency), "4.20 GHz");
+        assert_eq!(reading_text(Some(800.0), SensorKind::Frequency), "800 MHz");
+        assert_eq!(reading_text(Some(1.2345), SensorKind::Voltage), "1.234 V");
+        assert_eq!(reading_text(Some(1536.0 * 1024.0), SensorKind::Data), "1.5 MB");
+        assert_eq!(reading_text(Some(2048.0), SensorKind::Throughput), "2.0 KB/s");
+        assert_eq!(reading_text(None, SensorKind::Load), "—");
+        assert_eq!(bytes_text(512.0), "512 B");
+        assert_eq!(bytes_text(34.0 * 1024.0 * 1024.0 * 1024.0), "34.0 GB");
+    }
+
+    #[test]
+    fn trends_keep_one_minute_and_restart_on_a_new_sensor_set() {
+        let mut trends = Trends::default();
+        for second in 0..(TREND_LEN + 5) {
+            let failed_read = Sample { id: 1, value: None };
+            trends.push(1, &[Sample { id: 0, value: Some(second as f64) }, failed_read]);
+        }
+        assert_eq!(trends.series(0).len(), TREND_LEN);
+        assert_eq!(trends.latest(0), Some((TREND_LEN + 4) as f64));
+        assert_eq!(trends.range(0), Some((5.0, (TREND_LEN + 4) as f64)));
+        assert_eq!(trends.latest(1), None, "a sensor that could not be read has a gap");
+        assert_eq!(trends.range(1), None);
+        assert_eq!(trends.latest(7), None, "an unknown sensor has no history");
+
+        trends.push(2, &[Sample { id: 0, value: Some(1.0) }]);
+        assert_eq!(trends.series(0), [Some(1.0)], "IDs of a new set mean other sensors");
+    }
+
+    #[test]
+    fn vitals_pick_one_sensor_per_headline_measure() {
+        let sensor = |id, device, kind| SensorInfo {
+            id,
+            device,
+            key: format!("s{id}"),
+            label: format!("Sensor {id}"),
+            kind,
+            driver: false,
+        };
+        let sensors = SensorList {
+            generation: 1,
+            devices: vec![
+                DeviceInfo { name: "CPU".into(), class: DeviceClass::Cpu },
+                DeviceInfo { name: "GPU".into(), class: DeviceClass::Gpu },
+            ],
+            sensors: vec![
+                sensor(0, 0, SensorKind::Frequency),
+                sensor(1, 0, SensorKind::Load),
+                sensor(2, 0, SensorKind::Load),
+                sensor(3, 1, SensorKind::Temperature),
+            ],
+        };
+        let picked: Vec<_> = vitals(&sensors).iter().map(|v| (v.label, v.sensor.id)).collect();
+        assert_eq!(picked, [("Processor load", 1), ("Graphics temperature", 3)]);
+    }
+
+    #[test]
+    fn chart_scales_fit_the_quantity() {
+        assert_eq!(chart_scale(SensorKind::Load), (Some(0.0), Some(100.0)));
+        assert_eq!(chart_scale(SensorKind::Temperature), (Some(20.0), Some(100.0)));
+        assert_eq!(chart_scale(SensorKind::Throughput), (Some(0.0), None));
+    }
+
+    #[test]
+    fn times_are_told_relative_to_now() {
+        assert_eq!(ago_text(1000, 1000), "Just now");
+        assert_eq!(ago_text(1000, 1003), "Just now", "a clock slightly behind is not the future");
+        assert_eq!(ago_text(1000, 959), "41 s ago");
+        assert_eq!(ago_text(100_000, 100_000 - 7500), "2 h 5 min ago");
+    }
+
+    #[test]
+    fn history_kinds_use_the_glossary_terms() {
+        use syspilot_proto::message::HistoryKind;
+        let text = |kind| history_badge(kind).text;
+        assert_eq!(text(HistoryKind::Applied), "Applied");
+        assert_eq!(text(HistoryKind::Restored), "Restored");
+        assert_eq!(text(HistoryKind::Reverted), "Turned off");
+        assert_eq!(text(HistoryKind::Contested), "Contested");
+        assert_eq!(text(HistoryKind::Refused), "Blocked by Windows");
+        assert_eq!(text(HistoryKind::Failed), "Failed");
+        assert_eq!(history_badge(HistoryKind::Refused).tone, Tone::Bad);
+    }
+
+    #[test]
+    fn entries_are_named_by_catalog_then_profile_then_id() {
+        use syspilot_proto::action::{Action, ServiceAction, StartType};
+        use syspilot_proto::profile::CustomAction;
+        let mut snapshot = snapshot(vec![]);
+        assert_eq!(entry_title(&snapshot, "privacy.ads"), "Turn off the advertising ID");
+        assert_eq!(entry_title(&snapshot, "custom.mine"), "custom.mine");
+        snapshot.profile = Some(Profile {
+            custom: vec![CustomAction {
+                id: "custom.mine".into(),
+                title: "My action".into(),
+                enabled: true,
+                action: Action::Service(ServiceAction {
+                    service: "Spooler".into(),
+                    start: StartType::Manual,
+                }),
+                triggers: Vec::new(),
+            }],
+            ..Profile::default()
+        });
+        assert_eq!(entry_title(&snapshot, "custom.mine"), "My action");
+    }
+
+    #[test]
+    fn category_counts_ignore_checks_and_hidden_tweaks() {
+        let snapshot = snapshot(vec![
+            status("security.mitigations", true, ActionState::Compliant),
+            status("security.check", false, ActionState::Compliant),
+        ]);
+        assert_eq!(category_count(&snapshot, Category::Security, ViewLevel::Advanced), (1, 1));
+        assert_eq!(category_count(&snapshot, Category::Security, ViewLevel::Simple), (0, 0));
+        assert_eq!(category_count(&snapshot, Category::Privacy, ViewLevel::Simple), (0, 1));
+    }
+
+    #[test]
+    fn only_hot_temperatures_are_coloured() {
+        assert_eq!(reading_tone(Some(95.0), SensorKind::Temperature), Tone::Bad);
+        assert_eq!(reading_tone(Some(82.0), SensorKind::Temperature), Tone::Caution);
+        assert_eq!(reading_tone(Some(60.0), SensorKind::Temperature), Tone::Neutral);
+        assert_eq!(reading_tone(Some(100.0), SensorKind::Load), Tone::Neutral);
+    }
+
+    #[test]
+    fn driver_states_read_as_sentences() {
+        assert_eq!(driver_text(&DriverState::Missing).1, Tone::Caution);
+        let ready = driver_text(&DriverState::Ready { version: "2.2.0".into() });
+        assert_eq!(ready, ("PawnIO 2.2.0 is ready.".to_owned(), Tone::Good));
+        let failed = driver_text(&DriverState::Failed { error: "access denied".into() });
+        assert_eq!(failed.0, "PawnIO is installed but can't be used. Access denied.");
+    }
+}
