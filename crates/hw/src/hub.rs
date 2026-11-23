@@ -43,6 +43,12 @@ pub trait Provider: Send {
     fn needs_driver(&self) -> bool {
         false
     }
+
+    /// Whether the sensor at `index` of [`Provider::sensors`] needs the
+    /// driver. Only a provider that mixes both kinds overrides this.
+    fn sensor_needs_driver(&self, _index: usize) -> bool {
+        self.needs_driver()
+    }
 }
 
 struct Slot {
@@ -73,8 +79,8 @@ impl Hub {
         let mut keys = HashSet::new();
         for provider in providers {
             let first = list.sensors.len();
-            let driver = provider.needs_driver();
-            for spec in provider.sensors() {
+            for (index, spec) in provider.sensors().into_iter().enumerate() {
+                let driver = provider.sensor_needs_driver(index);
                 let device = device_index(&mut list.devices, &spec.device, spec.class);
                 let key = unique_key(&mut keys, spec.key);
                 let id = list.sensors.len() as u32;
