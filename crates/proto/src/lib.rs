@@ -9,6 +9,7 @@
 //! - [`sensor`]: sensor metadata and the shared-memory layout.
 //! - [`client`]: the pipe client.
 //! - [`win`]: the Win32 plumbing underneath.
+//! - [`worker`]: what the service and its sensor worker exchange.
 //!
 //! The wire format is described in `docs/protocol.md`.
 
@@ -23,6 +24,7 @@ pub mod product;
 pub mod profile;
 pub mod sensor;
 pub mod win;
+pub mod worker;
 
 pub use client::{Client, ClientError, EventStream};
 pub use product::{Instance, PRODUCT_NAME, PROTOCOL_VERSION};
