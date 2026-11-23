@@ -16,6 +16,7 @@ pub(crate) mod rate;
 pub(crate) mod registry;
 pub mod storage;
 pub(crate) mod text;
+pub mod thermal;
 pub mod volumes;
 
 use crate::hub::Provider;
@@ -33,6 +34,7 @@ pub const PROBES: &[(&str, ProbeFn)] = &[
     ("volumes", volumes::probe),
     ("network", network::probe),
     ("battery", battery::probe),
+    ("thermal", thermal::probe),
 ];
 
 /// Constructs every provider that finds hardware on this machine.
