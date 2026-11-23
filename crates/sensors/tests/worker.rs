@@ -1,6 +1,10 @@
 //! The real worker executable, spoken to the way the service does.
 //!
-//! It reads this machine's sensors through Windows; nothing is written.
+//! It reads this machine's sensors through Windows and the PawnIO driver;
+//! nothing is written. With the `fan-control` cargo feature the executable can
+//! write fan registers, and this test starts it on the real driver, so it does
+//! not exist in that build: fan control is tested on the replay bus only.
+#![cfg(not(feature = "fan-control"))]
 
 use std::io::Write;
 use std::process::{Command, Stdio};

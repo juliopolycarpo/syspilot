@@ -16,6 +16,11 @@ workspace = true
 name = "syspilot-sensors"
 path = "src/main.rs"
 
+[features]
+# Lets the worker write to the fan controller of a validated board. Off by
+# default and never in a release; see docs/research/fan-control.md.
+fan-control = ["syspilot-hw/fan-control"]
+
 [dependencies]
 syspilot-proto.workspace = true
 syspilot-hw.workspace = true
