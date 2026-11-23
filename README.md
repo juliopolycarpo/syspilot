@@ -188,7 +188,8 @@ everything they create. See [CONTRIBUTING.md](CONTRIBUTING.md).
 - [x] Package, install and uninstall scripts
 - [ ] First release; code signing
 - [ ] Sensors verified on more machines (AMD processors, memory modules, more Super I/O chips)
-- [ ] Fan curves (read-only fan speeds first; control only after validation on real boards)
+- [x] Fan control core: curve engine, board catalog and fail-safes, compiled out of releases and tested against recordings only ([what must be validated first](docs/research/fan-control.md))
+- [ ] Fan curves in the service and the app, enabled per board only after validation on that board
 
 ## Safety
 
