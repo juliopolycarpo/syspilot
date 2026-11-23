@@ -1,0 +1,3 @@
+// The lowest-numbered icon is the one Explorer, the taskbar and shortcuts
+// show for the executable.
+1 ICON "syspilot.ico"

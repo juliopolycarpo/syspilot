@@ -32,6 +32,11 @@ The runtime files are fetched at build time by
 (MIT OR Apache-2.0, build-time only) and are not stored in this repository.
 The service does not load any of them.
 
+The app's icon is compiled into the executable with
+[`embed-resource`](https://crates.io/crates/embed-resource) (MIT, build-time
+only, with its build-time dependencies), which runs the Windows SDK's resource
+compiler.
+
 ## Not distributed
 
 ### PawnIO

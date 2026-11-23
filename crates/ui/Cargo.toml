@@ -30,6 +30,7 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [build-dependencies]
+embed-resource = "3"
 # Stages the Windows App SDK runtime next to the executable, so the app
 # needs nothing installed.
 windows-reactor-setup = "0.100"

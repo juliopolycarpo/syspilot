@@ -31,7 +31,8 @@ if (-not $SkipBuild) {
 }
 
 $executables = 'syspilot.exe', 'syspilot-svc.exe', 'syspilot-sensors.exe'
-foreach ($executable in $executables) {
+# The window icon is a file the app's build puts beside it.
+foreach ($executable in $executables + 'syspilot.ico') {
     if (-not (Test-Path (Join-Path $release $executable))) {
         throw "(release build): expected $executable in $release | received: no such file"
     }

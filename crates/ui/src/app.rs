@@ -673,16 +673,18 @@ impl Component for App {
 
     fn view(&self, _launch: &Launch, context: &mut ViewContext<Self>) -> View {
         context.window_title(format!("SysPilot - {}", self.page.label()));
-        context.window_visuals(
-            WindowVisuals::new()
-                .theme(match self.preferences.theme {
-                    Theme::System => WindowTheme::System,
-                    Theme::Light => WindowTheme::Light,
-                    Theme::Dark => WindowTheme::Dark,
-                })
-                .backdrop(WindowBackdrop::Mica)
-                .client_size(1180.0, 800.0),
-        );
+        let mut visuals = WindowVisuals::new()
+            .theme(match self.preferences.theme {
+                Theme::System => WindowTheme::System,
+                Theme::Light => WindowTheme::Light,
+                Theme::Dark => WindowTheme::Dark,
+            })
+            .backdrop(WindowBackdrop::Mica)
+            .client_size(1180.0, 800.0);
+        if let Some(icon) = launch::window_icon() {
+            visuals = visuals.icon(icon);
+        }
+        context.window_visuals(visuals);
         context.on_color_scheme(context.callback(Message::Scheme));
 
         let content = match &self.link {

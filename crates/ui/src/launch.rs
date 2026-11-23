@@ -12,6 +12,23 @@ use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 /// File name of the service executable, expected next to the app.
 const SERVICE_EXECUTABLE: &str = "syspilot-svc.exe";
 
+/// File name of the window icon, expected next to the app.
+const ICON_FILE: &str = "syspilot.ico";
+
+/// Where the icon file is if it sits beside `executable`.
+fn icon_beside(executable: &Path) -> Option<String> {
+    let icon = executable.with_file_name(ICON_FILE);
+    if icon.is_file() { icon.to_str().map(str::to_owned) } else { None }
+}
+
+/// The window icon's path, or `None` when the file is not beside the app
+/// (the window then keeps the default icon). The toolkit wants a path
+/// that lives as long as the program, so it is looked up once and kept.
+pub fn window_icon() -> Option<&'static str> {
+    static ICON: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    ICON.get_or_init(|| icon_beside(&std::env::current_exe().ok()?)).as_deref()
+}
+
 /// Quotes one argument the way `CommandLineToArgvW` splits it again.
 pub fn quote_argument(argument: &str) -> String {
     if !argument.is_empty() && !argument.contains([' ', '\t', '"']) {
@@ -112,6 +129,20 @@ pub fn open_folder(folder: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_icon_is_found_only_when_it_is_beside_the_executable() {
+        let directory =
+            std::env::temp_dir().join(format!("SysPilot-Test-icon-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let executable = directory.join("syspilot.exe");
+        assert_eq!(icon_beside(&executable), None);
+
+        let icon = directory.join(ICON_FILE);
+        std::fs::write(&icon, b"icon").unwrap();
+        assert_eq!(icon_beside(&executable).as_deref(), icon.to_str());
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
 
     #[test]
     fn plain_arguments_stay_as_they_are() {
