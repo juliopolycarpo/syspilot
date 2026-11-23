@@ -114,7 +114,7 @@ pub fn view(app: &App, context: &ViewContext<App>) -> View {
             "theme",
             setting(
                 "Colours",
-                "Light or dark.",
+                "Light, dark, or the same as Windows.",
                 ComboBox::new()
                     .items_source(Theme::ALL.map(Theme::name))
                     .selected_index(theme)
