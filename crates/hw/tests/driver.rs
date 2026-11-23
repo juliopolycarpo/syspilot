@@ -5,7 +5,8 @@
 //! `cargo xtask fetch-modules`; otherwise each test prints why it is skipped
 //! and passes. Every access is a read, apart from the index writes the bus
 //! layer documents. Never run them with the `spd-paging` feature on a machine
-//! that has memory modules on the SMBus: that feature adds an SMBus write.
+//! that has memory modules on the SMBus: that feature adds an SMBus write. With
+//! the `fan-control` feature on they skip even when the variable is set.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,6 +25,14 @@ use syspilot_proto::sensor::SensorKind;
 
 /// Whether the driver tests are enabled; prints the reason when not.
 fn enabled(test: &str) -> bool {
+    // A build with the fan-register write code must never open the real
+    // driver from a test, whatever the environment says.
+    if cfg!(feature = "fan-control") {
+        eprintln!(
+            "skipping {test}: the `fan-control` feature is on, driver tests never run with it"
+        );
+        return false;
+    }
     if std::env::var("SYSPILOT_TEST_PAWNIO").as_deref() == Ok("1") {
         return true;
     }

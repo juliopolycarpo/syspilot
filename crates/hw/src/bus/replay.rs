@@ -11,7 +11,10 @@
 //! - [`ReplaySuperIo`]: configuration registers only inside configuration
 //!   mode, logical-device and bank writes only in the sequences the real
 //!   implementation allows, I/O ranges discovered before the monitor ports
-//!   are used, configuration mode left before another slot is selected.
+//!   are used, configuration mode left before another slot is selected. With
+//!   the `fan-control` feature it also takes the one write that feature adds,
+//!   applied to the replayed registers; this is how every fan write path is
+//!   tested, never against the driver.
 //! - [`ReplaySmbus`]: reads from the recording, one write that must be an
 //!   SPD page select, addresses absent from the recording do not
 //!   acknowledge.
@@ -25,6 +28,8 @@ use syspilot_pawnio::Error as DriverError;
 
 #[cfg(feature = "spd-paging")]
 use super::SPD_PAGE_SELECT_ADDRESSES;
+#[cfg(feature = "fan-control")]
+use super::is_permitted_fan_register;
 use super::{
     BusError, Fixture, LogicalCpu, Msr, Smbus, Smn, SuperIo, SuperIoSlot, Unlock, is_permitted_bank,
 };
@@ -307,6 +312,16 @@ pub enum SuperIoWrite {
         /// The bank.
         bank: u8,
     },
+    /// A fan register was written (`fan-control` feature only).
+    #[cfg(feature = "fan-control")]
+    HwmFanRegister {
+        /// Base of the port block.
+        base: u16,
+        /// The 16-bit register address, `bank << 8 | index`.
+        address: u16,
+        /// The value written.
+        value: u8,
+    },
 }
 
 /// A Super I/O chip replayed from a recording, enforcing the protocol.
@@ -534,6 +549,44 @@ impl SuperIo for ReplaySuperIo {
         let slot = self.slot("hwm_read_data")?;
         self.require_discovered_ranges(base.wrapping_add(6))?;
         self.recorded(superio_hwm_key(slot, self.hwm_bank, self.hwm_index))
+    }
+
+    /// Applies the write to the replayed registers, so a later read returns
+    /// it, and logs it. Enforces what [`super::pawn::PawnSuperIo`] enforces:
+    /// only permitted fan registers, only after the I/O ranges are known.
+    /// It also refuses a register the recording does not hold, because a
+    /// test that writes where it never read has a fixture that is wrong.
+    #[cfg(feature = "fan-control")]
+    fn hwm_write_fan_register(
+        &mut self,
+        base: u16,
+        address: u16,
+        value: u8,
+    ) -> Result<(), BusError> {
+        self.bank_select_armed = false;
+        let slot = self.slot("hwm_write_fan_register")?;
+        self.require_discovered_ranges(base.wrapping_add(6))?;
+        if !is_permitted_fan_register(address) {
+            return Err(BusError::rejected(
+                "replay superio hwm_write_fan_register",
+                "a fan-mode or manual-duty register of the NCT6776F or NCT6779D",
+                format!("address {address:#06x}"),
+            ));
+        }
+        let [bank, index] = address.to_be_bytes();
+        let key = superio_hwm_key(slot, bank, index);
+        if self.fixture.get(&key).is_none() {
+            return Err(BusError::rejected(
+                "replay superio hwm_write_fan_register",
+                format!("a recorded value for `{key}` to overwrite"),
+                "no recording",
+            ));
+        }
+        self.fixture.set(key, u64::from(value));
+        // The real write leaves bank 0 selected.
+        self.hwm_bank = 0;
+        self.log(SuperIoWrite::HwmFanRegister { base, address, value });
+        Ok(())
     }
 }
 
@@ -1149,6 +1202,102 @@ mod tests {
             recorded.lock().unwrap().get(&superio_unlock_key(SuperIoSlot::Primary)),
             Some(unlock_code(Unlock::Ite))
         );
+    }
+
+    // -- Fan register writes -----------------------------------------------
+
+    #[cfg(feature = "fan-control")]
+    mod fan_writes {
+        use super::*;
+
+        const BASE: u16 = 0x0A20;
+
+        /// A replay with the I/O range discovered and the fan-mode and
+        /// manual-duty registers of output 1 and the output-type register
+        /// recorded.
+        fn monitor() -> ReplaySuperIo {
+            let mut fixture = Fixture::new();
+            for (bank, index, value) in [(1, 0x02, 0x50), (1, 0x09, 0x33), (0, 0x04, 0x01)] {
+                fixture.set(superio_hwm_key(SuperIoSlot::Primary, bank, index), value);
+            }
+            let mut io = ReplaySuperIo::new(fixture);
+            io.select_slot(SuperIoSlot::Primary).unwrap();
+            io.enter_config_mode(Unlock::WinbondNuvoton).unwrap();
+            io.discover_io_ranges().unwrap();
+            io.exit_config_mode(Unlock::WinbondNuvoton).unwrap();
+            io
+        }
+
+        fn read(io: &mut ReplaySuperIo, bank: u8, index: u8) -> u8 {
+            io.hwm_set_index(BASE, 0x4E).unwrap();
+            io.hwm_write_bank(BASE, bank).unwrap();
+            io.hwm_set_index(BASE, index).unwrap();
+            io.hwm_read_data(BASE).unwrap()
+        }
+
+        #[test]
+        fn a_permitted_write_changes_what_a_later_read_returns_and_is_logged() {
+            let mut io = monitor();
+            let log = io.write_log();
+            let before = log.lock().unwrap().len();
+            io.hwm_write_fan_register(BASE, 0x0109, 0x80).unwrap();
+            assert_eq!(read(&mut io, 1, 0x09), 0x80);
+            assert_eq!(read(&mut io, 1, 0x02), 0x50, "other registers are untouched");
+            assert_eq!(
+                log.lock().unwrap()[before],
+                SuperIoWrite::HwmFanRegister { base: BASE, address: 0x0109, value: 0x80 }
+            );
+        }
+
+        #[test]
+        fn a_write_to_a_register_outside_the_allow_list_is_refused_and_changes_nothing() {
+            let mut io = monitor();
+            let error = io.hwm_write_fan_register(BASE, 0x0004, 0x00).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "(replay superio hwm_write_fan_register): expected a fan-mode or manual-duty register of the NCT6776F or NCT6779D | received: address 0x0004"
+            );
+            assert_eq!(read(&mut io, 0, 0x04), 0x01);
+        }
+
+        #[test]
+        fn a_write_to_a_register_the_recording_lacks_is_refused() {
+            let mut io = monitor();
+            let error = io.hwm_write_fan_register(BASE, 0x0209, 0x10).unwrap_err();
+            assert!(error.to_string().contains("superio.primary.hwm.0x2.0x9"), "{error}");
+        }
+
+        #[test]
+        fn a_write_before_the_io_range_is_discovered_is_denied_like_the_driver_does() {
+            let mut fixture = Fixture::new();
+            fixture.set(superio_hwm_key(SuperIoSlot::Primary, 1, 0x09), 0x33);
+            let mut io = ReplaySuperIo::new(fixture);
+            io.select_slot(SuperIoSlot::Primary).unwrap();
+            let error = io.hwm_write_fan_register(BASE, 0x0109, 0x80).unwrap_err();
+            assert!(
+                matches!(error, BusError::Driver(DriverError::ArgumentDenied { .. })),
+                "{error}"
+            );
+        }
+
+        #[test]
+        fn a_write_leaves_bank_zero_selected() {
+            let mut io = monitor();
+            io.hwm_write_fan_register(BASE, 0x0109, 0x80).unwrap();
+            io.hwm_set_index(BASE, 0x04).unwrap();
+            assert_eq!(io.hwm_read_data(BASE), Ok(0x01), "bank 0 register 0x04, not bank 1");
+        }
+
+        #[test]
+        fn a_recorder_refuses_to_forward_a_write() {
+            let recorded: SharedFixture = Arc::default();
+            let mut recorder = RecordingSuperIo::new(monitor(), recorded);
+            let error = recorder.hwm_write_fan_register(BASE, 0x0109, 0x80).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "(hwm_write_fan_register): expected a bus implementation that supports fan control | received: a write to 0x0109 on a bus that does not"
+            );
+        }
     }
 
     // -- SMBus -------------------------------------------------------------

@@ -21,6 +21,15 @@ workspace = true
 # writes to hardware, so the default build has no SMBus write at all: the
 # write method does not exist on the `Smbus` trait. Off in release builds.
 spd-paging = []
+# Fan control writes the fan-mode and manual-duty registers of a Super I/O
+# chip's hardware monitor, which can stop a fan or hang a machine on a board
+# nobody has tried it on. Decision 12 says version 1 never writes to
+# hardware, so without this feature nothing that can write a fan register
+# exists in the build: not the write method on the `SuperIo` trait, not the
+# channel trait, not the fail-safe controller. Off in release builds and
+# never to be enabled for a run on real hardware before a human has validated
+# the board (docs/research/fan-control.md). Its tests use the replay bus only.
+fan-control = []
 
 [dependencies]
 syspilot-pawnio.workspace = true

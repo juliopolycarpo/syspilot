@@ -15,6 +15,8 @@ use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadGroupAffi
 
 #[cfg(feature = "spd-paging")]
 use super::SPD_PAGE_SELECT_ADDRESSES;
+#[cfg(feature = "fan-control")]
+use super::is_permitted_fan_register;
 use super::{
     BusError, LogicalCpu, Msr, SMN_THERMAL_BLOCK, Smbus, Smn, SuperIo, SuperIoSlot, Unlock,
     is_permitted_bank, is_permitted_smn_address,
@@ -261,6 +263,38 @@ impl SuperIo for PawnSuperIo {
     fn hwm_read_data(&mut self, base: u16) -> Result<u8, BusError> {
         self.bank_select_armed = None;
         self.read_port(base.wrapping_add(6))
+    }
+
+    #[cfg(feature = "fan-control")]
+    fn hwm_write_fan_register(
+        &mut self,
+        base: u16,
+        address: u16,
+        value: u8,
+    ) -> Result<(), BusError> {
+        self.bank_select_armed = None;
+        if !is_permitted_fan_register(address) {
+            return Err(BusError::rejected(
+                "hwm_write_fan_register",
+                "a fan-mode or manual-duty register of the NCT6776F or NCT6779D",
+                format!("address {address:#06x}"),
+            ));
+        }
+        let [bank, index] = address.to_be_bytes();
+        let (index_port, data_port) = (base.wrapping_add(5), base.wrapping_add(6));
+        let written = (|| {
+            self.write_port(index_port, NUVOTON_BANK_SELECT_INDEX)?;
+            self.write_port(data_port, bank)?;
+            self.write_port(index_port, index)?;
+            self.write_port(data_port, value)
+        })();
+        // Leave bank 0 selected, as the readers expect, even when a write
+        // failed. Selecting the bank register first means this cannot land a
+        // data write on the register the failed sequence left indexed.
+        let restored = self
+            .write_port(index_port, NUVOTON_BANK_SELECT_INDEX)
+            .and_then(|()| self.write_port(data_port, 0));
+        written.and(restored)
     }
 }
 
@@ -738,6 +772,70 @@ mod tests {
         // Only reachable from inside this module: the trait has no such method.
         let _ = bus.write_page_select(0x50);
         assert!(scripted.calls().is_empty());
+    }
+
+    /// The driver calls of one fan-register write at base `0x0A20`: bank
+    /// select, index, data, then back to bank 0.
+    #[cfg(feature = "fan-control")]
+    fn fan_write_calls(bank: u8, index: u8, value: u8) -> Vec<RecordedCall> {
+        vec![
+            call("ioctl_pio_outb", &[0x0A25, 0x4E], 0),
+            call("ioctl_pio_outb", &[0x0A26, u64::from(bank)], 0),
+            call("ioctl_pio_outb", &[0x0A25, u64::from(index)], 0),
+            call("ioctl_pio_outb", &[0x0A26, u64::from(value)], 0),
+            call("ioctl_pio_outb", &[0x0A25, 0x4E], 0),
+            call("ioctl_pio_outb", &[0x0A26, 0], 0),
+        ]
+    }
+
+    #[cfg(feature = "fan-control")]
+    #[test]
+    fn a_fan_register_write_selects_the_bank_writes_the_data_and_leaves_bank_zero() {
+        let (scripted, module) = scripted();
+        let mut io = PawnSuperIo::new(module);
+        io.hwm_write_fan_register(0x0A20, 0x0109, 0x80).unwrap();
+        io.hwm_write_fan_register(0x0A20, 0x0902, 0x00).unwrap();
+        let mut expected = fan_write_calls(0x01, 0x09, 0x80);
+        expected.extend(fan_write_calls(0x09, 0x02, 0x00));
+        assert_eq!(scripted.calls(), expected);
+    }
+
+    #[cfg(feature = "fan-control")]
+    #[test]
+    fn a_fan_register_write_to_any_other_register_never_reaches_the_driver() {
+        let (scripted, module) = scripted();
+        let mut io = PawnSuperIo::new(module);
+        // The output type, a temperature source, the duty read-back, the
+        // bank-select register itself, and a register on a bank only a later
+        // chip has.
+        for address in [0x0004, 0x0100, 0x0001, 0x004E, 0x0621, 0x0A09, 0x0B09, 0x0103, 0xFFFF] {
+            let error = io.hwm_write_fan_register(0x0A20, address, 0xFF).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "(hwm_write_fan_register): expected a fan-mode or manual-duty register of the NCT6776F or NCT6779D | received: address {address:#06x}"
+                )
+            );
+        }
+        assert!(scripted.calls().is_empty(), "refused writes must not reach the driver");
+    }
+
+    #[cfg(feature = "fan-control")]
+    #[test]
+    fn a_failed_fan_register_write_still_returns_to_bank_zero_and_reports_the_error() {
+        let (scripted, module) = scripted();
+        // Bank select and bank number succeed; the index write fails.
+        scripted
+            .reply_ok(&[])
+            .reply_ok(&[])
+            .reply_err(DriverError::Timeout { function: "ioctl_pio_outb".into() });
+        let mut io = PawnSuperIo::new(module);
+        let error = io.hwm_write_fan_register(0x0A20, 0x0109, 0x80).unwrap_err();
+        assert!(error.is_bus_fault(), "{error}");
+        let calls = scripted.calls();
+        assert_eq!(calls.len(), 5, "the data write is skipped, the bank reset is attempted");
+        assert_eq!(calls[3], call("ioctl_pio_outb", &[0x0A25, 0x4E], 0));
+        assert_eq!(calls[4], call("ioctl_pio_outb", &[0x0A26, 0], 0));
     }
 
     #[test]

@@ -5,7 +5,9 @@
 //! (entering and leaving Super I/O configuration mode, selecting a logical
 //! device, setting a hardware-monitor index or bank, and, only with the
 //! `spd-paging` feature, selecting a DDR4 SPD page). Everything else is a
-//! read. That makes "SysPilot only reads"
+//! read, apart from the one write only the `fan-control` feature adds: a
+//! write of an allow-listed fan register of a Super I/O monitor. That makes
+//! "SysPilot only reads"
 //! something the type system enforces and the replay fakes can audit,
 //! instead of a convention each provider has to keep.
 //!
@@ -115,6 +117,22 @@ pub enum Unlock {
 /// sequence that enters configuration mode must be paired with
 /// [`SuperIo::exit_config_mode`] on every path; providers use an RAII guard
 /// for that. Callers hold the [`BusKind::Isa`] guard.
+///
+/// Without the `fan-control` feature there is no method that writes a
+/// monitor register; the doctest below is the regression test for that and
+/// is compiled only in the default build.
+///
+#[cfg_attr(not(feature = "fan-control"), doc = "```compile_fail,E0599")]
+#[cfg_attr(
+    not(feature = "fan-control"),
+    doc = "fn write(io: &mut dyn syspilot_hw::bus::SuperIo) {"
+)]
+#[cfg_attr(
+    not(feature = "fan-control"),
+    doc = "    let _ = io.hwm_write_fan_register(0x0A20, 0x0109, 0x80);"
+)]
+#[cfg_attr(not(feature = "fan-control"), doc = "}")]
+#[cfg_attr(not(feature = "fan-control"), doc = "```")]
 pub trait SuperIo: Send {
     /// Chooses the register/value ports. Forgets any discovered I/O ranges.
     fn select_slot(&mut self, slot: SuperIoSlot) -> Result<(), BusError>;
@@ -159,6 +177,56 @@ pub trait SuperIo: Send {
 
     /// Reads the data port (`base + 6`): the register the index selects.
     fn hwm_read_data(&mut self, base: u16) -> Result<u8, BusError>;
+
+    /// Writes `value` to the hardware-monitor register at the 16-bit
+    /// `address` (`bank << 8 | index`): selects the bank, the index, writes
+    /// the data port and leaves bank 0 selected.
+    ///
+    /// This is a write that changes what the chip does, so it exists only with
+    /// the `fan-control` feature, and only [`is_permitted_fan_register`]
+    /// addresses are accepted: the fan-mode and manual-duty registers.
+    /// There is no write of the bare data port, so a data write cannot be
+    /// aimed anywhere else. The caller holds the [`BusKind::Isa`] guard for
+    /// the whole call.
+    ///
+    /// The default refuses: a bus type has to opt in, so a fake or a
+    /// recorder cannot write by accident.
+    #[cfg(feature = "fan-control")]
+    fn hwm_write_fan_register(
+        &mut self,
+        base: u16,
+        address: u16,
+        value: u8,
+    ) -> Result<(), BusError> {
+        let _ = (base, value);
+        Err(BusError::rejected(
+            "hwm_write_fan_register",
+            "a bus implementation that supports fan control",
+            format!("a write to {address:#06x} on a bus that does not"),
+        ))
+    }
+}
+
+/// The fan-mode registers of the NCT6775-family monitors, one per duty
+/// output (`REG_FAN_MODE` in the Linux `nct6775` driver): bits 7:4 select the
+/// control mode (0 manual, 1 thermal cruise, 2 speed cruise, 3 and 4 SmartFan
+/// III and IV), bits 3:0 hold tolerances.
+#[cfg(feature = "fan-control")]
+pub const NCT677X_FAN_MODE_REGISTERS: [u16; 5] = [0x102, 0x202, 0x302, 0x802, 0x902];
+
+/// The manual-duty registers, one per duty output (`REG_PWM[0]`): the output
+/// in manual mode, 0 to 255 for 0 to 100 %.
+#[cfg(feature = "fan-control")]
+pub const NCT677X_MANUAL_DUTY_REGISTERS: [u16; 5] = [0x109, 0x209, 0x309, 0x809, 0x909];
+
+/// Whether `address` is a register a fan write may touch: a fan-mode or a
+/// manual-duty register of the NCT6776F and NCT6779D (three and five duty
+/// outputs). Nothing else of the monitor is ever written: not the output type
+/// (DC or PWM), not the temperature source, not the SmartFan curves.
+#[cfg(feature = "fan-control")]
+pub fn is_permitted_fan_register(address: u16) -> bool {
+    NCT677X_FAN_MODE_REGISTERS.contains(&address)
+        || NCT677X_MANUAL_DUTY_REGISTERS.contains(&address)
 }
 
 /// Whether `bank` is a value the hardware monitor's bank-select register may
@@ -200,3 +268,37 @@ pub trait Smbus: Send {
 /// The SPD page-select addresses (`SPA0`, `SPA1`).
 #[cfg(feature = "spd-paging")]
 pub const SPD_PAGE_SELECT_ADDRESSES: [u8; 2] = [0x36, 0x37];
+
+#[cfg(all(test, feature = "fan-control"))]
+mod fan_control_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_fan_mode_and_manual_duty_registers_are_permitted() {
+        let permitted: Vec<u16> =
+            (0..=0xFFFF).filter(|&address| is_permitted_fan_register(address)).collect();
+        let mut expected: Vec<u16> =
+            [NCT677X_FAN_MODE_REGISTERS, NCT677X_MANUAL_DUTY_REGISTERS].concat();
+        expected.sort_unstable();
+        assert_eq!(permitted, expected);
+        assert_eq!(permitted.len(), 10);
+    }
+
+    #[test]
+    fn every_permitted_register_is_in_a_bank_the_bank_select_accepts() {
+        for address in (0..=0xFFFF).filter(|&address| is_permitted_fan_register(address)) {
+            let bank = (address >> 8) as u8;
+            assert!(is_permitted_bank(bank), "address {address:#06x} is in bank {bank:#x}");
+        }
+    }
+
+    #[test]
+    fn the_registers_follow_the_linux_driver_layout() {
+        // NCT6775_REG_FAN_MODE and NCT6775_REG_PWM, first five outputs: bank
+        // 1, 2, 3, 8, 9; index 0x02 and 0x09.
+        for (output, bank) in [1u16, 2, 3, 8, 9].into_iter().enumerate() {
+            assert_eq!(NCT677X_FAN_MODE_REGISTERS[output], bank << 8 | 0x02);
+            assert_eq!(NCT677X_MANUAL_DUTY_REGISTERS[output], bank << 8 | 0x09);
+        }
+    }
+}

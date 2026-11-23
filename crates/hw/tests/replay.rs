@@ -176,6 +176,11 @@ fn every_write_of_a_detection_open_and_sample_is_on_the_allowed_list() {
                     "(bank): expected 0..=0x0f or 0x80 | received: {bank:#x}"
                 );
             }
+            // The audit covers read-only scans: a fan write in one is a bug.
+            #[cfg(feature = "fan-control")]
+            SuperIoWrite::HwmFanRegister { address, value, .. } => panic!(
+                "(write log): expected no fan register write in a read-only scan | received: {value:#04x} to {address:#06x}"
+            ),
         }
     }
     assert_eq!(in_config_mode, None, "(write log): configuration mode left open");
