@@ -9,9 +9,13 @@ exactly what was there before.
 It also reads the machine's sensors (temperatures, loads, fan speeds) with close
 to no cost when nobody is looking.
 
-> **Status: pre-release.** The service, the enforcement engine, the catalog and
-> the command line work and are tested end to end. The desktop app and the
-> hardware sensor providers are being built. See [the roadmap](#roadmap).
+![The Home page: what is on, what needs attention and the machine right now](docs/images/home.png)
+
+> **Status: first release in preparation.** The service, the catalog, the
+> sensors, the app and the command line work and are tested end to end.
+> Hardware sensors have been checked on one machine so far
+> ([what was found](docs/research/reference-machine.md)); expect gaps on
+> others and please report them. See [the roadmap](#roadmap).
 
 ## What makes it different
 
@@ -41,11 +45,43 @@ to no cost when nobody is looking.
   does not ship or install the driver. Without it everything else works and the
   features that need it are shown as unavailable.
 
-## Using it
+## Installing
 
-Until the first release there is no installer; [build from source](#building).
+Unpack a release (or the folder `scripts/package.ps1` builds) and, from an
+elevated PowerShell in that folder:
 
-From an elevated terminal:
+```console
+> ./install.ps1
+```
+
+It copies the files to `Program Files\SysPilot`, registers the service and adds
+SysPilot to the Start menu and to Installed apps. Running it again updates in
+place and keeps your settings. Uninstalling, from Installed apps or with
+`uninstall.ps1`, first restores every setting SysPilot changed.
+
+## The app
+
+Two levels. **Simple** lists the settings that are safe for anyone and says
+what each one does in a sentence. **Advanced** adds the rest of the catalog,
+the exact values behind every switch, your own actions, the history and every
+sensor.
+
+| | |
+| --- | --- |
+| ![Privacy settings as switches](docs/images/privacy.png) | ![Sensors with the last minute as a line](docs/images/sensors.png) |
+
+A setting that weakens protection asks first and states the risk. A setting
+Windows refuses is shown as *Blocked by Windows*, with the reason. Changing
+anything needs an administrator; without one the app shows everything and
+offers to restart elevated.
+
+`syspilot --demo` runs the app on made-up data without a service, to look
+around without changing anything.
+
+## The command line
+
+Everything the app does, the service's own executable does too. From an
+elevated terminal:
 
 ```console
 > syspilot-svc install
@@ -88,12 +124,13 @@ action = { registry = { scope = "machine", key = 'SOFTWARE\Example', name = "Val
 
 ## How it is built
 
-Two programs with a strict split of privilege:
+Three programs with a strict split of privilege:
 
-| Part              | Runs as                  | Does                                              |
-| ----------------- | ------------------------ | ------------------------------------------------- |
-| `syspilot-svc`    | LocalSystem service      | Applies and restores settings, reads sensors.     |
-| `syspilot` (app)  | The signed-in user       | Shows state and sends requests. Holds no rights.  |
+| Part               | Runs as                       | Does                                                  |
+| ------------------ | ----------------------------- | ----------------------------------------------------- |
+| `syspilot-svc`     | LocalSystem service           | Applies and restores settings. Always running, about 2 MB. |
+| `syspilot-sensors` | Started by the service, only while values are wanted | Reads the hardware. Never writes to it. |
+| `syspilot` (app)   | The signed-in user            | Shows state and sends requests. Holds no rights.      |
 
 They talk over a local named pipe. Anyone signed in can read the catalog,
 states and sensors; only an elevated administrator can change anything or read
@@ -106,6 +143,7 @@ client claims.
 | `crates/engine`    | Apply, snapshot, revert, drift and contested handling.        |
 | `crates/hw`        | Sensor providers and the sampling hub.                        |
 | `crates/pawnio`    | Thin wrapper over the PawnIO driver interface.                |
+| `crates/sensors`   | The sensor worker.                                            |
 | `crates/svc`       | The service, its installer and the command line.              |
 | `crates/ui`        | The desktop app.                                              |
 | `catalog/tweaks`   | The built-in tweaks, as data.                                 |
@@ -125,7 +163,15 @@ tools are the only requirements.
 ```console
 > cargo build --release
 > cargo test --workspace
+> cargo xtask fetch-modules
+> ./scripts/package.ps1
 ```
+
+The first build of the app downloads the Windows App SDK runtime it ships
+with. `fetch-modules` downloads the PawnIO modules the sensor worker loads,
+pinned by SHA-256; they are LGPL-2.1 files kept beside the executables and are
+never part of this repository. `package.ps1` leaves an installable folder and
+a zip in `dist\`.
 
 Some tests install a temporary service named `SysPilot-Test` and write scratch
 registry keys named `SysPilot-Test`; they need an elevated terminal and remove
@@ -136,10 +182,12 @@ everything they create. See [CONTRIBUTING.md](CONTRIBUTING.md).
 - [x] Enforcement engine with exact revert and contested handling
 - [x] Service, installer and command line
 - [x] Sourced tweak catalog
-- [ ] Sensor providers (operating system, GPU, storage; CPU and board through PawnIO)
-- [ ] Desktop app with Simple and Advanced levels
-- [ ] Sensor logging to CSV from the app
-- [ ] Signed installer and first release
+- [x] Sensor providers (operating system, GPU, storage; CPU and board through PawnIO)
+- [x] Desktop app with Simple and Advanced levels
+- [x] Sensor logging to CSV from the app
+- [x] Package, install and uninstall scripts
+- [ ] First release; code signing
+- [ ] Sensors verified on more machines (AMD processors, memory modules, more Super I/O chips)
 - [ ] Fan curves (read-only fan speeds first; control only after validation on real boards)
 
 ## Safety
