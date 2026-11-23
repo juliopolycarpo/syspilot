@@ -117,6 +117,7 @@ SysPilot uses:
 | `AMDFamily17.bin` | `dae74615761b78bdf064dfb3e136252ddcc6fc727d88f14738d0e5800d427a91` |
 | `LpcIO.bin` | `b3896a1cab0d808fca31fe2ebcae045d59dac690da87b17c858bb8da357eb45e` |
 | `SmbusI801.bin` | `a0f7d066e7efda28c0e754c1f52dbd8dc280d388ba8575b514a80cb67490530c` |
+| `IntelPCHThermal.bin` | `478500ae78aebef3ae7a0b5fe4848d2d5737e8f7c5d51200c284a61c21d7865d` |
 
 ## Module functions
 

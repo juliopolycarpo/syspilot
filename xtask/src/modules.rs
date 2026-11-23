@@ -65,6 +65,11 @@ pub const PINNED_RELEASE: Pins = Pins {
             sha256: "91f9b4b1c39e3d399ce48477a89d8f6bd3e58a2241064a4daec3a1513dff56e5",
         },
         PinnedFile {
+            member: "IntelPCHThermal.bin",
+            target: "IntelPCHThermal.bin",
+            sha256: "478500ae78aebef3ae7a0b5fe4848d2d5737e8f7c5d51200c284a61c21d7865d",
+        },
+        PinnedFile {
             member: "COPYING",
             target: "LICENSE-LGPL-2.1.txt",
             sha256: "1e7e6bae5a5bde32f1ae5a7c37a082d1ab03cf89354f7f936ac40be9e39a6531",
@@ -403,6 +408,7 @@ mod tests {
                 "LpcIO.bin",
                 "SmbusI801.bin",
                 "SmbusPIIX4.bin",
+                "IntelPCHThermal.bin",
                 "LICENSE-LGPL-2.1.txt"
             ]
         );
