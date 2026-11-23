@@ -122,6 +122,21 @@ action = { registry = { scope = "machine", key = 'SOFTWARE\Example', name = "Val
 > syspilot-svc apply profile.toml
 ```
 
+A profile can also hold a temperature curve per fan channel. Only builds with
+the `fan-control` feature accept it, only a board whose catalog entry a person
+validated is driven, and no board is yet, so releases and the default build
+never write to a fan:
+
+```toml
+[[fan]]
+channel = "board.pwm2"
+sources = ["cpu.package.temp", "gpu0.temp"]
+points = [[40, 30], [60, 50], [80, 100]]
+```
+
+The fields, the rules and what happens when a sensor fails are in
+[fan curves](docs/fan-curves.md).
+
 ## How it is built
 
 Three programs with a strict split of privilege:
@@ -129,7 +144,7 @@ Three programs with a strict split of privilege:
 | Part               | Runs as                       | Does                                                  |
 | ------------------ | ----------------------------- | ----------------------------------------------------- |
 | `syspilot-svc`     | LocalSystem service           | Applies and restores settings. Always running, about 2 MB. |
-| `syspilot-sensors` | Started by the service, only while values are wanted | Reads the hardware. Never writes to it. |
+| `syspilot-sensors` | Started by the service, only while values are wanted | Reads the hardware. Writes to it only in a build with the `fan-control` feature, which releases do not have. |
 | `syspilot` (app)   | The signed-in user            | Shows state and sends requests. Holds no rights.      |
 
 They talk over a local named pipe. Anyone signed in can read the catalog,
@@ -189,7 +204,9 @@ everything they create. See [CONTRIBUTING.md](CONTRIBUTING.md).
 - [ ] First release; code signing
 - [ ] Sensors verified on more machines (AMD processors, memory modules, more Super I/O chips)
 - [x] Fan control core: curve engine, board catalog and fail-safes, compiled out of releases and tested against recordings only ([what must be validated first](docs/research/fan-control.md))
-- [ ] Fan curves in the service and the app, enabled per board only after validation on that board
+- [x] Fan curves in the service and the app (a Fans page, curves read from the profile), behind the same feature and replay-tested only
+- [ ] Fan control validated on a real board, then enabled for that board only
+- [ ] A curve editor in the app
 
 ## Safety
 

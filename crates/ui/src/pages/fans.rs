@@ -11,10 +11,9 @@ use crate::app::{App, Message, Page};
 use crate::model::{self, Tone, Trends};
 use crate::widgets::{self, GAP_MEDIUM, GAP_SMALL, GAP_TIGHT, TEXT_SUBTITLE};
 
-/// Where the fan documentation lives: the research note that says how a
-/// curve is written and what must be validated before control is offered.
-const DOCS_LINK: &str =
-    "https://github.com/juliopolycarpo/syspilot/blob/main/docs/research/fan-control.md";
+/// Where the fan documentation lives: the page that says how a curve is
+/// written in the profile and when it is followed.
+const DOCS_LINK: &str = "https://github.com/juliopolycarpo/syspilot/blob/main/docs/fan-curves.md";
 
 /// Width and height of a curve chart.
 const CHART: (f64, f64) = (280.0, 112.0);

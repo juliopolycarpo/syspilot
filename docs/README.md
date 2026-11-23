@@ -8,6 +8,7 @@
 | [Protocol](protocol.md)                               | The pipe framing, the messages and the sensor section.        |
 | [Security model](security-model.md)                   | Who may do what, and what protects that boundary.             |
 | [Tweak catalog](tweak-catalog.md)                     | How to write and source a catalog entry.                      |
+| [Fan curves](fan-curves.md)                           | The `[[fan]]` table of a profile, its rules and when it is followed. |
 | [UI glossary](ui-glossary.md)                         | The one word the app uses for each thing, state and action.   |
 | [UI review](ui-review.md)                             | How the app's look and accessibility are checked, and the record of passes. |
 | [Decisions](decisions.md)                             | Choices that were not obvious, with their reasons.            |
