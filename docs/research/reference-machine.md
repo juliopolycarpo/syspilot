@@ -25,15 +25,18 @@ from datasheets and the Linux drivers; the last section lists it.
 
 | Key | Available | Detail |
 |---|---|---|
-| `cpu-sensors` | yes | 14 cores, package and per-core temperature (TjMax 100 °C); power: package; not available: dram (counter reads 0) |
+| `cpu-sensors` | yes | 14 cores, package and per-core temperature (TjMax 100 °C); not available: package (reads 0.79 W, below the 6.0 W floor for a 120 W part), dram (counter reads 0) |
 | `board-sensors` | yes | NCT6779D (id/revision `0xc562`) at ports `0x2e`/`0x2f`, monitor at `0x0a20` (5 temperatures, 11 voltages, 5 fans, 5 duty) |
 | `memory-sensors` | no | i801 SMBus controller: nothing acknowledged at SMBus addresses `0x50`-`0x57`, so no memory module is reachable through this controller |
 | `fan-control` | no | Not part of this version |
 
-The driver state is `Ready { version: "2.2.0" }`. The two providers declare 43
-sensors (17 processor, 26 board). The release build of the example probes in
-about 50 to 60 ms when idle (350 ms with every core busy) and holds about
-0.9 MiB of private memory with the hub, 0.8 MiB after dropping it.
+The driver state is `Ready { version: "2.2.0" }`. The two providers declare 42
+sensors (16 processor, 26 board). The release build of the example probes in
+about 300 to 385 ms when idle, 250 ms of it the package power watch window
+(see Processor); before that window it took about 50 to 60 ms idle and 350 ms
+with every core busy. The first version of this note measured 0.9 MiB of
+private memory with the hub, 0.8 MiB after dropping it; that was not
+re-measured.
 
 ## Processor
 
@@ -43,12 +46,112 @@ about 50 to 60 ms when idle (350 ms with every core busy) and holds about
   this part. The package counter runs, so `cpu.package.power` is declared.
 - The DRAM energy counter (`0x619`) reads 0 and the processor declares no
   PP0 domain, so neither is shown. A constant 0 W would mislead.
-- **Package power is not trustworthy.** It reads 0.8 W idle and 12 W with 28
-  busy processes (package 57 °C), for a part with a 120 W TDP. The previous
-  measurement gave about 9.7 W under all-core load against a 120 W limit. The
-  unit register is the standard one for this model, so a wrong unit is
-  unlikely; the cause is unknown. The sensor is declared as read, with no
-  accuracy claim. Not checked: the package power limit register.
+- **The package power meter is miscalibrated, and the provider no longer
+  offers it** (issue 3). Details below.
+
+### Package power (issue 3)
+
+Measured on 2026-11-23 with raw reads of the RAPL registers through the
+`IntelMSR` module, no writes. The raw reads, the 1 ms cadence and the
+busy-thread runs came from a throwaway read-only program (since deleted)
+built on the same `PawnMsr` the provider uses, run with a busy loop of up to
+28 threads for about 12 s per run; the probe-level figures (the 0.77 and
+0.79 W) are from the `driver_sensors` example and the driver tests.
+
+| Register | Value | Meaning |
+|---|---|---|
+| `0x606` `MSR_RAPL_POWER_UNIT` | `0xa0e03` | power unit 2^-3 W, energy unit 2^-14 J (61 µJ), time unit 2^-10 s |
+| `0x614` `MSR_PKG_POWER_INFO` | `0x002f078001d003c0` | TDP 960 / 8 = 120 W, maximum power limit 240 W |
+| `0x610` `MSR_PKG_POWER_LIMIT` | `0x00078480001583c0` | limit 1 = 120 W, limit 2 = 144 W, both enabled |
+| `0x611` `MSR_PKG_ENERGY_STATUS` | counts up | see below |
+| `0x619` `MSR_DRAM_ENERGY_STATUS`, `0x618` `MSR_DRAM_POWER_LIMIT` | `0`, `0` | DRAM RAPL is not running |
+| `0x61C` `MSR_DRAM_POWER_INFO` | `0x002f016800200156` | the PCU knows a 42.75 W DRAM TDP; only the counter is off |
+| `0x639` `MSR_PP0_ENERGY_STATUS` | `0` | no PP0 domain on this model |
+| `0x641`, `0x64D` | `#GP` (`STATUS_PRIVILEGED_INSTRUCTION`) | no PP1 or platform domain |
+
+What the counter does:
+
+- It has 32 bits and its upper half reads zero, which the SDM says is
+  reserved. That alone would not show that the module returns the whole
+  64-bit register (one that truncated would read zero too); other registers
+  do: `0x610`, `0x614`, `0xCE` and `0x198` came back with nonzero bits above
+  bit 31 (table above).
+- All 28 logical processors read the same package counter (one socket).
+- It advances once per millisecond, the known Broadwell-EP cadence, with 14
+  counts per step idle and 42 busy.
+- Over one-second intervals measured with the monotonic clock it advanced
+  12 700 to 13 100 counts idle and 42 300 to 43 600 with every logical
+  processor busy. At the declared unit that is 0.77 to 0.80 W idle and 2.6 W
+  busy for a 120 W part. With 14 or 28 busy threads the reading is the same
+  (2.6 W), with one thread it equals idle, with seven it is 0.8 to 1.6 W.
+- During the busy runs `IA32_APERF` / `IA32_MPERF` on core 0 gave 1.21 (about
+  2.9 GHz against the 2.4 GHz base), so the cores did run; the package
+  temperature rose from 41-44 °C to 46-47 °C. Earlier runs with another load
+  read 9.7 W and 12 W (the figures in the issue).
+
+So the counter is alive, updates at the right rate, follows load, and its
+reading is a small and roughly constant fraction of the real power. The unit
+is the one in the register, which agrees with the SDM (volume 4,
+`MSR_RAPL_POWER_UNIT`, energy status units at bits 12:8) and with Linux's
+`arch/x86/events/rapl.c`, which reads the unit the same way and masks the
+counter to 32 bits. The fixed 2^-16 J unit of the DRAM domain on Haswell-EP
+and Broadwell-EP (SDM volume 4, and Linux's powercap driver) is already in the
+code; it applies to the DRAM counter only, and using it for the package would
+lower the reading further. A wrap or time-base error is excluded by the
+numbers above (no wrap at these rates, and the counter's own 1 ms cadence
+matches the wall clock).
+
+Windows runs on Hyper-V here (`HypervisorPresent` is true,
+virtualization-based security and memory integrity are running). A
+hypervisor that virtualised the RAPL MSRs would return zero or a static or
+synthetic value, not a counter that ticks every millisecond in proportion to
+load while the neighbouring registers (power limits, TDP, turbo ratios, APERF
+and MPERF) read as the hardware's. That argues against the hypervisor, but it
+was not tested with virtualization-based security off, which would need a
+reboot.
+
+What points to the board or the part instead: another report of a MACHINIST
+X99 board with a Xeon E5-2690 v4 (14 cores, 135 W) shows the same symptom,
+about 1 W under load, on a machine described as running Linux
+(<https://n3xus.dev/en/blog/custom-built-server-x99-xeon-parts-prices-time/>,
+read 2026-11-23; it does not say which RAPL interface it used). The DRAM
+domain being off (`0x618` is zero) fits firmware that leaves RAPL half
+configured. HWiNFO's author says package power on Intel is measured by the
+processor from the VR's IMON/SVID telemetry
+(<https://www.hwinfo.com/forum/threads/package-power-reading.5736/>), and the
+E5 v4 datasheet (volume 1) describes the processor's SVID link to the voltage
+regulator. A board whose regulator reports little current to the processor
+would give a low, load-following value. That is a hypothesis; the exact
+mechanism is not verified. A closer parallel is a Core i7-7820X that read
+1.7 W under AVX load until SVID support was enabled in the BIOS
+(<https://www.hwinfo.com/forum/threads/cpu-package-power-strange-results.5516/>).
+This board's BIOS may have an equivalent setting; it was not looked at, and
+nothing was changed.
+
+Decision: SysPilot cannot repair a meter that the firmware or the part
+scales wrongly, so on the models whose datasheet gives package C-state power
+(`0x3F` and `0x4F`) the probe watches the package counter for 250 ms and does
+not declare `cpu.package.power` when it reads below 5 % of the TDP from
+`MSR_PKG_POWER_INFO`. The datasheet (Intel Xeon E5 v4 Datasheet, volume one,
+document 333809-003, section 2.10) lists the package C6 power, the deepest
+idle state, as 14 W for the 120 W 16- and 18-core parts and 12 to 14 W for
+the 140 to 160 W parts, at least 8.1 % of the TDP (the E5-2683 v3 row is 20 W
+at 120 W) and as maximums. 5 % is below the lowest of those maximums, and
+this machine reads 0.7 % idle. The datasheet gives maximums, not typical
+values, so that a healthy meter in package C6 reads above 5 % is an
+expectation, not something measured. The row of the E5-2680 v4 itself was not
+in the text read. The feature detail says why:
+
+> not available: package (reads 0.79 W, below the 6.0 W floor for a 120 W part)
+
+Limits of the rule: it needs the probe to see a low reading, so a probe made
+while the machine is under heavy load can read above 5 % (the 12 W run was
+10 % of the TDP) and declare the sensor; it cannot tell a meter that is wrong
+by 30 % from a right one; and it applies to two models only, because no source
+for the other models' idle power was consulted. The DRAM domain needs no code:
+a zero counter is already not declared (Linux's `rapl_check_domain` does the
+same). The probe now takes about 300 ms instead of 50 to 60 ms, 250 ms of it
+the watch window.
 
 ## Super I/O: NCT6779D
 
@@ -141,4 +244,17 @@ never read a real module.
   chips and the NCT6791D to NCT6799D layouts.
 - The `spd-paging` feature, which is the only SMBus write in the code. It was
   never built into a run on this machine.
-- Package power accuracy and the DRAM energy domain (above).
+- Why the package meter is miscalibrated (firmware, VR telemetry or the part),
+  and whether it reads correctly with virtualization-based security off.
+- The package power floor on any model other than this one: no other Intel
+  server or client part was available to check that 5 % of the TDP is safely
+  below a healthy meter's idle reading. The two covered models rest on the
+  datasheet's C6 maximums.
+- Reading SMART attribute 194 on a drive behind a USB bridge or an HBA: only
+  the two SATA drives of this machine were read, both on the AHCI driver.
+- What `StorageDeviceTemperatureProperty` returns for a SATA drive on a driver
+  that implements it. Microsoft's documentation for the property and its
+  descriptor does not say where an ATA device's value comes from, and both
+  SATA drives here refuse it. The provider tries it before SMART, so on such a
+  machine the property's value wins; if it turns out to come from the Device
+  Statistics page, the order should be flipped.

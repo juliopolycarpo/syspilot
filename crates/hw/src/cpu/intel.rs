@@ -9,10 +9,24 @@
 //! | `0x1A2` `IA32_TEMPERATURE_TARGET` | bits 23:16 = TjMax in °C | temperature = TjMax - readout |
 //! | `0x19C` `IA32_THERM_STATUS` (per core) | bit 31 = reading valid, bits 22:16 = digital readout (degrees below TjMax) | core temperature |
 //! | `0x1B1` `IA32_PACKAGE_THERM_STATUS` | same layout, package scope | package temperature |
-//! | `0x606` `MSR_RAPL_POWER_UNIT` | bits 12:8 = energy unit, 1/2^n J | energy per count |
+//! | `0x606` `MSR_RAPL_POWER_UNIT` | bits 3:0 = power unit, 1/2^n W; bits 12:8 = energy unit, 1/2^n J | energy per count |
 //! | `0x611` / `0x639` / `0x619` | package / cores (PP0) / DRAM energy, 32-bit wrapping counters | power = delta * unit / time |
+//! | `0x614` `MSR_PKG_POWER_INFO` | bits 14:0 = thermal spec power (TDP), in power units | floor for the plausibility check below |
+//!
+//! # An untrustworthy package meter
+//!
+//! The package counter of the Xeon E5-2680 v4 on the reference machine runs
+//! at the right rate (one update per millisecond, in the unit the unit
+//! register declares) and follows load, but reads 0.8 W idle and 2.6 W with
+//! every core busy for a 120 W part. The cause is in the board's firmware or
+//! the part, not in this code (see `docs/research/reference-machine.md`). A
+//! meter like that would mislead, so on the models whose datasheet lists
+//! package C-state power ([`idle_power_floor_watts`]) the probe watches the
+//! counter for a moment and does not offer package power when it reads below
+//! the floor.
 
 use std::fmt::Write as _;
+use std::time::Duration;
 
 use syspilot_proto::sensor::{DeviceClass, SensorKind};
 
@@ -26,6 +40,7 @@ const MSR_THERM_STATUS: u32 = 0x19C;
 const MSR_TEMPERATURE_TARGET: u32 = 0x1A2;
 const MSR_PACKAGE_THERM_STATUS: u32 = 0x1B1;
 const MSR_RAPL_POWER_UNIT: u32 = 0x606;
+const MSR_PKG_POWER_INFO: u32 = 0x614;
 const MSR_PKG_ENERGY_STATUS: u32 = 0x611;
 const MSR_DRAM_ENERGY_STATUS: u32 = 0x619;
 const MSR_PP0_ENERGY_STATUS: u32 = 0x639;
@@ -43,6 +58,20 @@ const READING_VALID: u64 = 1 << 31;
 const PLAUSIBLE_TEMPERATURE: std::ops::RangeInclusive<f64> = -10.0..=150.0;
 /// Seconds between samples.
 const PERIOD_SECS: u32 = 2;
+/// How long the probe watches the package counter. At least the energy
+/// meter's minimum interval; at the floor of a 120 W part it counts about
+/// 25 000 times in this window, so quantisation does not matter.
+const PLAUSIBILITY_WINDOW: Duration = Duration::from_millis(250);
+/// The share of its TDP that a processor on a model covered by
+/// [`idle_power_floor_watts`] is assumed to draw at least.
+///
+/// The datasheet's package C6 figures (the deepest idle state) are 12 to 14 W
+/// for Xeon E5 v3 and v4 parts of 120 to 160 W, at least 8.1 % of the TDP
+/// (the E5-2683 v3 row is 20 W, 16.7 %), and they are maximums. 5 % is below
+/// the lowest of them and well above the 0.7 % the reference machine's meter
+/// reads at idle. Typical package C6 power on a healthy part was not
+/// measured, so the margin for a healthy meter is an expectation.
+const IDLE_POWER_FLOOR_OF_TDP: f64 = 0.05;
 
 /// Where the DRAM energy counter's unit comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,9 +198,12 @@ impl IntelCpuProvider {
     /// Probes the first package of `topology`.
     ///
     /// Reads TjMax per core, the RAPL unit register and each domain's
-    /// counter once to decide which sensors exist. Energy baselines are
-    /// taken by the first [`Provider::sample`], which therefore reports no
-    /// power.
+    /// counter once to decide which sensors exist. On models covered by
+    /// [`idle_power_floor_watts`] it also watches the package counter for
+    /// [`PLAUSIBILITY_WINDOW`] (250 ms spent in [`Clock::wait`]) and does not
+    /// declare package power when it reads below the floor. Energy baselines
+    /// are taken by the first [`Provider::sample`], which therefore reports
+    /// no power.
     pub fn probe(
         identity: &CpuIdentity,
         topology: &CpuTopology,
@@ -209,7 +241,8 @@ impl IntelCpuProvider {
             "{} cores, package and per-core temperature (TjMax {package_tjmax} °C)",
             cores.len()
         );
-        if let Some(unit) = package_energy_unit(msr.as_mut(), package_cpu) {
+        let unit_register = msr.read(package_cpu, MSR_RAPL_POWER_UNIT).ok();
+        if let Some(unit) = unit_register.and_then(energy_unit) {
             let mut power =
                 vec![("cpu.package.power", "Package power", MSR_PKG_ENERGY_STATUS, unit)];
             if capabilities.cores {
@@ -239,6 +272,19 @@ impl IntelCpuProvider {
                     // enable the domain (the DRAM domain on the reference
                     // machine), and a constant 0 W would mislead.
                     Ok(counter) if counter & COUNTER_MASK != 0 => {
+                        if register == MSR_PKG_ENERGY_STATUS
+                            && let Some(reason) = untrustworthy_package_meter(
+                                identity.model,
+                                unit_register,
+                                msr.as_mut(),
+                                clock.as_ref(),
+                                package_cpu,
+                                (counter, joules_per_count),
+                            )
+                        {
+                            skipped.push(format!("{name} ({reason})"));
+                            continue;
+                        }
                         found.push(name);
                         domains.push(PowerDomain {
                             key,
@@ -278,12 +324,65 @@ impl IntelCpuProvider {
 }
 
 /// Joules per count of the package energy counter, from bits 12:8 of
-/// `MSR_RAPL_POWER_UNIT`. `None` when the register is unreadable or its
-/// energy field is zero or implausibly large.
-fn package_energy_unit(msr: &mut dyn Msr, cpu: LogicalCpu) -> Option<f64> {
-    let raw = msr.read(cpu, MSR_RAPL_POWER_UNIT).ok()?;
-    let exponent = (raw >> 8) & 0x1F;
+/// `MSR_RAPL_POWER_UNIT`. `None` when its energy field is zero or
+/// implausibly large.
+fn energy_unit(unit_register: u64) -> Option<f64> {
+    let exponent = (unit_register >> 8) & 0x1F;
     (1..=24).contains(&exponent).then(|| 1.0 / (1u64 << exponent) as f64)
+}
+
+/// The thermal spec power in watts: `MSR_PKG_POWER_INFO` bits 14:0, counted
+/// in the power unit of bits 3:0 of `MSR_RAPL_POWER_UNIT`.
+fn tdp_watts(power_info: u64, unit_register: u64) -> f64 {
+    (power_info & 0x7FFF) as f64 / (1u64 << (unit_register & 0xF)) as f64
+}
+
+/// Whether [`idle_power_floor_watts`] has a rule for `model`.
+fn has_idle_power_floor(model: u32) -> bool {
+    matches!(model, 0x3F | 0x4F)
+}
+
+/// The package power below which a reading on `model` is not believed, given
+/// the part's TDP; `None` for models without a source for it.
+///
+/// The sources are the E5-2600 v3 and v4 datasheets (volume 1, section 2.10,
+/// package C-state power), which cover family 6 models `0x3F` (Haswell-EP) and
+/// `0x4F` (Broadwell-EP). No source was consulted for the other models, and
+/// client parts in deep package C-states may idle well below 5 % of their
+/// TDP, so a rule for them needs its own source.
+pub fn idle_power_floor_watts(model: u32, tdp_watts: f64) -> Option<f64> {
+    has_idle_power_floor(model).then_some(tdp_watts * IDLE_POWER_FLOOR_OF_TDP)
+}
+
+/// Why the package energy counter of `model` is not to be believed, or
+/// `None` when it is, or when there is no way to tell.
+///
+/// Watches the counter for [`PLAUSIBILITY_WINDOW`], starting from the
+/// `(counter, joules_per_count)` already read, and compares the average
+/// power with [`idle_power_floor_watts`].
+fn untrustworthy_package_meter(
+    model: u32,
+    unit_register: Option<u64>,
+    msr: &mut dyn Msr,
+    clock: &dyn Clock,
+    cpu: LogicalCpu,
+    (first_counter, joules_per_count): (u64, f64),
+) -> Option<String> {
+    // Skip the TDP read where there is no rule to apply it to.
+    if !has_idle_power_floor(model) {
+        return None;
+    }
+    let unit_register = unit_register?;
+    let tdp = tdp_watts(msr.read(cpu, MSR_PKG_POWER_INFO).ok()?, unit_register);
+    let floor = idle_power_floor_watts(model, tdp)?;
+
+    let mut meter = EnergyMeter::new(joules_per_count);
+    meter.watts(clock.now(), first_counter);
+    clock.wait(PLAUSIBILITY_WINDOW);
+    let counter = msr.read(cpu, MSR_PKG_ENERGY_STATUS).ok()?;
+    let watts = meter.watts(clock.now(), counter)?;
+    (watts < floor)
+        .then(|| format!("reads {watts:.2} W, below the {floor:.1} W floor for a {tdp:.0} W part"))
 }
 
 impl Provider for IntelCpuProvider {
@@ -630,10 +729,11 @@ mod tests {
     #[test]
     fn only_registers_on_the_module_read_allow_list_are_read() {
         /// The part of IntelMSR's read allow-list this provider uses.
-        const ALLOWED: [u32; 7] = [0x19C, 0x1A2, 0x1B1, 0x606, 0x611, 0x619, 0x639];
-        let msr = replay(2);
+        const ALLOWED: [u32; 8] = [0x19C, 0x1A2, 0x1B1, 0x606, 0x611, 0x614, 0x619, 0x639];
+        // A model with a power floor, so that the TDP register is read too.
+        let msr = metered(&[1_000, 1_000 + WINDOW_COUNTS_40_W], Some(POWER_INFO_120_W));
         let log = msr.read_log();
-        let (mut provider, clock) = provider(0x5E, msr);
+        let (mut provider, clock) = provider(0x4F, msr);
         for _ in 0..3 {
             sample(&mut provider);
             clock.advance(Duration::from_secs(2));
@@ -693,6 +793,155 @@ mod tests {
         assert_eq!(rapl_domains(0x4F), RaplDomains { cores: false, dram: DramUnit::Fixed });
         assert_eq!(rapl_domains(0x9E), RaplDomains { cores: true, dram: DramUnit::PackageUnit });
         assert_eq!(rapl_domains(0xFF), RaplDomains { cores: false, dram: DramUnit::Absent });
+    }
+
+    // ---- the plausibility floor of the package meter --------------------------
+
+    /// `MSR_PKG_POWER_INFO` of a 120 W part: TDP 960 counts of 1/8 W.
+    const POWER_INFO_120_W: u64 = 0x01D0_03C0;
+    /// Counts of 2^-14 J in the 250 ms window for 40 W, 0.79 W and exactly the
+    /// 6 W floor of a 120 W part.
+    const WINDOW_COUNTS_40_W: u64 = 10 * 16_384;
+    const WINDOW_COUNTS_0_79_W: u64 = 3_230;
+    const WINDOW_COUNTS_6_W: u64 = 6 * 16_384 / 4;
+
+    /// A replay for `model` whose package counter returns `counters` in turn:
+    /// the first is the probe's existence read, the second ends its window.
+    fn metered(counters: &[u64], power_info: Option<u64>) -> ReplayMsr {
+        let mut msr = replay(2);
+        msr.set_sequence(cpu(0), MSR_PKG_ENERGY_STATUS, counters);
+        match power_info {
+            Some(info) => msr.set(cpu(0), MSR_PKG_POWER_INFO, info),
+            None => msr.remove(cpu(0), MSR_PKG_POWER_INFO),
+        };
+        msr
+    }
+
+    fn package_power_offered(provider: &IntelCpuProvider) -> bool {
+        keys(provider).contains(&"cpu.package.power".to_owned())
+    }
+
+    #[test]
+    fn a_meter_far_below_the_tdp_of_a_broadwell_ep_part_is_not_offered_and_the_summary_says_why() {
+        // Issue 3: 0.79 W for a 120 W part.
+        let msr = metered(&[1_000, 1_000 + WINDOW_COUNTS_0_79_W], Some(POWER_INFO_120_W));
+        let (provider, _) = provider(0x4F, msr);
+        assert!(!package_power_offered(&provider), "{:?}", keys(&provider));
+        assert_eq!(
+            provider.summary(),
+            "2 cores, package and per-core temperature (TjMax 85 °C); power: dram; not \
+             available: package (reads 0.79 W, below the 6.0 W floor for a 120 W part)"
+        );
+    }
+
+    #[test]
+    fn a_haswell_ep_part_gets_the_same_check() {
+        let msr = metered(&[1_000, 1_000 + WINDOW_COUNTS_0_79_W], Some(POWER_INFO_120_W));
+        let (provider, _) = provider(0x3F, msr);
+        assert!(!package_power_offered(&provider));
+    }
+
+    #[test]
+    fn a_standing_counter_is_below_the_floor() {
+        let msr = metered(&[1_000, 1_000], Some(POWER_INFO_120_W));
+        let (provider, _) = provider(0x4F, msr);
+        assert!(!package_power_offered(&provider));
+        assert!(provider.summary().contains("package (reads 0.00 W"), "{}", provider.summary());
+    }
+
+    #[test]
+    fn a_meter_at_a_healthy_rate_is_offered_and_measures_normally() {
+        let in_window = 1_000 + WINDOW_COUNTS_40_W;
+        let msr = metered(
+            &[1_000, in_window, in_window, in_window + 32 * 16_384],
+            Some(POWER_INFO_120_W),
+        );
+        let (mut provider, clock) = provider(0x4F, msr);
+        assert!(package_power_offered(&provider));
+        assert_eq!(
+            provider.summary(),
+            "2 cores, package and per-core temperature (TjMax 85 °C); power: package, dram"
+        );
+        sample(&mut provider);
+        clock.advance(Duration::from_secs(2));
+        let watts = sample(&mut provider)[4].unwrap();
+        assert!((watts - 16.0).abs() < 1e-9, "{watts}");
+    }
+
+    #[test]
+    fn the_floor_is_five_percent_of_the_tdp_and_a_reading_on_it_passes() {
+        // 6 W is 5 % of 120 W: 1.5 J in 250 ms. Just under it is withheld.
+        let at_floor = metered(&[1_000, 1_000 + WINDOW_COUNTS_6_W], Some(POWER_INFO_120_W));
+        assert!(package_power_offered(&provider(0x4F, at_floor).0));
+        let under = metered(&[1_000, 1_000 + WINDOW_COUNTS_6_W - 1], Some(POWER_INFO_120_W));
+        assert!(!package_power_offered(&provider(0x4F, under).0));
+    }
+
+    #[test]
+    fn the_probe_waits_the_window_on_its_clock_and_not_in_real_time() {
+        let msr = metered(&[1_000, 1_000 + WINDOW_COUNTS_40_W], Some(POWER_INFO_120_W));
+        let clock = ManualClock::new();
+        let before = clock.now();
+        let started = std::time::Instant::now();
+        IntelCpuProvider::probe(
+            &identity(0x4F),
+            &topology(2),
+            Box::new(msr),
+            Box::new(clock.clone()),
+        )
+        .unwrap();
+        assert_eq!(clock.now() - before, PLAUSIBILITY_WINDOW);
+        assert!(started.elapsed() < Duration::from_secs(5), "expected a manual clock to not sleep");
+    }
+
+    #[test]
+    fn models_without_a_datasheet_floor_keep_their_power_sensor_whatever_it_reads() {
+        // Skylake client, as the table is not a statement about it.
+        let msr = metered(&[1_000, 1_000 + WINDOW_COUNTS_0_79_W], Some(POWER_INFO_120_W));
+        let log = msr.read_log();
+        let (provider, _) = provider(0x5E, msr);
+        assert!(package_power_offered(&provider));
+        assert!(
+            !log.lock().unwrap().contains(&(cpu(0), MSR_PKG_POWER_INFO)),
+            "no TDP read where there is no floor"
+        );
+    }
+
+    #[test]
+    fn without_a_readable_tdp_the_meter_cannot_be_judged_and_is_offered() {
+        let msr = metered(&[1_000, 1_000 + WINDOW_COUNTS_0_79_W], None);
+        let (provider, _) = provider(0x4F, msr);
+        assert!(package_power_offered(&provider));
+    }
+
+    #[test]
+    fn a_zero_tdp_gives_no_floor() {
+        let msr = metered(&[1_000, 1_000], Some(0));
+        let (provider, _) = provider(0x4F, msr);
+        assert!(package_power_offered(&provider), "a floor of 0 W cannot be undercut");
+    }
+
+    #[test]
+    fn the_tdp_is_the_low_fifteen_bits_in_the_power_unit_of_the_unit_register() {
+        // 0x3C0 = 960 counts of 2^-3 W = 120 W; bits above 14 are other fields.
+        assert_eq!(tdp_watts(0x002F_0780_01D0_03C0, 0x000A_0E03), 120.0);
+        // Unit exponent 0: one count per watt.
+        assert_eq!(tdp_watts(95, 0x000A_0E00), 95.0);
+    }
+
+    #[test]
+    fn the_floor_table_covers_the_two_models_the_datasheets_cover() {
+        assert_eq!(idle_power_floor_watts(0x4F, 120.0), Some(6.0));
+        assert_eq!(idle_power_floor_watts(0x3F, 145.0), Some(7.25));
+        assert_eq!(idle_power_floor_watts(0x55, 120.0), None, "Skylake-SP has no source here");
+        assert_eq!(idle_power_floor_watts(0x5E, 65.0), None);
+    }
+
+    #[test]
+    fn the_energy_unit_comes_from_bits_12_to_8_and_must_be_plausible() {
+        assert_eq!(energy_unit(0x000A_0E03), Some(1.0 / 16384.0));
+        assert_eq!(energy_unit(0x0000_0003), None, "exponent 0");
+        assert_eq!(energy_unit(0x0000_1F03), None, "exponent 31");
     }
 
     #[test]

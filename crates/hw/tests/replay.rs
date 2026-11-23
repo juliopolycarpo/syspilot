@@ -270,23 +270,86 @@ fn intel_topology() -> CpuTopology {
     }
 }
 
-#[test]
-fn the_intel_probe_summarises_what_the_reference_machine_exposes() {
-    let provider = IntelCpuProvider::probe(
+/// The recorded package energy counter and the rate it counted at.
+const INTEL_BASELINE_COUNTER: u64 = 0x0FC8_A8E0;
+/// Counts the reference machine's package counter advanced in the probe's
+/// 250 ms window while idle (about 12 900 a second, measured 2026-11-23):
+/// 0.79 W at the recorded unit of 2^-14 J, for a 120 W part.
+const INTEL_IDLE_COUNTS_PER_WINDOW: u64 = 3_230;
+/// The same with all 28 logical processors busy (about 42 700 a second):
+/// 2.6 W.
+const INTEL_BUSY_COUNTS_PER_WINDOW: u64 = 10_700;
+
+/// A replay of the recording whose package counter, read by the probe once
+/// for its existence and once after its watch window, then by two samples,
+/// returns `counters` in turn.
+fn intel_replay_with_counters(counters: &[u64]) -> ReplayMsr {
+    let mut msr = ReplayMsr::from_fixture(&fixture(INTEL_FIXTURE));
+    msr.set_sequence(LogicalCpu { group: 0, index: 0 }, 0x611, counters);
+    msr
+}
+
+fn probe_intel(msr: ReplayMsr, clock: &ManualClock) -> IntelCpuProvider {
+    IntelCpuProvider::probe(
         &intel_identity(),
         &intel_topology(),
-        Box::new(ReplayMsr::from_fixture(&fixture(INTEL_FIXTURE))),
-        Box::new(ManualClock::new()),
+        Box::new(msr),
+        Box::new(clock.clone()),
     )
-    .unwrap_or_else(|error| panic!("(replay): expected a probe | {error}"));
+    .unwrap_or_else(|error| panic!("(replay): expected a probe | {error}"))
+}
+
+/// Issue 3: the package meter of the reference machine counts at 0.8 W idle
+/// and 2.6 W busy for a 120 W part. The probe must not offer it, and must say
+/// why.
+#[test]
+fn the_intel_probe_withholds_the_reference_machines_package_power_and_says_why() {
+    for (load, counts, reading) in [
+        ("idle", INTEL_IDLE_COUNTS_PER_WINDOW, "0.79"),
+        ("busy", INTEL_BUSY_COUNTS_PER_WINDOW, "2.61"),
+    ] {
+        let msr =
+            intel_replay_with_counters(&[INTEL_BASELINE_COUNTER, INTEL_BASELINE_COUNTER + counts]);
+        let provider = probe_intel(msr, &ManualClock::new());
+        assert_eq!(
+            provider.summary(),
+            format!(
+                "14 cores, package and per-core temperature (TjMax 100 °C); not available: \
+                 package (reads {reading} W, below the 6.0 W floor for a 120 W part), dram \
+                 (counter reads 0)"
+            ),
+            "({load})"
+        );
+        let keys: Vec<String> = provider.sensors().into_iter().map(|sensor| sensor.key).collect();
+        assert_eq!(keys.len(), 1 + 14 + 1, "({load}) package, 14 cores, hottest: {keys:?}");
+        assert!(
+            keys.iter().all(|key| !key.ends_with(".power")),
+            "({load}) expected no power sensor | received: {keys:?}"
+        );
+    }
+}
+
+/// What the same recording yields from a meter that works: 40 W (10 J in the
+/// 250 ms window) clears the floor, and the sensor follows the unit register.
+#[test]
+fn the_intel_probe_offers_package_power_from_a_meter_above_the_floor() {
+    let baseline = INTEL_BASELINE_COUNTER;
+    let in_window = baseline + 10 * 16_384;
+    let clock = ManualClock::new();
+    // Then 80 J over the 2 s between the two samples is 40 W again.
+    let msr =
+        intel_replay_with_counters(&[baseline, in_window, in_window, in_window + 80 * 16_384]);
+    let mut provider = probe_intel(msr, &clock);
     assert_eq!(
         provider.summary(),
-        "14 cores, package and per-core temperature (TjMax 100 °C); power: package; not \
-         available: dram (counter reads 0)"
+        "14 cores, package and per-core temperature (TjMax 100 °C); power: package; not available: \
+         dram (counter reads 0)"
     );
-    let keys: Vec<String> = provider.sensors().into_iter().map(|sensor| sensor.key).collect();
-    assert_eq!(keys.len(), 1 + 14 + 1 + 1, "package, 14 cores, hottest, package power: {keys:?}");
-    assert!(!keys.iter().any(|key| key == "cpu.dram.power"), "DRAM reads 0 and is not declared");
+    provider.sample(&mut Vec::new());
+    clock.advance(Duration::from_secs(2));
+    let mut values = Vec::new();
+    provider.sample(&mut values);
+    close(value_of(&provider, &values, "cpu.package.power"), 40.0, "cpu.package.power");
 }
 
 #[test]
@@ -307,28 +370,4 @@ fn the_intel_temperatures_decode_from_the_recorded_status_registers() {
     close(read("cpu.core1.temp"), 41.0, "cpu.core1.temp");
     close(read("cpu.core13.temp"), 42.0, "cpu.core13.temp");
     close(read("cpu.core-max.temp"), 45.0, "cpu.core-max.temp");
-    assert_eq!(read("cpu.package.power"), None, "the first sample only sets the energy baseline");
-}
-
-#[test]
-fn the_intel_package_power_follows_the_energy_unit_of_the_recording() {
-    let mut msr = ReplayMsr::from_fixture(&fixture(INTEL_FIXTURE));
-    let first_core = LogicalCpu { group: 0, index: 0 };
-    // The recorded unit register 0x606 holds 0xE (1/16384 J) in bits 12:8.
-    // 80 J over 2 s is 40 W: 80 * 16384 counts.
-    let baseline = 0x0FC8_A8E0;
-    msr.set_sequence(first_core, 0x611, &[baseline, baseline, baseline + 80 * 16_384]);
-    let clock = ManualClock::new();
-    let mut provider = IntelCpuProvider::probe(
-        &intel_identity(),
-        &intel_topology(),
-        Box::new(msr),
-        Box::new(clock.clone()),
-    )
-    .expect("(replay): expected a probe");
-    provider.sample(&mut Vec::new());
-    clock.advance(Duration::from_secs(2));
-    let mut values = Vec::new();
-    provider.sample(&mut values);
-    close(value_of(&provider, &values, "cpu.package.power"), 40.0, "cpu.package.power");
 }

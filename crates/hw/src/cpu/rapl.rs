@@ -11,6 +11,12 @@ use std::time::{Duration, Instant};
 pub trait Clock: Send {
     /// The current instant.
     fn now(&self) -> Instant;
+
+    /// Lets `duration` pass. Real clocks sleep; a test clock moves its time
+    /// forward, so code that waits for a counter to count stays testable.
+    fn wait(&self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
 }
 
 /// The system's monotonic clock.
@@ -53,6 +59,10 @@ impl Default for ManualClock {
 impl Clock for ManualClock {
     fn now(&self) -> Instant {
         self.origin + self.elapsed.lock().map(|elapsed| *elapsed).unwrap_or_default()
+    }
+
+    fn wait(&self, duration: Duration) {
+        self.advance(duration);
     }
 }
 
@@ -205,6 +215,24 @@ mod tests {
         let before = copy.now();
         clock.advance(Duration::from_secs(3));
         assert_eq!(copy.now() - before, Duration::from_secs(3));
+    }
+
+    #[test]
+    fn waiting_on_the_manual_clock_moves_it_forward_without_sleeping() {
+        let clock = ManualClock::new();
+        let before = clock.now();
+        let started = Instant::now();
+        clock.wait(Duration::from_secs(3600));
+        assert_eq!(clock.now() - before, Duration::from_secs(3600));
+        assert!(started.elapsed() < Duration::from_secs(5), "expected no real sleep");
+    }
+
+    #[test]
+    fn waiting_on_the_system_clock_takes_real_time() {
+        let clock = SystemClock;
+        let before = clock.now();
+        clock.wait(Duration::from_millis(20));
+        assert!(clock.now() - before >= Duration::from_millis(20));
     }
 
     #[test]

@@ -134,8 +134,11 @@ Requires an Intel x64 CPU.
 Read allow-list (relevant part): `0xCE` platform info, `0xE7`/`0xE8`
 MPERF/APERF, `0x198` perf status, `0x19C` core thermal status, `0x1A2`
 temperature target, `0x1B1` package thermal status, `0x606` RAPL units,
-`0x611` package energy, `0x619` DRAM energy, `0x639` PP0 energy, `0x641`
-PP1 energy, `0x64D` platform energy.
+`0x611` package energy, `0x614` package power info, `0x619` DRAM energy,
+`0x639` PP0 energy, `0x641` PP1 energy, `0x64D` platform energy. On the
+reference machine `0x641` and `0x64D` pass the allow-list but fail with
+`STATUS_PRIVILEGED_INSTRUCTION` (the processor raises `#GP`: no such domain),
+and `0x1A0`, `0x1FC` and `0x3A` are refused with `STATUS_ACCESS_DENIED`.
 
 The module does not pin the calling thread. The caller sets the thread
 affinity to the target core before each per-core read.
@@ -223,10 +226,20 @@ LibreHardwareMonitor creates them with an ACL open to everyone and waits
 - Power: difference of the 32-bit wrapping energy counters (`0x611`
   package, `0x639` cores, `0x619` DRAM) times the unit, divided by elapsed
   time.
-- On Haswell-EP and later server parts the DRAM domain uses a fixed unit of
-  15.3 µJ instead of the unit in `0x606` (**unverified**: not checked against
-  Intel documentation, and the reference machine's DRAM counter reads 0, so
-  the sensor has never been shown on hardware).
+- On Haswell-EP and Broadwell-EP the DRAM domain uses a fixed unit of 15.3 µJ
+  (2^-16 J) instead of the unit in `0x606`. Checked on 2026-11-23 against
+  Linux: `arch/x86/events/rapl.c` sets the DRAM hardware unit to 16 for
+  Haswell-X and Broadwell-X (citing the Haswell-EP datasheet, volume 2,
+  330784-001; the commit that added it says the DRAM domain "will be counted 4x
+  higher" without it), and `intel_rapl_common.c` sets `dram_domain_energy_unit
+  = 15300` for the same two models. The later parts in the code's table
+  (Skylake-SP and the others) were not checked. The reference machine's DRAM
+  counter reads 0, so the sensor has never been shown on hardware.
+- Package power is not offered on models `0x3F` and `0x4F` when the counter
+  reads below 5 % of the TDP in `MSR_PKG_POWER_INFO` (`0x614`, bits 14:0 in
+  the power unit of `0x606` bits 3:0), read over a 250 ms window at probe
+  time. The reference machine's meter reads 0.8 W for a 120 W part; see
+  [the reference machine](reference-machine.md).
 
 ### Nuvoton NCT67xx Super I/O
 
