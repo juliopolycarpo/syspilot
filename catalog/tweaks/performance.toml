@@ -53,3 +53,71 @@ source = "https://learn.microsoft.com/windows/privacy/manage-connections-from-wi
 
 [[tweak.action]]
 registry = { scope = "machine", key = 'Software\Policies\Microsoft\Windows\AppPrivacy', name = "LetAppsRunInBackground", data = { dword = 2 } }
+
+[[tweak]]
+id = "performance.game-recording"
+title = "Turn off game recording and broadcasting"
+summary = "Windows no longer records gameplay or streams it, so the capture tools of the Game Bar are unavailable."
+detail = '''Policy: Computer Configuration > Administrative Templates > Windows Components > Windows Game Recording and Broadcasting > Enables or disables Windows Game Recording and Broadcasting (AllowGameDVR). Sets HKLM\Software\Policies\Microsoft\Windows\GameDVR\AllowGameDVR (REG_DWORD) to 0 (not allowed). Microsoft's Policy CSP reference says that when the policy is disabled, Windows Game Recording is not allowed, and that recording and broadcasting are allowed (value 1) when it is enabled or not configured. Microsoft lists the policy for the Pro, Enterprise and Education editions, and notes that it is only enforced on Windows 10 for desktop. Microsoft does not state a performance effect for this policy.'''
+level = "simple"
+category = "performance"
+side-effects = "Recording clips and broadcasting from the Game Bar stop working."
+source = "https://learn.microsoft.com/windows/client-management/mdm/policy-csp-applicationmanagement#allowgamedvr"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'Software\Policies\Microsoft\Windows\GameDVR', name = "AllowGameDVR", data = { dword = 0 } }
+
+[[tweak]]
+id = "performance.power-throttling"
+title = "Turn off power throttling"
+summary = "Windows stops slowing apps down to save power, so background work can run faster but uses more power."
+detail = '''Policy: Computer Configuration > Administrative Templates > System > Power Management > Power Throttling Settings > Turn off Power Throttling (PowerThrottlingTurnOff). Sets HKLM\System\CurrentControlSet\Control\Power\PowerThrottling\PowerThrottlingOff (REG_DWORD) to 1. Microsoft's Policy CSP reference says that enabling the policy turns Power Throttling off, and that when it is disabled or not configured users control the setting. The policy's ADMX definition writes 1 when enabled and 0 when disabled. Microsoft describes how Windows lowers the clock speed and core choice of low-priority work in its Quality of Service article. The reference lists the policy for the Pro, Enterprise and Education editions on Windows 10 2004 with KB5005101 and later and on Windows 11.'''
+level = "advanced"
+category = "performance"
+side-effects = "Higher power use and shorter battery life on laptops."
+reboot = "restart"
+source = "https://learn.microsoft.com/windows/client-management/mdm/policy-csp-admx-power#powerthrottlingturnoff"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'System\CurrentControlSet\Control\Power\PowerThrottling', name = "PowerThrottlingOff", data = { dword = 1 } }
+
+[[tweak]]
+id = "performance.processor-minimum-state-ac"
+title = "Keep the processor at full speed on AC power"
+summary = "The processor does not slow down when idle while the PC is plugged in, at the cost of higher idle power use and heat."
+detail = '''Sets "Minimum Processor State" of the active power plan to 100% on AC power. Subgroup GUID_PROCESSOR_SETTINGS_SUBGROUP 54533251-82be-4824-96c1-47b60b740d00, setting 893dee8e-2bef-41e0-89c6-b55d0929964c (powercfg alias PROCTHROTTLEMIN, not a hidden setting). Microsoft documents the setting as the minimum processor performance state, a percentage of the maximum processor frequency from 0 to 100, and excepts it, with Maximum Processor State, from its advice not to change processor power policy without the processor vendor. The page describes Windows 7; the Windows 10 and 11 reference lists the same alias and range, and says processor power profiles such as the Game Mode and battery saver profiles carry their own values. The battery (DC) value is left alone.'''
+level = "advanced"
+category = "performance"
+side-effects = "Higher idle power use and heat while plugged in."
+source = "https://learn.microsoft.com/previous-versions/windows/hardware/design/dn613985(v=vs.85)"
+
+[[tweak.action]]
+power = { subgroup = "54533251-82be-4824-96c1-47b60b740d00", setting = "893dee8e-2bef-41e0-89c6-b55d0929964c", ac = 100 }
+
+[[tweak]]
+id = "performance.last-access-time"
+title = "Turn off last-access time updates"
+summary = "Windows stops updating the last accessed date of files, which saves some disk writes. Programs that rely on that date may see stale values."
+detail = '''Sets HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\NtfsDisableLastAccessUpdate (REG_DWORD) to 0x80000001 (2147483649). Microsoft documents the value as a bit field on Windows 10 1803 and later: 0x00000001 disables LastAccessTime updates, 0x00000002 means system managed (NTFS applies its own policy and rewrites flag 0x00000001 at startup), and 0x80000000 marks the flags as initialized. This entry sets the initialized flag and the disable flag and leaves out the system managed flag, so the choice holds across restarts. If the value is controlled by group policy, only flag 0x00000001 is recognized. The fsutil reference says that disabling the update reduces the cost of logging Last Access Time and improves the speed of file and directory access, that on-disk values can lag by up to one hour, that queries still return the correct value from memory, and that programs such as Backup and Remote Storage can be affected. It also says a restart is required.'''
+level = "advanced"
+category = "performance"
+side-effects = "Programs that read the last accessed date, such as some backup tools, may see stale dates."
+reboot = "restart"
+source = "https://learn.microsoft.com/openspecs/windows_protocols/ms-fsa/4e3695bd-7574-4f24-a223-b4679c065b63"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SYSTEM\CurrentControlSet\Control\FileSystem', name = "NtfsDisableLastAccessUpdate", data = { dword = 2147483649 } }
+
+[[tweak]]
+id = "performance.background-task-cpu-share"
+title = "Reserve less CPU time for background tasks"
+summary = "While audio, video or games use the CPU, background tasks are guaranteed only 10% of it, so those apps get the rest."
+detail = '''Sets HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\SystemResponsiveness (REG_DWORD) to 10. Microsoft documents the value as the percentage of CPU resources that the Multimedia Class Scheduler service guarantees to low-priority tasks. Values that are not multiples of 10 are rounded down, values below 10 and above 100 are clamped to 20, and 100 disables the service, so 10 is the lowest value that takes effect. The page does not state the default or whether a restart is needed.'''
+level = "advanced"
+category = "performance"
+side-effects = "Background work such as downloads or indexing can run slower while audio, video or games are busy."
+reboot = "restart"
+source = "https://learn.microsoft.com/windows/win32/procthread/multimedia-class-scheduler-service"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile', name = "SystemResponsiveness", data = { dword = 10 } }
