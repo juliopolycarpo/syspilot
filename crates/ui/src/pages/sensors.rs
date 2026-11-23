@@ -1,7 +1,7 @@
 //! Live readings, grouped by the hardware they come from.
 
 use syspilot_proto::message::{DriverState, ServiceStatus};
-use syspilot_proto::sensor::SensorInfo;
+use syspilot_proto::sensor::{DeviceInfo, SensorInfo};
 use windows_reactor::*;
 
 use crate::app::{App, Message};
@@ -58,6 +58,47 @@ fn reading(app: &App, sensor: &SensorInfo, trends: &Trends) -> KeyedView {
     KeyedView::new(sensor.key.clone(), row)
 }
 
+/// The one-per-thread and one-per-core readings of a device, folded away
+/// until asked for. While folded they are not built at all, so a processor
+/// with many threads costs nothing each second.
+fn per_unit_readings(
+    app: &App,
+    device: &DeviceInfo,
+    sensors: &[&SensorInfo],
+    trends: &Trends,
+    context: &ViewContext<App>,
+) -> View {
+    if app.level() == ViewLevel::Simple {
+        return widgets::caption(format!(
+            "{} more readings, one per thread or core, are listed at the Advanced level.",
+            sensors.len()
+        ))
+        .into();
+    }
+    let unfolded = app.unfolded.contains(&device.name);
+    let rows: Vec<KeyedView> = if unfolded {
+        sensors.iter().map(|sensor| reading(app, sensor, trends)).collect()
+    } else {
+        Vec::new()
+    };
+    let name = device.name.clone();
+    Expander::new()
+        .is_expanded(unfolded)
+        .on_is_expanded_changed(context.callback(move |open| Message::Unfold(name.clone(), open)))
+        .horizontal_alignment(HorizontalAlignment::Stretch)
+        .automation_name(format!("Each thread and core of {}", device.name))
+        .slots([
+            SlotView::new(
+                ExpanderSlot::Header,
+                widgets::body(format!("Each thread and core ({})", sensors.len())),
+            ),
+            SlotView::new(
+                ExpanderSlot::Content,
+                StackPanel::new().spacing(GAP_MEDIUM).keyed_children(rows),
+            ),
+        ])
+}
+
 /// The driver's state and what depends on it. Unavailable features stay
 /// listed, greyed out, so it is clear what installing the driver adds.
 pub fn hardware_access(app: &App, status: &ServiceStatus, context: &ViewContext<App>) -> View {
@@ -110,19 +151,25 @@ pub fn view(app: &App, context: &ViewContext<App>) -> View {
         ));
     }
     for (index, device) in sensors.devices.iter().enumerate() {
-        let rows: Vec<KeyedView> = sensors
-            .sensors
-            .iter()
-            .filter(|sensor| sensor.device as usize == index)
-            .map(|sensor| reading(app, sensor, &trends))
-            .collect();
-        if rows.is_empty() {
+        let (main, per_unit) = model::device_sensors(sensors, index);
+        if main.is_empty() && per_unit.is_empty() {
             continue;
         }
-        let group = StackPanel::new().spacing(GAP_TIGHT).children((
-            widgets::strong(&device.name),
-            widgets::card().content(StackPanel::new().spacing(GAP_MEDIUM).keyed_children(rows)),
-        ));
+        let rows = main.iter().map(|sensor| reading(app, sensor, &trends));
+        let mut group = vec![
+            KeyedView::new("name", widgets::strong(&device.name)),
+            KeyedView::new(
+                "main",
+                widgets::card().content(StackPanel::new().spacing(GAP_MEDIUM).keyed_children(rows)),
+            ),
+        ];
+        if !per_unit.is_empty() {
+            group.push(KeyedView::new(
+                "per-unit",
+                per_unit_readings(app, device, &per_unit, &trends, context),
+            ));
+        }
+        let group = StackPanel::new().spacing(GAP_TIGHT).keyed_children(group);
         content.push(KeyedView::new(format!("device-{index}"), group));
     }
     if let Some(status) = &app.snapshot.status {

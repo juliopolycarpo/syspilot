@@ -1,7 +1,7 @@
 //! The app: its state, what can happen to it, and the window around the
 //! pages.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -205,6 +205,8 @@ pub enum Message {
     OpenLogs,
     /// A text field of the custom action form changed.
     FormText(Field, String),
+    /// The per-thread readings of a device were unfolded or folded.
+    Unfold(String, bool),
     /// A choice of the custom action form changed.
     FormChoice(Choice, Option<usize>),
     /// "Add" on the custom action form.
@@ -269,6 +271,8 @@ pub struct App {
     pub notice: Option<(Tone, String)>,
     /// The custom action being entered.
     pub form: CustomForm,
+    /// Devices whose per-thread and per-core readings are unfolded.
+    pub unfolded: HashSet<String>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -535,6 +539,7 @@ impl Component for App {
             dialog: None,
             notice: None,
             form: CustomForm::default(),
+            unfolded: HashSet::new(),
         };
         app.go(Page::Home);
         app.go(launch.page);
@@ -625,6 +630,8 @@ impl Component for App {
                 }
             }
             Message::FormText(field, text) => self.form.set_text(field, text),
+            Message::Unfold(device, true) => _ = self.unfolded.insert(device),
+            Message::Unfold(device, false) => _ = self.unfolded.remove(&device),
             Message::FormChoice(choice, index) => {
                 if let Some(index) = index {
                     self.form.set_choice(choice, index);

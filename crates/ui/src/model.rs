@@ -143,6 +143,7 @@ pub fn duration_text(seconds: u64) -> String {
         (0, 0, _) => format!("{minutes} min"),
         (0, _, 0) => format!("{hours} h"),
         (0, _, _) => format!("{hours} h {minutes} min"),
+        (_, 0, _) => format!("{days} d"),
         _ => format!("{days} d {hours} h"),
     }
 }
@@ -539,6 +540,29 @@ pub fn category_count(snapshot: &Snapshot, category: Category, level: ViewLevel)
     })
 }
 
+/// Whether a sensor is one of many of its kind on a device (one per
+/// processor thread or core), told by a numbered part in its key such as
+/// `cpu.thread12.load` or `cpu.core3.temp`. Those are shown folded away.
+pub fn is_per_unit_sensor(key: &str) -> bool {
+    key.split('.').any(|part| {
+        ["thread", "core"].iter().any(|unit| {
+            part.strip_prefix(unit).is_some_and(|number| {
+                !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
+            })
+        })
+    })
+}
+
+/// The sensors of one device, split into the ones always shown and the
+/// per-unit ones.
+pub fn device_sensors(sensors: &SensorList, device: usize) -> (Vec<&SensorInfo>, Vec<&SensorInfo>) {
+    sensors
+        .sensors
+        .iter()
+        .filter(|sensor| sensor.device as usize == device)
+        .partition(|sensor| !is_per_unit_sensor(&sensor.key))
+}
+
 /// Whether a temperature or load is high enough to colour.
 pub fn reading_tone(value: Option<f64>, kind: SensorKind) -> Tone {
     match (value, kind) {
@@ -651,6 +675,7 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
         assert_eq!(duration_text(3600), "1 h");
         assert_eq!(duration_text(2 * 3600 + 300), "2 h 5 min");
         assert_eq!(duration_text(3 * 86_400 + 4 * 3600), "3 d 4 h");
+        assert_eq!(duration_text(86_400 + 300), "1 d", "no empty hours after a day count");
     }
 
     #[test]
@@ -793,6 +818,44 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
         };
         let picked: Vec<_> = vitals(&sensors).iter().map(|v| (v.label, v.sensor.id)).collect();
         assert_eq!(picked, [("Processor load", 1), ("Graphics temperature", 3)]);
+    }
+
+    #[test]
+    fn per_thread_and_per_core_sensors_are_told_from_the_rest() {
+        for key in ["cpu.thread0.load", "cpu.thread27.load", "cpu.core3.temp", "cpu1.core12.temp"] {
+            assert!(is_per_unit_sensor(key), "{key}");
+        }
+        for key in
+            ["cpu.load", "cpu.core-max.temp", "cpu.package.temp", "board.fan1", "cpu.threads"]
+        {
+            assert!(!is_per_unit_sensor(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn a_devices_sensors_split_into_main_and_per_unit() {
+        let sensor = |id, device, key: &str| SensorInfo {
+            id,
+            device,
+            key: key.into(),
+            label: key.into(),
+            kind: SensorKind::Load,
+            driver: false,
+        };
+        let sensors = SensorList {
+            generation: 1,
+            devices: Vec::new(),
+            sensors: vec![
+                sensor(0, 0, "cpu.load"),
+                sensor(1, 0, "cpu.thread0.load"),
+                sensor(2, 1, "gpu0.load"),
+                sensor(3, 0, "cpu.thread1.load"),
+            ],
+        };
+        let (main, per_unit) = device_sensors(&sensors, 0);
+        assert_eq!(main.iter().map(|s| s.id).collect::<Vec<_>>(), [0]);
+        assert_eq!(per_unit.iter().map(|s| s.id).collect::<Vec<_>>(), [1, 3]);
+        assert_eq!(device_sensors(&sensors, 1).0.len(), 1);
     }
 
     #[test]
