@@ -91,7 +91,9 @@ fn choice_field(
 fn add_form(app: &App, context: &ViewContext<App>) -> View {
     let form = &app.form;
     let mut fields = vec![
-        text_field(context, Field::Title, "Name", &form.title, "Keep Num Lock on"),
+        // The hints form one example that is valid with the choices the
+        // form starts on: a machine-wide number.
+        text_field(context, Field::Title, "Name", &form.title, "Hide recommendations in Start"),
         choice_field(context, Choice::Kind, "What to enforce", &form::KINDS, form.kind),
     ];
     match form.kind {
@@ -102,14 +104,14 @@ fn add_form(app: &App, context: &ViewContext<App>) -> View {
                 Field::Key,
                 "Key",
                 &form.key,
-                r"Control Panel\Keyboard",
+                r"SOFTWARE\Policies\Microsoft\Windows\Explorer",
             ));
             fields.push(text_field(
                 context,
                 Field::Name,
                 "Value name",
                 &form.name,
-                "InitialKeyboardIndicators",
+                "HideRecommendedSection",
             ));
             fields.push(choice_field(
                 context,
@@ -119,7 +121,7 @@ fn add_form(app: &App, context: &ViewContext<App>) -> View {
                 form.data_type,
             ));
             if form.data_type != 3 {
-                fields.push(text_field(context, Field::Data, "Data", &form.data, "2"));
+                fields.push(text_field(context, Field::Data, "Data", &form.data, "1"));
             }
         }
         1 => {
