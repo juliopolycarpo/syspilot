@@ -138,6 +138,14 @@ impl Chip {
         layout(self).duty.len()
     }
 
+    /// The registers that read back each duty output's current value, the ones
+    /// [`MonitorChip::read`] reports as duty (`REG_PWM_READ` in the Linux
+    /// `nct6775` driver). Not the registers a fan write targets.
+    #[cfg(feature = "fan-control")]
+    pub(crate) fn duty_read_registers(self) -> &'static [u16] {
+        layout(self).duty
+    }
+
     /// How many fan tachometer inputs the chip has.
     pub fn fan_tachometers(self) -> usize {
         match layout(self).fans {

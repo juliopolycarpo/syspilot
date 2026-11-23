@@ -8,6 +8,8 @@
 //! - `failsafe` (feature `fan-control`): the channel trait and the controller
 //!   that saves the BIOS mode, restores it and drives the fans to 100 % when
 //!   a sensor fails.
+//! - `nct677x` (feature `fan-control`): the channel on an NCT6776F or
+//!   NCT6779D, over the `SuperIo` fan write. Tested on the replay bus only.
 //!
 //! Decision 12 keeps version 1 from writing to hardware. Everything that can
 //! write a fan register is behind the `fan-control` feature, which is off by
@@ -17,3 +19,5 @@ pub mod board;
 pub mod curve;
 #[cfg(feature = "fan-control")]
 pub mod failsafe;
+#[cfg(feature = "fan-control")]
+pub mod nct677x;
