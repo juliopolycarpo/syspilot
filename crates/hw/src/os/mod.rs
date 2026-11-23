@@ -9,6 +9,7 @@
 pub mod cpu;
 pub mod gpu;
 pub mod memory;
+pub mod network;
 pub(crate) mod pdh;
 pub(crate) mod rate;
 pub(crate) mod registry;
@@ -29,6 +30,7 @@ pub const PROBES: &[(&str, ProbeFn)] = &[
     ("gpu", gpu::probe),
     ("storage", storage::probe),
     ("volumes", volumes::probe),
+    ("network", network::probe),
 ];
 
 /// Constructs every provider that finds hardware on this machine.

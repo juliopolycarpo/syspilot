@@ -190,16 +190,22 @@ fn providers_declare_valid_keys_and_report_plausible_values_over_three_samples()
     }
 }
 
-/// `disk<N>.<suffix>` with a numeric `N`.
-fn is_disk_key(key: &str, suffixes: &[&str]) -> bool {
-    let Some(rest) = key.strip_prefix("disk") else { return false };
+/// `<prefix><N>.<suffix>` with a numeric `N`, e.g. `disk0.read`.
+fn is_numbered_key(key: &str, prefix: &str, suffixes: &[&str]) -> bool {
+    let Some(rest) = key.strip_prefix(prefix) else { return false };
     let Some((number, suffix)) = rest.split_once('.') else { return false };
     !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) && suffixes.contains(&suffix)
 }
 
+fn is_disk_key(key: &str, suffixes: &[&str]) -> bool {
+    is_numbered_key(key, "disk", suffixes)
+}
+
 /// Rate sensors that are computed from the second sample on once declared.
 fn is_declared_rate(key: &str) -> bool {
-    key == "cpu.load" || is_disk_key(key, &["read", "write"])
+    key == "cpu.load"
+        || is_disk_key(key, &["read", "write"])
+        || is_numbered_key(key, "net", &["down", "up"])
 }
 
 /// Sensors with a value on every sample once declared: disk health is read
@@ -209,11 +215,14 @@ fn is_declared_instant(key: &str) -> bool {
 }
 
 #[test]
-fn disk_and_volume_key_matchers_accept_only_their_own_keys() {
+fn numbered_key_matchers_accept_only_their_own_keys() {
     assert!(is_disk_key("disk0.read", &["read"]));
     assert!(is_disk_key("disk12.life", &["temp", "life"]));
     assert!(!is_disk_key("disk.read", &["read"]), "missing drive number");
     assert!(!is_disk_key("disk1.write", &["read"]), "other suffix");
     assert!(!is_disk_key("diskx.read", &["read"]), "non-numeric drive number");
     assert!(!is_disk_key("net0.down", &["down"]));
+    assert!(is_declared_rate("net3.up"));
+    assert!(!is_declared_rate("net.up"));
+    assert!(!is_declared_rate("battery.power"), "battery power may be absent or zero");
 }
