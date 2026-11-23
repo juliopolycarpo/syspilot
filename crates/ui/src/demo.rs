@@ -384,6 +384,12 @@ fn status(scenario: Scenario) -> ServiceStatus {
                     needs_driver
                 },
             ),
+            feature(
+                "chipset-sensors",
+                "Chipset temperature",
+                with_driver,
+                if with_driver { "Example PCH, PCI thermal BAR0" } else { needs_driver },
+            ),
             feature("fan-control", "Fan control", false, "Not part of this version"),
         ],
         subscribers: 1,

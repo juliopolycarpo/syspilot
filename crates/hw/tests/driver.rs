@@ -13,12 +13,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use syspilot_hw::Provider;
-use syspilot_hw::bus::pawn::{PawnMsr, PawnSmbus, PawnSuperIo};
-use syspilot_hw::bus::{BusKind, BusLocks, SystemBusLocks};
+use syspilot_hw::bus::pawn::{PawnMsr, PawnPchThermal, PawnSmbus, PawnSuperIo};
+use syspilot_hw::bus::{BusKind, BusLocks, PchThermal, SystemBusLocks};
 use syspilot_hw::chips::{Detected, SuperIoProvider, detect};
 use syspilot_hw::cpu::{CpuIdentity, CpuTopology, IntelCpuProvider, SystemClock, Vendor};
 use syspilot_hw::dimm::{DimmProvider, describe_controller};
 use syspilot_hw::driver;
+use syspilot_hw::pch::{PchThermalProvider, describe_identity};
 use syspilot_pawnio::{Error, Executor, PawnIo};
 use syspilot_proto::message::DriverState;
 use syspilot_proto::sensor::SensorKind;
@@ -175,6 +176,52 @@ fn the_dimm_scan_reports_what_the_platform_smbus_holds() {
 }
 
 #[test]
+fn the_chipset_provider_reads_a_plausible_temperature() {
+    let test = "the_chipset_provider_reads_a_plausible_temperature";
+    if !enabled(test) {
+        return;
+    }
+    let Some(module) = load_module(test, "IntelPCHThermal.bin") else { return };
+    // The identity is informational: five cells the module filled at load.
+    let mut identity = [0u64; 5];
+    module.execute("ioctl_identity", &[], &mut identity).unwrap_or_else(|error| {
+        panic!("(chipset provider): expected ioctl_identity to answer | received: {error}")
+    });
+    let description = describe_identity(identity);
+    eprintln!("identity: {description} (raw {identity:#x?})");
+
+    let mut raw_reader = PawnPchThermal::new(module.clone());
+    let reading = raw_reader.read_raw().unwrap_or_else(|error| {
+        panic!("(chipset provider): expected a raw reading | received: {error}")
+    });
+    eprintln!("raw: {:#x} on {:?}", reading.raw, reading.route);
+
+    let mut provider =
+        PchThermalProvider::probe(Box::new(PawnPchThermal::new(module)), &description)
+            .unwrap_or_else(|error| {
+                panic!("(chipset provider): expected a probe | received: {error}")
+            });
+    eprintln!("probe: {}", provider.summary());
+    let mut values = Vec::new();
+    for _ in 0..3 {
+        provider.sample(&mut values);
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    eprintln!("values: {values:?}");
+    assert_eq!(values.len(), 3, "one value per sample");
+    for value in values {
+        let temperature = value.unwrap_or_else(|| {
+            panic!("(chipset provider): expected a temperature | received: None")
+        });
+        assert!(
+            (10.0..=100.0).contains(&temperature),
+            "(chipset provider): expected 10..=100 degrees C | received: {temperature}"
+        );
+    }
+    assert_eq!(provider.last_problem(), None);
+}
+
+#[test]
 fn the_intel_provider_reads_plausible_temperatures_and_power() {
     let test = "the_intel_provider_reads_plausible_temperatures_and_power";
     if !enabled(test) {
@@ -292,7 +339,7 @@ fn the_probe_samples_every_sensor_once_a_second_without_a_problem() {
         "(driver probe): expected a ready driver | received: {:?}",
         probe.state
     );
-    assert_eq!(probe.features.len(), 4, "(driver probe): expected four features");
+    assert_eq!(probe.features.len(), 5, "(driver probe): expected five features");
     assert!(!probe.providers.is_empty(), "(driver probe): expected at least one provider");
 
     let sensors: Vec<_> = probe.providers.iter().map(|provider| provider.sensors()).collect();

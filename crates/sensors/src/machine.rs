@@ -56,9 +56,12 @@ mod tests {
             syspilot_pawnio::installed_version().is_none()
         );
         let keys: Vec<&str> = machine.features.iter().map(|feature| feature.key.as_str()).collect();
-        assert_eq!(keys, ["cpu-sensors", "board-sensors", "memory-sensors", "fan-control"]);
+        assert_eq!(
+            keys,
+            ["cpu-sensors", "board-sensors", "memory-sensors", "chipset-sensors", "fan-control"]
+        );
         assert!(
-            !machine.features[3].available,
+            !machine.features[4].available,
             "(machine probe): expected fan control to be unavailable in this version"
         );
     }

@@ -1,8 +1,8 @@
 //! What the PawnIO driver gives this machine, decided in one place.
 //!
 //! [`probe`] checks the driver, then tries each driver-backed feature on its
-//! own: processor sensors, motherboard sensors and memory module
-//! temperatures. A feature that cannot work ends as an unavailable
+//! own: processor sensors, motherboard sensors, memory module temperatures and
+//! the chipset temperature. A feature that cannot work ends as an unavailable
 //! [`Feature`] with the reason in plain words; it never stops another one.
 //! Nothing here writes to hardware: the bus layer has no write beyond the
 //! index writes a read needs (see [`crate::bus`]).
@@ -16,17 +16,18 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use syspilot_pawnio::{Error, Executor, INSTALL_URL, PawnIo, Version};
+use syspilot_pawnio::{Error, Executor, INSTALL_URL, PawnIo, Version, status};
 use syspilot_proto::message::{DriverState, Feature, InfoSection};
 
-use crate::bus::pawn::{PawnMsr, PawnSmbus, PawnSmn, PawnSuperIo};
-use crate::bus::{BusKind, BusLocks, Msr, Smbus, Smn, SuperIo, SystemBusLocks};
+use crate::bus::pawn::{PawnMsr, PawnPchThermal, PawnSmbus, PawnSmn, PawnSuperIo};
+use crate::bus::{BusKind, BusLocks, Msr, PchThermal, Smbus, Smn, SuperIo, SystemBusLocks};
 use crate::chips::{Detected, SuperIoProvider, detect};
 use crate::cpu::{
     AmdCpuProvider, Clock, CpuIdentity, CpuTopology, IntelCpuProvider, SystemClock, Vendor,
 };
 use crate::dimm::{DimmProvider, describe_controller};
 use crate::hub::Provider;
+use crate::pch::{PchThermalProvider, describe_identity};
 
 /// Feature key of the processor sensors.
 pub const CPU_SENSORS: &str = "cpu-sensors";
@@ -34,6 +35,8 @@ pub const CPU_SENSORS: &str = "cpu-sensors";
 pub const BOARD_SENSORS: &str = "board-sensors";
 /// Feature key of the memory module sensors.
 pub const MEMORY_SENSORS: &str = "memory-sensors";
+/// Feature key of the chipset temperature.
+pub const CHIPSET_SENSORS: &str = "chipset-sensors";
 /// Feature key of fan control.
 pub const FAN_CONTROL: &str = "fan-control";
 
@@ -48,6 +51,8 @@ pub enum Module {
     LpcIo,
     /// The Intel PCH SMBus controller.
     SmbusI801,
+    /// The Intel PCH thermal sensor.
+    IntelPchThermal,
 }
 
 impl Module {
@@ -58,6 +63,7 @@ impl Module {
             Self::AmdFamily17 => "AMDFamily17.bin",
             Self::LpcIo => "LpcIO.bin",
             Self::SmbusI801 => "SmbusI801.bin",
+            Self::IntelPchThermal => "IntelPCHThermal.bin",
         }
     }
 }
@@ -111,6 +117,13 @@ impl ModuleError {
             Self::Unreadable { module, reason } => {
                 format!("{} could not be read: {reason}", module.file_name())
             }
+            // This module refuses for two reasons the user can tell apart
+            // from "unsupported": no thermal function, or one that is off.
+            Self::Refused { module: Module::IntelPchThermal } => format!(
+                "PawnIO's {} found no supported chipset thermal sensor, or its function is not \
+                 decoding memory",
+                Module::IntelPchThermal.file_name()
+            ),
             Self::Refused { module } => {
                 format!("PawnIO's {} does not support this machine", module.file_name())
             }
@@ -131,6 +144,14 @@ pub struct SmbusAccess {
     pub bus: Box<dyn Smbus>,
     /// Controller description for the feature detail.
     pub controller: String,
+}
+
+/// The chipset temperature register and what the module found.
+pub struct PchAccess {
+    /// The register.
+    pub sensor: Box<dyn PchThermal>,
+    /// The chipset and the register window, for the feature detail.
+    pub description: String,
 }
 
 /// What the probe needs from the machine. Every method that returns a bus
@@ -155,14 +176,17 @@ pub trait Platform {
     fn super_io(&self) -> Result<Box<dyn SuperIo>, ModuleError>;
     /// The SMBus through `SmbusI801`.
     fn smbus(&self) -> Result<SmbusAccess, ModuleError>;
+    /// The chipset temperature register through `IntelPchThermal`. Loading
+    /// reads PCI configuration space, so the caller holds the PCI mutex.
+    fn pch_thermal(&self) -> Result<PchAccess, ModuleError>;
 }
 
 /// The result of [`probe`].
 pub struct DriverProbe {
     /// The driver's state.
     pub state: DriverState,
-    /// The four features in a fixed order: processor, board, memory, fan
-    /// control.
+    /// The five features in a fixed order: processor, board, memory, chipset,
+    /// fan control.
     pub features: Vec<Feature>,
     /// The providers of the available features, ready to put in a hub.
     pub providers: Vec<Box<dyn Provider>>,
@@ -183,6 +207,7 @@ pub fn probe_with(platform: &dyn Platform) -> DriverProbe {
             (CPU_SENSORS, "Processor temperature and power", probe_cpu(platform)),
             (BOARD_SENSORS, "Motherboard fans and temperatures", probe_board(platform)),
             (MEMORY_SENSORS, "Memory module temperatures", probe_memory(platform)),
+            (CHIPSET_SENSORS, "Chipset temperature", probe_chipset(platform)),
         ]
     } else {
         let detail = needs_driver(&state);
@@ -190,10 +215,11 @@ pub fn probe_with(platform: &dyn Platform) -> DriverProbe {
             (CPU_SENSORS, "Processor temperature and power", Outcome::unavailable(&detail)),
             (BOARD_SENSORS, "Motherboard fans and temperatures", Outcome::unavailable(&detail)),
             (MEMORY_SENSORS, "Memory module temperatures", Outcome::unavailable(&detail)),
+            (CHIPSET_SENSORS, "Chipset temperature", Outcome::unavailable(&detail)),
         ]
     };
 
-    let mut features = Vec::with_capacity(4);
+    let mut features = Vec::with_capacity(5);
     let mut providers = Vec::new();
     let mut info = Vec::new();
     for (key, title, outcome) in outcomes {
@@ -399,6 +425,35 @@ fn probe_memory(platform: &dyn Platform) -> Outcome {
     }
 }
 
+fn probe_chipset(platform: &dyn Platform) -> Outcome {
+    let locks = platform.locks();
+    let access = {
+        // Loading the module reads PCI configuration space to find the
+        // thermal function.
+        let _pci = match locks.acquire(BusKind::Pci) {
+            Ok(guard) => guard,
+            Err(error) => {
+                return Outcome::unavailable(&format!(
+                    "The chipset's thermal sensor could not be looked up: {error}"
+                ));
+            }
+        };
+        match platform.pch_thermal() {
+            Ok(access) => access,
+            Err(error) => return Outcome::unavailable(&error.plain()),
+        }
+    };
+    match PchThermalProvider::probe(access.sensor, &access.description) {
+        Ok(provider) => {
+            let detail = provider.summary().to_owned();
+            Outcome::found(provider, &detail)
+        }
+        Err(error) => {
+            Outcome::unavailable(&format!("The chipset temperature could not be read: {error}"))
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The real machine
 // ---------------------------------------------------------------------------
@@ -435,6 +490,11 @@ impl SystemPlatform {
 fn classify_load_error(module: Module, error: Error) -> ModuleError {
     match error {
         Error::NotSupported { function: None } => ModuleError::Refused { module },
+        // A module whose `main()` finds none of the devices it supports (the
+        // PCH thermal one does) fails with STATUS_NO_SUCH_DEVICE instead.
+        Error::Status { operation, status: status::NO_SUCH_DEVICE } if operation == "load" => {
+            ModuleError::Refused { module }
+        }
         Error::SignatureRefused { .. } | Error::ModuleMalformed { .. } => {
             ModuleError::Rejected { module, reason: error.to_string() }
         }
@@ -485,6 +545,17 @@ impl Platform for SystemPlatform {
         };
         Ok(SmbusAccess { bus: Box::new(PawnSmbus::new(module)), controller })
     }
+
+    fn pch_thermal(&self) -> Result<PchAccess, ModuleError> {
+        let module = self.load(Module::IntelPchThermal)?;
+        // The identity is informational: five cells the module filled at load.
+        let mut identity = [0u64; 5];
+        let description = match module.execute("ioctl_identity", &[], &mut identity) {
+            Ok(()) => describe_identity(identity),
+            Err(_) => "Intel PCH thermal sensor".to_owned(),
+        };
+        Ok(PchAccess { sensor: Box::new(PawnPchThermal::new(module)), description })
+    }
 }
 
 #[cfg(test)]
@@ -493,10 +564,10 @@ mod tests {
 
     use super::*;
     use crate::bus::replay::{
-        ReplayMsr, ReplaySmbus, ReplaySmn, ReplaySuperIo, smbus_byte_key, smbus_word_key, smn_key,
-        superio_config_key, superio_unlock_key, unlock_code,
+        ReplayMsr, ReplayPchThermal, ReplaySmbus, ReplaySmn, ReplaySuperIo, smbus_byte_key,
+        smbus_word_key, smn_key, superio_config_key, superio_unlock_key, unlock_code,
     };
-    use crate::bus::{FakeBusLocks, Fixture, LogicalCpu, SuperIoSlot, Unlock};
+    use crate::bus::{FakeBusLocks, Fixture, LogicalCpu, PchRoute, SuperIoSlot, Unlock};
     use crate::cpu::{ManualClock, Package};
 
     const NCT6779D_FIXTURE: &str = include_str!("../tests/fixtures/nct6779d.txt");
@@ -517,6 +588,9 @@ mod tests {
         smn: Fixture,
         super_io: Fixture,
         smbus: Fixture,
+        /// The chipset thermal register: its layout, the raw values it reads
+        /// in turn, and the description the module's identity gives.
+        pch: (PchRoute, Vec<u32>, String),
         refused: Vec<(Module, ModuleError)>,
         locks: Arc<FakeBusLocks>,
         calls: Mutex<Vec<&'static str>>,
@@ -546,6 +620,13 @@ mod tests {
                 smn: Fixture::new(),
                 super_io: fixture(NCT6779D_FIXTURE),
                 smbus: Fixture::new(),
+                pch: (
+                    PchRoute::PciBar0,
+                    // What this machine's `ioctl_read_raw` and `ioctl_identity`
+                    // returned: 49.0 degrees.
+                    vec![0x00C6],
+                    describe_identity([1, 0x8C24_8086, 0x1F06, 0x383F_FFF1_4000, 0x100]),
+                ),
                 refused: Vec::new(),
                 locks: Arc::new(FakeBusLocks::free()),
                 calls: Mutex::new(Vec::new()),
@@ -605,6 +686,14 @@ mod tests {
                 controller: "i801 SMBus controller 8086:8C22 at I/O 0xf000".to_owned(),
             })
         }
+        fn pch_thermal(&self) -> Result<PchAccess, ModuleError> {
+            self.gate(Module::IntelPchThermal)?;
+            let (route, raws, description) = &self.pch;
+            Ok(PchAccess {
+                sensor: Box::new(ReplayPchThermal::new(*route, raws)),
+                description: description.clone(),
+            })
+        }
     }
 
     fn feature<'a>(probe: &'a DriverProbe, key: &str) -> &'a Feature {
@@ -644,7 +733,7 @@ mod tests {
     // -- the driver ---------------------------------------------------------
 
     #[test]
-    fn the_four_features_are_always_listed_in_the_same_order_with_their_titles() {
+    fn the_five_features_are_always_listed_in_the_same_order_with_their_titles() {
         for driver in [
             Ok(Version::new(2, 2, 0)),
             Err(Error::DriverAbsent { win32: 2 }),
@@ -654,7 +743,13 @@ mod tests {
             let probe = probe_with(&platform);
             assert_eq!(
                 keys(&probe),
-                ["cpu-sensors", "board-sensors", "memory-sensors", "fan-control"]
+                [
+                    "cpu-sensors",
+                    "board-sensors",
+                    "memory-sensors",
+                    "chipset-sensors",
+                    "fan-control"
+                ]
             );
             let titles: Vec<&str> = probe.features.iter().map(|f| f.title.as_str()).collect();
             assert_eq!(
@@ -663,6 +758,7 @@ mod tests {
                     "Processor temperature and power",
                     "Motherboard fans and temperatures",
                     "Memory module temperatures",
+                    "Chipset temperature",
                     "Fan control"
                 ]
             );
@@ -680,7 +776,7 @@ mod tests {
         assert_eq!(probe.state, DriverState::Missing);
         assert!(probe.providers.is_empty());
         assert!(probe.info.is_empty());
-        for key in [CPU_SENSORS, BOARD_SENSORS, MEMORY_SENSORS] {
+        for key in [CPU_SENSORS, BOARD_SENSORS, MEMORY_SENSORS, CHIPSET_SENSORS] {
             let found = feature(&probe, key);
             assert!(!found.available, "({key}): expected unavailable");
             assert!(
@@ -747,7 +843,7 @@ mod tests {
     // -- the reference machine ----------------------------------------------
 
     #[test]
-    fn the_reference_machine_gets_processor_and_board_sensors_and_an_empty_memory_bus() {
+    fn the_reference_machine_gets_processor_board_and_chipset_sensors_and_an_empty_memory_bus() {
         let platform = ReplayPlatform::reference();
         let mut probe = probe_with(&platform);
         assert_eq!(probe.state, DriverState::Ready { version: "2.2.0".into() });
@@ -767,16 +863,24 @@ mod tests {
             "(memory-sensors): {}",
             memory.detail
         );
+
+        let chipset = feature(&probe, CHIPSET_SENSORS);
+        assert!(chipset.available, "{chipset:?}");
+        assert_eq!(
+            chipset.detail,
+            "Intel PCH 8086:8C24 at PCI 00:1f.6, PCI thermal BAR0 at 0x383ffff14000 (256 \
+             bytes), reads 49.0 °C"
+        );
         assert_fan_control_is_out(&probe);
 
-        assert_eq!(probe.providers.len(), 2);
+        assert_eq!(probe.providers.len(), 3);
         assert!(probe.info.is_empty());
         assert!(sample_all(&mut probe) > 20, "(sensors): expected the CPU and board sensors");
         assert!(probe.providers.iter().all(|provider| provider.needs_driver()));
         assert_eq!(platform.locks.live_guards(), 0, "every bus mutex is released");
         assert_eq!(
             platform.loaded(),
-            ["IntelMSR.bin", "LpcIO.bin", "LpcIO.bin", "SmbusI801.bin"],
+            ["IntelMSR.bin", "LpcIO.bin", "LpcIO.bin", "SmbusI801.bin", "IntelPCHThermal.bin"],
             "one handle per module, two for the Super I/O"
         );
     }
@@ -890,7 +994,8 @@ mod tests {
             "IntelMSR.bin is missing from the modules folder; run `cargo xtask fetch-modules`"
         );
         assert!(feature(&probe, BOARD_SENSORS).available, "a failure never takes down another");
-        assert_eq!(probe.providers.len(), 1);
+        assert!(feature(&probe, CHIPSET_SENSORS).available, "a failure never takes down another");
+        assert_eq!(probe.providers.len(), 2);
     }
 
     #[test]
@@ -936,6 +1041,23 @@ mod tests {
             classify_load_error(module, Error::NotSupported { function: None }),
             ModuleError::Refused { module }
         );
+        // A module that finds none of its devices (IntelPCHThermal) says so with
+        // STATUS_NO_SUCH_DEVICE, which is a refusal too.
+        assert_eq!(
+            classify_load_error(
+                module,
+                Error::Status { operation: "load".into(), status: status::NO_SUCH_DEVICE }
+            ),
+            ModuleError::Refused { module }
+        );
+        // The same status from a function is not a load refusal.
+        assert!(matches!(
+            classify_load_error(
+                module,
+                Error::Status { operation: "ioctl_x".into(), status: status::NO_SUCH_DEVICE }
+            ),
+            ModuleError::Failed { .. }
+        ));
         for rejected in [
             Error::SignatureRefused { status: 0xC000_A000 },
             Error::ModuleMalformed { status: 0xC000_000D },
@@ -963,10 +1085,20 @@ mod tests {
         let failed = ModuleError::Failed { module, reason: "busy".into() };
         assert_eq!(unreadable.plain(), "SmbusI801.bin could not be read: access denied");
         assert_eq!(failed.plain(), "PawnIO could not load SmbusI801.bin: busy");
-        let files: Vec<&str> = [Module::IntelMsr, Module::AmdFamily17, Module::LpcIo, module]
-            .map(Module::file_name)
-            .to_vec();
-        assert_eq!(files, ["IntelMSR.bin", "AMDFamily17.bin", "LpcIO.bin", "SmbusI801.bin"]);
+        let files: Vec<&str> =
+            [Module::IntelMsr, Module::AmdFamily17, Module::LpcIo, module, Module::IntelPchThermal]
+                .map(Module::file_name)
+                .to_vec();
+        assert_eq!(
+            files,
+            [
+                "IntelMSR.bin",
+                "AMDFamily17.bin",
+                "LpcIO.bin",
+                "SmbusI801.bin",
+                "IntelPCHThermal.bin"
+            ]
+        );
     }
 
     #[test]
@@ -983,7 +1115,10 @@ mod tests {
         // Whatever the machine has installed, a directory without modules
         // yields features that are all unavailable and nothing to sample.
         let probe = probe(Path::new("a-directory-that-does-not-exist"));
-        assert_eq!(keys(&probe), ["cpu-sensors", "board-sensors", "memory-sensors", "fan-control"]);
+        assert_eq!(
+            keys(&probe),
+            ["cpu-sensors", "board-sensors", "memory-sensors", "chipset-sensors", "fan-control"]
+        );
         assert!(probe.providers.is_empty());
         assert!(
             probe.features.iter().all(|feature| !feature.available && !feature.detail.is_empty())
@@ -1078,11 +1213,11 @@ mod tests {
         );
         assert_eq!(probe.info.len(), 1);
         assert_eq!(probe.info[0].title, "DIMM 0");
-        assert_eq!(probe.providers.len(), 3);
+        assert_eq!(probe.providers.len(), 4);
         let declared: usize = probe.providers.iter().map(|provider| provider.sensors().len()).sum();
         assert_eq!(sample_all(&mut probe), declared);
-        let dimm = probe.providers.last().expect("the memory provider is last");
-        let specs = dimm.sensors();
+        // Processor, board, memory, chipset.
+        let specs = probe.providers[2].sensors();
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].key, "memory.dimm0.temp");
     }
@@ -1111,7 +1246,7 @@ mod tests {
         assert!(!memory.available);
         assert!(memory.detail.contains("0 with a temperature sensor"), "{}", memory.detail);
         assert_eq!(probe.info.len(), 1);
-        assert_eq!(probe.providers.len(), 2);
+        assert_eq!(probe.providers.len(), 3);
     }
 
     #[test]
@@ -1129,5 +1264,109 @@ mod tests {
             memory.detail
         );
         assert!(feature(&probe, BOARD_SENSORS).available);
+    }
+
+    // -- chipset ------------------------------------------------------------
+
+    #[test]
+    fn the_chipset_provider_is_last_and_declares_one_chipset_temperature() {
+        let probe = probe_with(&ReplayPlatform::reference());
+        let chipset = probe.providers.last().expect("the chipset provider is last");
+        let specs = chipset.sensors();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].key, "chipset.temp");
+        assert_eq!(specs[0].device, "Chipset");
+    }
+
+    #[test]
+    fn a_chipset_on_the_pwrm_route_reads_whole_degrees() {
+        let platform = ReplayPlatform {
+            pch: (
+                PchRoute::FixedPwrm,
+                vec![0x8000_0231],
+                describe_identity([2, 0x7F0C_8086, 0x1F00, 0xFE00_0000, 0x2000]),
+            ),
+            ..ReplayPlatform::reference()
+        };
+        let probe = probe_with(&platform);
+        let chipset = feature(&probe, CHIPSET_SENSORS);
+        assert!(chipset.available, "{chipset:?}");
+        assert_eq!(
+            chipset.detail,
+            "Intel PCH 8086:7F0C at PCI 00:1f.0, fixed PWRM window at 0xfe000000 (8192 bytes), \
+             reads 49.0 °C"
+        );
+    }
+
+    #[test]
+    fn a_machine_without_a_chipset_thermal_function_says_so_and_spares_the_rest() {
+        let platform = ReplayPlatform::reference().with_module_error(
+            Module::IntelPchThermal,
+            ModuleError::Refused { module: Module::IntelPchThermal },
+        );
+        let probe = probe_with(&platform);
+        let chipset = feature(&probe, CHIPSET_SENSORS);
+        assert!(!chipset.available);
+        assert_eq!(
+            chipset.detail,
+            "PawnIO's IntelPCHThermal.bin found no supported chipset thermal sensor, or its \
+             function is not decoding memory"
+        );
+        assert!(feature(&probe, CPU_SENSORS).available);
+        assert!(feature(&probe, BOARD_SENSORS).available);
+        assert_eq!(probe.providers.len(), 2);
+    }
+
+    #[test]
+    fn a_missing_chipset_module_file_names_the_file_and_the_fetch_command() {
+        let platform = ReplayPlatform::reference().with_module_error(
+            Module::IntelPchThermal,
+            ModuleError::FileMissing { module: Module::IntelPchThermal },
+        );
+        let probe = probe_with(&platform);
+        assert_eq!(
+            feature(&probe, CHIPSET_SENSORS).detail,
+            "IntelPCHThermal.bin is missing from the modules folder; run `cargo xtask \
+             fetch-modules`"
+        );
+    }
+
+    #[test]
+    fn a_chipset_register_that_holds_no_reading_is_unavailable_and_names_the_raw_value() {
+        let platform = ReplayPlatform {
+            pch: (PchRoute::PciBar0, vec![0xFFFF], "Intel PCH example".to_owned()),
+            ..ReplayPlatform::reference()
+        };
+        let probe = probe_with(&platform);
+        let chipset = feature(&probe, CHIPSET_SENSORS);
+        assert!(!chipset.available);
+        assert_eq!(
+            chipset.detail,
+            "The chipset temperature could not be read: (PCH thermal): expected a register value \
+             that decodes to 0..=125 °C | received: 0xffff on the PCI thermal BAR0 route"
+        );
+        assert_eq!(probe.providers.len(), 2);
+    }
+
+    #[test]
+    fn a_held_pci_bus_leaves_the_chipset_unavailable_and_the_rest_alone() {
+        let platform = ReplayPlatform {
+            locks: Arc::new(FakeBusLocks::held_by_another_program(&[BusKind::Pci])),
+            ..ReplayPlatform::reference()
+        };
+        let probe = probe_with(&platform);
+        let chipset = feature(&probe, CHIPSET_SENSORS);
+        assert!(!chipset.available);
+        assert!(
+            chipset.detail.starts_with("The chipset's thermal sensor could not be looked up: "),
+            "(chipset-sensors): {}",
+            chipset.detail
+        );
+        assert!(
+            !platform.loaded().contains(&"IntelPCHThermal.bin"),
+            "the module is not loaded without the PCI mutex"
+        );
+        assert!(feature(&probe, BOARD_SENSORS).available);
+        assert_eq!(platform.locks.live_guards(), 0);
     }
 }
