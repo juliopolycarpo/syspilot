@@ -70,7 +70,7 @@ fn per_unit_readings(
 ) -> View {
     if app.level() == ViewLevel::Simple {
         return widgets::caption(format!(
-            "{} more readings (each thread and core, raw board inputs) are listed at the Advanced level.",
+            "{} more readings are listed at the Advanced level.",
             sensors.len()
         ))
         .into();
