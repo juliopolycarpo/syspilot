@@ -41,7 +41,7 @@ to no cost when nobody is looking.
 - Windows 10 or 11, x64.
 - Administrator rights to install the service and to change settings.
 - Optional: the [PawnIO](https://pawnio.eu/) driver for sensors that need
-  hardware access (CPU temperatures, fan speeds, memory temperatures). SysPilot
+  hardware access (CPU, chipset and memory temperatures, fan speeds). SysPilot
   does not ship or install the driver. Without it everything else works and the
   features that need it are shown as unavailable.
 
@@ -197,7 +197,7 @@ everything they create. See [CONTRIBUTING.md](CONTRIBUTING.md).
 - [x] Enforcement engine with exact revert and contested handling
 - [x] Service, installer and command line
 - [x] Sourced tweak catalog
-- [x] Sensor providers (operating system, GPU, storage; CPU and board through PawnIO)
+- [x] Sensor providers (operating system, GPU, storage; CPU, board and chipset through PawnIO)
 - [x] Desktop app with Simple and Advanced levels
 - [x] Sensor logging to CSV from the app
 - [x] Package, install and uninstall scripts
