@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 
 use syspilot_hw::{Hub, Provider};
 use syspilot_proto::frame::{FrameError, write_frame};
-use syspilot_proto::message::{DriverState, Feature, SystemInfo};
+use syspilot_proto::message::{DriverState, FanStatus, Feature, SystemInfo};
 use syspilot_proto::worker::{Probed, SAMPLE_REQUEST, WorkerFrame};
 
 /// The machine as the worker sees it: the inventory plus open providers.
@@ -33,6 +33,7 @@ pub fn run(
         features: machine.features,
         system: machine.system,
         sensors: hub.list().clone(),
+        fans: FanStatus::default(),
     };
     write_frame(&mut frames, &WorkerFrame::Probed(Box::new(probed)))?;
     // One byte at a time on purpose: each request is answered before the

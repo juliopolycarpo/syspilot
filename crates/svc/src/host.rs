@@ -15,7 +15,8 @@ use syspilot_engine::enforcer::{StateStore, TriggerEvent};
 use syspilot_hw::Hub;
 use syspilot_proto::Instance;
 use syspilot_proto::message::{
-    DriverState, ErrorCode, Event as ClientEvent, Request, Response, ServiceError, ServiceStatus,
+    DriverState, ErrorCode, Event as ClientEvent, FanStatus, Request, Response, ServiceError,
+    ServiceStatus,
 };
 use syspilot_proto::sensor::{SectionWriter, SensorList};
 use syspilot_proto::win::{MappedSection, SecurityDescriptor};
@@ -295,6 +296,7 @@ impl<S: StateStore + Clone + 'static> Host<S> {
             os_build: self.parts.os_build,
             log_dir: self.parts.log_dir.clone(),
             fan_control: self.core.fan_control(),
+            fans: FanStatus::default(),
             problems,
         }
     }

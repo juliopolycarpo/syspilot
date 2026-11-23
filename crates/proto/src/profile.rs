@@ -132,7 +132,8 @@ impl CurvePoint {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct FanCurve {
-    /// Fan channel key from the board catalog, e.g. `nct6779.fan2`.
+    /// The fan channel, named by the key of its duty sensor, e.g.
+    /// `board.pwm2`. The board catalog lists the channels of a board.
     pub channel: String,
     /// Whether the curve is active. An inactive curve leaves the channel
     /// under BIOS control.
@@ -315,12 +316,30 @@ impl LoggingConfig {
     }
 }
 
+/// Prefix of a fan channel key: the key of the duty sensor, `board.pwm<N>`.
+pub const FAN_CHANNEL_PREFIX: &str = "board.pwm";
+
 impl FanCurve {
+    /// The chip's duty output the channel names (`board.pwm2` is output 2),
+    /// or `None` when the key does not have that shape.
+    pub fn pwm_output(&self) -> Option<u8> {
+        let digits = self.channel.strip_prefix(FAN_CHANNEL_PREFIX)?;
+        // Digits only: `+2` and ` 2` parse as numbers but are not keys.
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        digits.parse().ok().filter(|output| *output > 0)
+    }
+
     /// Checks that the curve is well formed and can never stop a fan.
     pub fn validate(&self) -> Result<(), ProfileError> {
         let location = |field: &str| format!("fan[{}].{field}", self.channel);
-        if self.channel.trim().is_empty() {
-            return Err(invalid("fan.channel".into(), "a channel key", &self.channel));
+        if self.pwm_output().is_none() {
+            return Err(invalid(
+                "fan.channel".into(),
+                "a channel key like board.pwm2",
+                &self.channel,
+            ));
         }
         if self.sources.is_empty() || self.sources.iter().any(|source| source.trim().is_empty()) {
             return Err(invalid(location("sources"), "at least one sensor key", "none"));
@@ -384,7 +403,7 @@ interval-secs = 10
 sensors = ["cpu.package.temp"]
 
 [[fan]]
-channel = "nct6779.fan2"
+channel = "board.pwm2"
 sources = ["cpu.package.temp", "gpu0.temp"]
 points = [[40, 30], [60, 50], [80, 100]]
 "#;
@@ -470,7 +489,7 @@ points = [[40, 30], [60, 50], [80, 100]]
         let error = profile.validate().unwrap_err();
         assert_eq!(
             error.to_string(),
-            "(profile.fan[nct6779.fan2].points): expected strictly increasing temperatures | \
+            "(profile.fan[board.pwm2].points): expected strictly increasing temperatures | \
              received: \"60 then 60\""
         );
     }
@@ -479,7 +498,7 @@ points = [[40, 30], [60, 50], [80, 100]]
     fn fan_curve_must_reach_full_speed() {
         let mut profile = Profile::parse(SAMPLE).unwrap();
         profile.fans[0].points = vec![CurvePoint(40, 30), CurvePoint(80, 90)];
-        assert_eq!(invalid_location(&profile), "fan[nct6779.fan2].points");
+        assert_eq!(invalid_location(&profile), "fan[board.pwm2].points");
     }
 
     #[test]
@@ -487,5 +506,36 @@ points = [[40, 30], [60, 50], [80, 100]]
         let mut profile = Profile::parse(SAMPLE).unwrap();
         profile.fans.push(profile.fans[0].clone());
         assert_eq!(invalid_location(&profile), "fan");
+    }
+
+    #[test]
+    fn a_channel_key_names_a_duty_output() {
+        let curve = |channel: &str| FanCurve {
+            channel: channel.into(),
+            ..Profile::parse(SAMPLE).unwrap().fans.remove(0)
+        };
+        assert_eq!(curve("board.pwm2").pwm_output(), Some(2));
+        assert_eq!(curve("board.pwm12").pwm_output(), Some(12));
+        for bad in [
+            "",
+            "board.pwm",
+            "board.pwm0",
+            "board.pwm+2",
+            "board.fan2",
+            "nct6779.fan2",
+            "board.pwm2 ",
+        ] {
+            assert_eq!(
+                curve(bad).pwm_output(),
+                None,
+                "(fan channel): expected {bad:?} to be refused"
+            );
+        }
+        let mut profile = Profile::parse(SAMPLE).unwrap();
+        profile.fans[0].channel = "nct6779.fan2".into();
+        assert_eq!(
+            profile.validate().unwrap_err().to_string(),
+            "(profile.fan.channel): expected a channel key like board.pwm2 | received: \"nct6779.fan2\""
+        );
     }
 }

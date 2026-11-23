@@ -109,8 +109,8 @@ impl Worker {
     fn probed(&mut self) -> Result<Probed, String> {
         match self.frames.recv_timeout(PROBE_TIMEOUT) {
             Ok(WorkerFrame::Probed(probed)) => Ok(*probed),
-            Ok(WorkerFrame::Sample(_)) => {
-                Err("(sensor worker): expected its report first | received: a sample".into())
+            Ok(WorkerFrame::Sample(_) | WorkerFrame::Fans(_)) => {
+                Err("(sensor worker): expected its report first | received: another frame".into())
             }
             Err(RecvTimeoutError::Timeout) => Err(format!(
                 "(sensor worker): expected a report within {} s | received: nothing",
@@ -127,7 +127,9 @@ impl Worker {
     fn probed_by_now(&mut self) -> Option<Option<Probed>> {
         match self.frames.try_recv() {
             Ok(WorkerFrame::Probed(probed)) => Some(Some(*probed)),
-            Ok(WorkerFrame::Sample(_)) | Err(TryRecvError::Disconnected) => Some(None),
+            Ok(WorkerFrame::Sample(_) | WorkerFrame::Fans(_)) | Err(TryRecvError::Disconnected) => {
+                Some(None)
+            }
             Err(TryRecvError::Empty) => None,
         }
     }
@@ -496,6 +498,7 @@ mod tests {
                 devices: vec![DeviceInfo { name: "Fake".into(), class: DeviceClass::Cpu }],
                 sensors: vec![sensor(0, "cpu.temp", false), sensor(1, "board.temp", true)],
             },
+            fans: Default::default(),
         }
     }
 

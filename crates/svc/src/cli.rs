@@ -632,6 +632,7 @@ mod tests {
             os_build: 26100,
             log_dir: r"C:\ProgramData\SysPilot\logs".into(),
             fan_control: false,
+            fans: Default::default(),
             problems: vec!["Settings could not be saved to disk: disk full".into()],
         }
     }

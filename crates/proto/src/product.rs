@@ -13,7 +13,7 @@ pub const PRODUCT_NAME: &str = "SysPilot";
 
 /// Version of the IPC protocol. Bumped on any incompatible change to the
 /// message types or the sensor section layout.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Longest accepted instance name.
 const INSTANCE_NAME_MAX: usize = 48;

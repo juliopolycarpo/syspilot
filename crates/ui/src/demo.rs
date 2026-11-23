@@ -11,8 +11,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use syspilot_proto::action::{Action, RegData, RegistryAction, Scope};
 use syspilot_proto::catalog::Catalog;
 use syspilot_proto::message::{
-    ActionState, ActionStatus, DriverState, EntryStatus, Feature, HistoryEvent, HistoryKind,
-    InfoSection, Request, ServiceStatus, SystemInfo, SystemSummary,
+    ActionState, ActionStatus, DriverState, EntryStatus, FanStatus, Feature, HistoryEvent,
+    HistoryKind, InfoSection, Request, ServiceStatus, SystemInfo, SystemSummary,
 };
 use syspilot_proto::profile::{CustomAction, Profile};
 use syspilot_proto::sensor::{DeviceClass, DeviceInfo, Sample, SensorInfo, SensorKind, SensorList};
@@ -397,6 +397,7 @@ fn status(scenario: Scenario) -> ServiceStatus {
         os_build: 26_200,
         log_dir: r"C:\ProgramData\SysPilot\logs".into(),
         fan_control: false,
+        fans: FanStatus::default(),
         problems: Vec::new(),
     }
 }

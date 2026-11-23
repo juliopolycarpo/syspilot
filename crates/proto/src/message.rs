@@ -336,6 +336,99 @@ pub struct Feature {
     pub detail: String,
 }
 
+/// Whether SysPilot may drive the fans of this machine, and if not, why.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum FanAvailability {
+    /// This build has no fan control: the `fan-control` cargo feature is off,
+    /// as in every release.
+    #[default]
+    NotInBuild,
+    /// Fan speeds are shown and nothing is written.
+    ReadOnly {
+        /// Why, in words for the user: PawnIO is missing, the board is not in
+        /// the catalog, or its entry has not been validated.
+        reason: String,
+    },
+    /// The board's entry is validated, the driver works and curves in the
+    /// profile are followed.
+    Controllable,
+}
+
+/// Where a fan channel stands. Mirrors the controller's phases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum FanPhase {
+    /// The BIOS controls the channel.
+    #[default]
+    Bios,
+    /// SysPilot holds the channel in manual mode and follows its curve.
+    Manual,
+    /// A temperature source failed, so the fan is held at 100 %.
+    FailSafe,
+    /// Handing the channel back to the BIOS failed and is retried.
+    ReleasePending,
+    /// Found in manual mode with no saved original; left alone.
+    Blocked,
+}
+
+/// One fan output of the board: what the catalog says about it, what the
+/// profile asks of it and what the controller is doing.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct FanChannelStatus {
+    /// The channel key, `board.pwm<N>`: the key of its duty sensor. A profile
+    /// curve names the channel by this key.
+    pub channel: String,
+    /// The header's name on the board, from the catalog entry. The key when
+    /// the board has no entry.
+    pub label: String,
+    /// The key of the tachometer sensor of the fan on this output, when the
+    /// catalog entry names its input, e.g. `board.fan2`.
+    pub tach_sensor: Option<String>,
+    /// The lowest duty the catalog entry allows, percent; 0 when unknown.
+    pub min_duty_pct: u8,
+    /// The profile's curve for this channel: temperature and duty points.
+    /// Empty when the profile has none.
+    pub curve: Vec<crate::profile::CurvePoint>,
+    /// Sensor keys that drive the curve; the hottest wins.
+    pub sources: Vec<String>,
+    /// Whether the controller follows the curve: the profile enables it and
+    /// the board is [`FanAvailability::Controllable`].
+    pub active: bool,
+    /// The duty the controller last asked for, percent. `None` while the
+    /// BIOS holds the channel.
+    pub target_duty_pct: Option<u8>,
+    /// Where the channel stands.
+    pub phase: FanPhase,
+    /// The last thing that went wrong with this channel, if it is still so.
+    pub problem: Option<String>,
+}
+
+/// Fan control as the service sees it. Part of [`ServiceStatus`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct FanStatus {
+    /// Whether curves are followed, and if not why.
+    pub availability: FanAvailability,
+    /// The board as the catalog names it, e.g. `MACHINIST E5-MR9A PRO`; empty
+    /// when the machine's board is unknown.
+    pub board: String,
+    /// The board entry's channels and any profile curve on a channel the
+    /// entry does not list. Empty for a board that is not in the catalog.
+    pub channels: Vec<FanChannelStatus>,
+}
+
+/// What the controller does with one channel right now; the part of
+/// [`FanChannelStatus`] that changes while the service runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FanRuntime {
+    /// The channel key, as in [`FanChannelStatus::channel`].
+    pub channel: String,
+    /// Where the channel stands.
+    pub phase: FanPhase,
+    /// The duty last asked for, percent.
+    pub target_duty_pct: Option<u8>,
+    /// The last problem, if it is still so.
+    pub problem: Option<String>,
+}
+
 /// Answer to [`Request::Status`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceStatus {
@@ -364,6 +457,8 @@ pub struct ServiceStatus {
     /// Whether this build can drive fans. Off until fan control has been
     /// validated on real hardware.
     pub fan_control: bool,
+    /// What fan control does on this machine: channels, curves and phases.
+    pub fans: FanStatus,
     /// Things the user should know about, e.g. a profile that could not be
     /// read. Empty when all is well.
     pub problems: Vec<String>,
@@ -491,6 +586,47 @@ mod tests {
             Request::Shutdown,
         ];
         assert!(privileged.iter().all(Request::requires_elevation));
+    }
+
+    fn fan_status_with_every_availability() -> [FanStatus; 3] {
+        let channel = FanChannelStatus {
+            channel: "board.pwm2".into(),
+            label: "Fan 2".into(),
+            tach_sensor: Some("board.fan2".into()),
+            min_duty_pct: 30,
+            curve: vec![crate::profile::CurvePoint(40, 30), crate::profile::CurvePoint(80, 100)],
+            sources: vec!["cpu.package.temp".into()],
+            active: true,
+            target_duty_pct: Some(45),
+            phase: FanPhase::FailSafe,
+            problem: Some("(pwm2): expected a reading | received: none".into()),
+        };
+        let board = "MACHINIST E5-MR9A PRO".to_owned();
+        [
+            FanStatus {
+                availability: FanAvailability::Controllable,
+                board: board.clone(),
+                channels: vec![channel],
+            },
+            FanStatus {
+                availability: FanAvailability::ReadOnly { reason: "not validated".into() },
+                board,
+                channels: vec![],
+            },
+            FanStatus::default(),
+        ]
+    }
+
+    #[test]
+    fn the_fan_status_survives_the_wire_in_every_availability() {
+        for fans in fan_status_with_every_availability() {
+            assert_eq!(round_trip(&fans), fans);
+        }
+        assert_eq!(
+            FanStatus::default().availability,
+            FanAvailability::NotInBuild,
+            "(fan status): expected a build without the feature to be the default"
+        );
     }
 
     #[test]
