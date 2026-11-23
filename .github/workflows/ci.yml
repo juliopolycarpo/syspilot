@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# RUSTFLAGS is deliberately not set here: it would replace the flags in
+# .cargo/config.toml (static CRT) instead of adding to them.
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Format, lint, test, build
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      # rustup reads rust-toolchain.toml and installs the pinned toolchain
+      # with its components.
+      - name: Install the toolchain
+        run: rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # Hosted runners are elevated, which the service tests need. They
+      # install a service named SysPilot-Test and remove it again.
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Build release
+        run: cargo build --release --workspace --locked
+
+      - name: Check the service's size budget
+        shell: pwsh
+        run: |
+          $limit = 1.5MB
+          $exe = Get-Item target/x86_64-pc-windows-msvc/release/syspilot-svc.exe
+          "syspilot-svc.exe: {0:N0} bytes (budget {1:N0})" -f $exe.Length, $limit
+          if ($exe.Length -gt $limit) {
+            throw "syspilot-svc.exe is over its size budget. See docs/architecture/overhead.md."
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: syspilot-${{ github.sha }}
+          path: |
+            target/x86_64-pc-windows-msvc/release/syspilot-svc.exe
+          if-no-files-found: error
+          retention-days: 14
