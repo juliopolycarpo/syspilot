@@ -61,5 +61,6 @@ jobs:
           name: syspilot-${{ github.sha }}
           path: |
             target/x86_64-pc-windows-msvc/release/syspilot-svc.exe
+            target/x86_64-pc-windows-msvc/release/syspilot-sensors.exe
           if-no-files-found: error
           retention-days: 14
