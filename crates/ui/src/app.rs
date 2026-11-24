@@ -217,6 +217,8 @@ pub enum Message {
     Unfold(String, bool),
     /// The details of a tweak, by id, were opened or closed.
     ShowDetails(String, bool),
+    /// The navigation pane was opened or closed.
+    PaneOpen(bool),
     /// A sensor, by key, was hidden from the Sensors page (`true`) or
     /// shown again.
     HideSensor(String, bool),
@@ -294,6 +296,8 @@ pub struct App {
     pub unfolded: HashSet<String>,
     /// Tweaks whose details are open at the Advanced level.
     pub details_open: HashSet<String>,
+    /// Whether the navigation pane is open, once the view has said so.
+    pane_open: Option<bool>,
 }
 
 /// Records an expander being opened or closed. An expander must be told
@@ -576,6 +580,7 @@ impl Component for App {
             form: CustomForm::default(),
             unfolded: HashSet::new(),
             details_open: HashSet::new(),
+            pane_open: None,
         };
         app.go(Page::Home);
         app.go(launch.page);
@@ -672,6 +677,7 @@ impl Component for App {
             Message::FormText(field, text) => self.form.set_text(field, text),
             Message::Unfold(device, open) => set_open(&mut self.unfolded, device, open),
             Message::ShowDetails(id, open) => set_open(&mut self.details_open, id, open),
+            Message::PaneOpen(open) => self.pane_open = Some(open),
             Message::HideSensor(key, hide) => {
                 let hidden = &mut self.preferences.hidden_sensors;
                 let changed = if hide { hidden.insert(key) } else { hidden.remove(&key) };
@@ -774,6 +780,10 @@ impl Component for App {
             .is_settings_visible(false)
             .always_show_header(false)
             .on_selected_tag_changed(context.callback(Message::Navigate))
+            // Left unset until the view reports it, so that it starts the way
+            // the window's width suggests, then echoed (see `set_open`).
+            .is_pane_open(self.pane_open)
+            .on_is_pane_open_changed(context.callback(Message::PaneOpen))
             .grid_row(1)
             .slots([
                 SlotView::collection(NavigationViewSlot::MenuItems, menu),
