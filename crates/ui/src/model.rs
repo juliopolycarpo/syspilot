@@ -456,19 +456,27 @@ impl Trends {
     /// sample count, not to the window, so a point never changes once drawn
     /// and the line moves only when a bucket completes. A bucket without a
     /// single reading is a gap.
+    ///
+    /// The oldest bucket may have lost samples to the window; it is averaged
+    /// over what is left rather than dropped, so the number of points (and
+    /// with it every segment's position) does not change between two
+    /// completed buckets.
     pub fn chart_points(&self, id: u32) -> Vec<Option<f64>> {
         let values = self.series(id);
+        if values.is_empty() {
+            return Vec::new();
+        }
         let size = CHART_BUCKET as u64;
         let end = self.pushes;
-        let first = end.saturating_sub(values.len() as u64);
-        let start = first.div_ceil(size) * size;
-        (start..end)
+        let first = end - values.len() as u64;
+        let start = first - first % size;
+        let complete_end = end - end % size;
+        (start..complete_end)
             .step_by(CHART_BUCKET)
-            .take_while(|bucket| bucket + size <= end)
             .map(|bucket| {
-                let from = (bucket - first) as usize;
-                let known: Vec<f64> =
-                    values[from..from + CHART_BUCKET].iter().flatten().copied().collect();
+                let from = (bucket.max(first) - first) as usize;
+                let to = (bucket + size - first) as usize;
+                let known: Vec<f64> = values[from..to].iter().flatten().copied().collect();
                 (!known.is_empty()).then(|| known.iter().sum::<f64>() / known.len() as f64)
             })
             .collect()
@@ -1157,22 +1165,25 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
     }
 
     #[test]
-    fn chart_points_drop_the_half_bucket_that_left_the_window() {
+    fn chart_points_keep_their_count_while_the_oldest_bucket_leaves_the_window() {
         let mut trends = Trends::default();
-        for second in 0..(TREND_LEN + 1) {
+        for second in 0..TREND_LEN {
             trends.push(1, &[Sample { id: 0, value: Some(second as f64) }]);
         }
-        // Samples 1..=60 are kept; bucket 0-1 lost sample 0, bucket 60-61 is half full.
+        let full = trends.chart_points(0);
+        assert_eq!(full.len(), CHART_POINTS);
+
+        // Samples 1..=60 are kept: bucket 0-1 lost sample 0, bucket 60-61 is half full.
+        trends.push(1, &[Sample { id: 0, value: Some(TREND_LEN as f64) }]);
         let points = trends.chart_points(0);
         assert_eq!(
             points.len(),
-            CHART_POINTS - 1,
-            "(points with sample 0 gone): expected {} | received: {}",
-            CHART_POINTS - 1,
+            CHART_POINTS,
+            "(points with sample 0 gone): expected {CHART_POINTS} | received: {}",
             points.len()
         );
-        assert_eq!(points.first(), Some(&Some(2.5)), "(oldest point): expected samples 2 and 3");
-        assert_eq!(points.last(), Some(&Some(58.5)), "(newest point): expected samples 58 and 59");
+        assert_eq!(points[0], Some(1.0), "(oldest point): expected what is left, sample 1");
+        assert_eq!(points[1..], full[1..], "the other points are unchanged, so nothing moves");
         assert!(trends.chart_points(9).is_empty(), "an unknown sensor has no points");
     }
 
