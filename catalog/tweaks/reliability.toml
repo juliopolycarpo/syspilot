@@ -79,3 +79,61 @@ source = "https://learn.microsoft.com/windows/client-management/mdm/policy-csp-s
 
 [[tweak.action]]
 registry = { scope = "machine", key = 'Software\Policies\Microsoft\Windows\StorageSense', name = "AllowStorageSenseGlobal", data = { dword = 1 } }
+
+[[tweak]]
+id = "reliability.crash-no-auto-restart"
+title = "Do not restart automatically after a system crash"
+summary = "After a system crash, Windows stays on the error screen so you can read the stop code instead of restarting at once."
+detail = '''Sets HKLM\System\CurrentControlSet\Control\CrashControl\AutoReboot (REG_DWORD) to 0. Microsoft documents this value as the "Automatically restart" option under Startup and Recovery: it is on by default and is turned off by setting AutoReboot to 0. The memory dump is still written as set by CrashDumpEnabled.'''
+level = "advanced"
+category = "reliability"
+side-effects = "A PC that nobody watches stays stopped after a crash until someone restarts it by hand."
+reboot = "restart"
+source = "https://learn.microsoft.com/troubleshoot/windows-client/performance/configure-system-failure-and-recovery-options"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'System\CurrentControlSet\Control\CrashControl', name = "AutoReboot", data = { dword = 0 } }
+
+[[tweak]]
+id = "reliability.keyboard-crash"
+title = "Allow forcing a crash from the keyboard"
+summary = "Holding the right Ctrl key and pressing Scroll Lock twice crashes the PC on purpose, so you can capture a dump of a frozen system."
+detail = '''Sets CrashOnCtrlScroll (REG_DWORD) to 1 under HKLM\System\CurrentControlSet\Services\i8042prt\Parameters (PS/2 keyboards) and HKLM\System\CurrentControlSet\Services\kbdhid\Parameters (USB keyboards). After a restart, holding the rightmost Ctrl key and pressing Scroll Lock twice makes Windows raise bug check 0xE2 (MANUALLY_INITIATED_CRASH) and write a crash dump unless crash dumps are turned off. Microsoft warns that the crash stops the system immediately and might lose data. The matching value for Hyper-V keyboards (hyperkbd\Parameters) is not set here.'''
+level = "advanced"
+category = "reliability"
+direction = "weakens"
+risk = "Anyone at the keyboard can crash this PC on purpose, and a key press by mistake stops it at once and loses unsaved work."
+side-effects = "A crash dump is written only if crash dumps are turned on."
+reboot = "restart"
+source = "https://learn.microsoft.com/windows-hardware/drivers/debugger/forcing-a-system-crash-from-the-keyboard"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'System\CurrentControlSet\Services\i8042prt\Parameters', name = "CrashOnCtrlScroll", data = { dword = 1 } }
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'System\CurrentControlSet\Services\kbdhid\Parameters', name = "CrashOnCtrlScroll", data = { dword = 1 } }
+
+[[tweak]]
+id = "reliability.user-mode-crash-dumps"
+title = "Save a full memory dump when an app crashes"
+summary = "When a program crashes, Windows saves a full memory dump of it that a developer can open in a debugger."
+detail = '''Sets HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\DumpType (REG_DWORD) to 2 (0 = custom dump, 1 = mini dump, 2 = full dump). Microsoft documents local dump collection as off by default and configured by the values under the LocalDumps key. Dumps go to %LOCALAPPDATA%\CrashDumps (DumpFolder default) and Windows keeps the newest 10 (DumpCount default). The feature works even when error reporting is off. It does not collect a dump for apps that do their own crash reporting or have automatic debugging set.'''
+level = "advanced"
+category = "reliability"
+side-effects = "Each crash writes a file as large as the app's memory, which can hold passwords and other private data the app had open."
+source = "https://learn.microsoft.com/windows/win32/wer/collecting-user-mode-dumps"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps', name = "DumpType", data = { dword = 2 } }
+
+[[tweak]]
+id = "reliability.disk-failure-prediction"
+title = "Keep disk failure prediction up to date"
+summary = "Windows keeps downloading updates to the model it uses to predict that a storage disk is about to fail."
+detail = '''Policy: Computer Configuration > Administrative Templates > System > Storage Health > Allow downloading updates to the Disk Failure Prediction Model. Sets HKLM\Software\Policies\Microsoft\Windows\StorageHealth\AllowDiskHealthModelUpdates (REG_DWORD) to 1 (allow). Allow is also the default, and not configured behaves as enabled, so the entry matters when another tool or policy turned the updates off. Applies to Windows 10 1709 and later and Windows 11.'''
+level = "advanced"
+category = "reliability"
+source = "https://learn.microsoft.com/windows/client-management/mdm/policy-csp-storage#allowdiskhealthmodelupdates"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'Software\Policies\Microsoft\Windows\StorageHealth', name = "AllowDiskHealthModelUpdates", data = { dword = 1 } }
