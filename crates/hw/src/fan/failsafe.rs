@@ -35,7 +35,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, Once, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 use crate::bus::BusError;
@@ -934,14 +934,62 @@ impl PanicRelease {
     }
 }
 
-/// Installs a panic hook that runs [`PanicRelease::release`] and then the
-/// hook that was installed before. The process calls this for each session;
-/// in release builds (`panic = "abort"`) the hook is the only thing that
+/// The release the process-wide panic hook runs: that of the session that is
+/// live now, or none. The slot is the only thing that holds a session's
+/// [`PanicRelease`] (and so its bus handle) besides the session itself, so
+/// replacing or clearing it is what lets a finished session's PawnIO handle
+/// go.
+static PANIC_SLOT: Mutex<Option<Arc<PanicRelease>>> = Mutex::new(None);
+
+/// Makes `release` the one the panic hook runs, replacing (and dropping)
+/// the previous one, and installs the hook the first time. There is one
+/// hook per process however many sessions come and go: the hook reads the
+/// slot when a panic happens, so it never holds a session itself.
+/// In release builds (`panic = "abort"`) the hook is the only thing that
 /// runs on a panic.
 pub fn install_panic_release(release: Arc<PanicRelease>) {
+    set_panic_slot(Some(release));
+    static HOOK: Once = Once::new();
+    HOOK.call_once(install_panic_hook);
+}
+
+/// Empties the slot if it still holds `release`: the session it belongs to
+/// ended. A newer session's release stays.
+pub fn remove_panic_release(release: &Arc<PanicRelease>) {
+    let mut slot = locked(&PANIC_SLOT);
+    if slot.as_ref().is_some_and(|installed| Arc::ptr_eq(installed, release)) {
+        let removed = slot.take();
+        // Dropped after the lock is free: dropping a release closes a bus.
+        drop(slot);
+        drop(removed);
+    }
+}
+
+fn set_panic_slot(release: Option<Arc<PanicRelease>>) {
+    let replaced = std::mem::replace(&mut *locked(&PANIC_SLOT), release);
+    drop(replaced);
+}
+
+/// Tests that touch the process-wide slot or deliberately panic on a thread
+/// (which runs the process-wide hook) hold this, so that one test's hook
+/// never restores another test's fans.
+#[cfg(test)]
+pub(crate) fn serialize_panic_hook_tests() -> MutexGuard<'static, ()> {
+    static SERIAL: Mutex<()> = Mutex::new(());
+    locked(&SERIAL)
+}
+
+/// Wraps the current panic hook with one that runs the slot's release first.
+fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        release.release();
+        // Bounded like everything else on this path: the slot lock is only
+        // held for a swap, but a hook must never be the thing that hangs.
+        let installed = locked_before(&PANIC_SLOT, Instant::now() + PANIC_LOCK_WAIT)
+            .and_then(|slot| slot.clone());
+        if let Some(release) = installed {
+            release.release();
+        }
         previous(info);
     }));
 }
@@ -2112,6 +2160,8 @@ may-stop = true
 
     #[test]
     fn the_panic_path_restores_even_when_the_controller_lock_is_poisoned() {
+        // Panics on a thread, which runs the process-wide hook.
+        let _serial = serialize_panic_hook_tests();
         let rig = controlled();
         let Rig { controller, channels, store, .. } = rig;
         let release = controller.panic_release();
@@ -2219,17 +2269,21 @@ may-stop = true
 
     #[test]
     fn an_installed_panic_hook_restores_the_fans_during_a_control_step_and_chains_on() {
+        let _serial = serialize_panic_hook_tests();
         let rig = controlled();
         let Rig { controller, channels, store, .. } = rig;
         let release = controller.panic_release();
         let shared = Arc::new(Mutex::new(controller));
 
+        // The hook is put on top of a witness directly, not through the
+        // once-only installer, so this test does not depend on whether
+        // another test installed the process's hook first.
         let chained = Arc::new(Mutex::new(false));
         let witness = chained.clone();
         let original_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |_| *witness.lock().unwrap() = true));
-        install_panic_release(release);
-
+        install_panic_hook();
+        set_panic_slot(Some(release));
         // The panic of issue 10: inside a step, with the controller locked.
         let step = shared.clone();
         let result = std::thread::spawn(move || {
@@ -2238,6 +2292,7 @@ may-stop = true
         })
         .join();
         std::panic::set_hook(original_hook);
+        set_panic_slot(None);
 
         assert!(result.is_err());
         let registers: Vec<_> = channels.iter().map(FakeFanChannel::registers).collect();
@@ -2248,5 +2303,67 @@ may-stop = true
         );
         assert_eq!(store.record("pwm1"), None);
         assert!(*chained.lock().unwrap(), "the previous hook still ran");
+    }
+
+    #[test]
+    fn installing_a_release_drops_the_previous_one_and_removing_it_empties_the_slot() {
+        let _serial = serialize_panic_hook_tests();
+        // A session's release outlives its controller only through the slot.
+        let first = {
+            let Rig { controller, .. } = controlled();
+            let release = controller.panic_release();
+            let weak = Arc::downgrade(&release);
+            install_panic_release(release);
+            weak
+        };
+        assert!(first.upgrade().is_some(), "the slot holds the live session's release");
+
+        let second = {
+            let Rig { controller, .. } = controlled();
+            let release = controller.panic_release();
+            let weak = Arc::downgrade(&release);
+            install_panic_release(release);
+            weak
+        };
+        assert!(
+            first.upgrade().is_none(),
+            "(panic slot): expected the replaced session's release (and its bus handle) dropped"
+        );
+
+        // The end of an older session, whose entry was replaced, must not
+        // empty the newer session's slot.
+        let older = controlled().controller.panic_release();
+        remove_panic_release(&older);
+        assert!(
+            second.upgrade().is_some(),
+            "(panic slot): expected another session's removal to leave this one installed"
+        );
+
+        // The controller of `second` is gone; only the slot holds its release,
+        // and removing it by identity empties the slot.
+        let held = locked(&PANIC_SLOT).clone().expect("the second release is installed");
+        remove_panic_release(&held);
+        drop(held);
+        drop(older);
+        assert!(
+            second.upgrade().is_none(),
+            "(panic slot): expected the removed session's release dropped"
+        );
+        assert!(locked(&PANIC_SLOT).is_none());
+    }
+
+    #[test]
+    fn a_panic_with_an_empty_slot_only_chains_to_the_previous_hook() {
+        let _serial = serialize_panic_hook_tests();
+        set_panic_slot(None);
+        let chained = Arc::new(Mutex::new(false));
+        let witness = chained.clone();
+        let original_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |_| *witness.lock().unwrap() = true));
+        install_panic_hook();
+        let result = std::thread::spawn(|| panic!("injected panic with no session")).join();
+        std::panic::set_hook(original_hook);
+        assert!(result.is_err());
+        assert!(*chained.lock().unwrap(), "the previous hook ran");
     }
 }

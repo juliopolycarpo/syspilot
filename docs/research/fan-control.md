@@ -104,6 +104,16 @@ leaves bank 0 selected, also when a step fails.
   hook, so the hook gives up after 250 ms; the record stays in
   `fan-originals.toml` and the next start restores it. A record the hook
   could not clear is harmless: the next start writes the same registers again.
+- **One hook per process, over a swappable slot.** `install_panic_release`
+  installs the hook the first time (a `Once`) and puts the session's
+  `PanicRelease` in a static slot; the hook reads the slot when a panic
+  happens. Each new plan puts its release in the slot, which drops the
+  previous one (and with it that session's duplicate bus handles and its
+  PawnIO handle); a session's `Drop` empties the slot if it still holds that
+  session's release, so a stopped worker does not keep a handle open. The
+  earlier design installed one hook per session, each holding its
+  controller, so every replaced session stayed open and a panic walked all
+  of them.
 - A missing, `None`, non-finite or implausible reading (outside -20 to
   125 degrees C), or a gap between ticks longer than the policy allows,
   drives the channels using that sensor to 100 % without ramping. Control is

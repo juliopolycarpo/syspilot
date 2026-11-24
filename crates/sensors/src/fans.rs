@@ -351,6 +351,31 @@ mod active {
         }
 
         #[test]
+        fn each_new_plan_drops_the_previous_sessions_bus_and_a_stop_drops_the_last() {
+            let (mut fans, handles) = fans_on_replay();
+            for plans in 1..=3 {
+                fans.set_plan(plan(vec![curve(true)]));
+                assert_eq!(
+                    handles.buses_still_open(),
+                    1,
+                    "(plan {plans}): expected only the live session's bus open | received a bus \
+                     kept alive by an earlier session"
+                );
+            }
+            fans.stop();
+            assert_eq!(
+                handles.buses_still_open(),
+                0,
+                "(stop): expected every bus closed | received one still held (a panic hook?)"
+            );
+
+            // A plan that leaves no session (nothing to follow) closes it too.
+            fans.set_plan(plan(vec![curve(true)]));
+            fans.set_plan(plan(Vec::new()));
+            assert_eq!(handles.buses_still_open(), 0);
+        }
+
+        #[test]
         fn a_new_plan_hands_the_fans_back_before_the_new_session_takes_them() {
             let (mut fans, handles) = fans_on_replay();
             fans.set_plan(plan(vec![curve(true)]));

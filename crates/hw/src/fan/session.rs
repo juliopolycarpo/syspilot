@@ -28,7 +28,7 @@ use super::board::{BoardChannel, ControlGrant};
 use super::curve::{Curve, CurvePoint, Readings, TemperatureSource};
 use super::failsafe::{
     ChannelEvent, ChannelPlan, Event, FailSafePolicy, FanChannel, FanController, OriginalStore,
-    PanicRelease, Phase, Tuning, install_panic_release,
+    PanicRelease, Phase, Tuning, install_panic_release, remove_panic_release,
 };
 use super::layout::channel_key;
 use super::nct677x::{Nct677xChannel, Nct677xFanBus};
@@ -286,8 +286,10 @@ impl FanSession {
     }
 
     /// Makes a panic anywhere in the process hand the fans back to the BIOS
-    /// (see [`install_panic_release`]). Called once by the process that
-    /// owns the session, not by the session itself: a hook is process-wide.
+    /// (see [`install_panic_release`]). Called by the process that owns the
+    /// session, not by the session itself: a hook is process-wide. The
+    /// process has one hook and one slot, so installing a session replaces
+    /// the previous session's entry, and dropping the session empties it.
     ///
     /// The hook restores from [`PanicRelease`], not from the controller: a
     /// panic during `tick`, `suspend` or `stop` runs the hook in the middle
@@ -381,6 +383,14 @@ impl FanSession {
     }
 }
 
+impl Drop for FanSession {
+    fn drop(&mut self) {
+        // The panic slot holds a session's release (and with it the bus
+        // handle) until told otherwise; a session that ends must let go.
+        remove_panic_release(&self.panic_release);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -390,7 +400,7 @@ mod tests {
     use crate::bus::{BusKind, FakeBusLocks, Fixture, SuperIoSlot};
     use crate::chips::nct67xx::Chip;
     use crate::fan::board::BoardCatalog;
-    use crate::fan::failsafe::{ControlSnapshot, StoreError};
+    use crate::fan::failsafe::{ControlSnapshot, StoreError, serialize_panic_hook_tests};
     use syspilot_proto::profile::CurvePoint as ProfilePoint;
 
     const BASE: u16 = 0x0A20;
@@ -688,6 +698,37 @@ may-stop = false
         let after = rig.fan_writes().len();
         steps(&mut session, Some(45.0), 3);
         assert_eq!(rig.fan_writes().len(), after, "nothing is written after the panic restore");
+    }
+
+    #[test]
+    fn a_replaced_or_ended_session_lets_go_of_its_bus_handle_despite_the_panic_hook() {
+        let _serial = serialize_panic_hook_tests();
+        let mut first_rig = Rig::new();
+        let mut second_rig = Rig::new();
+        // The bus holds one clone of the rig's bus lock; the rig the other.
+        let first_session = first_rig.start(&[curve("board.pwm1")]).unwrap();
+        first_session.install_panic_hook();
+        assert_eq!(Arc::strong_count(&first_rig.locks), 2, "setup: the session holds its bus");
+
+        // The process replaces the session: the new one is installed, and the
+        // old one is dropped.
+        let second_session = second_rig.start(&[curve("board.pwm1")]).unwrap();
+        second_session.install_panic_hook();
+        drop(first_session);
+        assert_eq!(
+            Arc::strong_count(&first_rig.locks),
+            1,
+            "(panic hook): expected the replaced session's bus handle dropped | received it still held"
+        );
+        assert_eq!(Arc::strong_count(&second_rig.locks), 2, "the live session keeps its own");
+
+        // A session that ends with nothing to replace it lets go too.
+        drop(second_session);
+        assert_eq!(
+            Arc::strong_count(&second_rig.locks),
+            1,
+            "(panic hook): expected the ended session's bus handle dropped | received it still held"
+        );
     }
 
     #[test]

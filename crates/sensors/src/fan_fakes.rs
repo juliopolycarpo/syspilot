@@ -2,7 +2,7 @@
 //! is replayed from a fixture, and nothing that touches a real driver.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use syspilot_hw::bus::replay::{ReplaySuperIo, SuperIoWrite, superio_hwm_key};
 use syspilot_hw::bus::{FakeBusLocks, Fixture, SuperIoSlot};
@@ -75,9 +75,16 @@ pub struct ReplayHandles {
     logs: Arc<Mutex<Vec<WriteLog>>>,
     directories: Arc<Mutex<Vec<String>>>,
     records: Records,
+    buses: Arc<Mutex<Vec<Weak<FakeBusLocks>>>>,
 }
 
 impl ReplayHandles {
+    /// How many of the buses the sessions opened are still held by anything:
+    /// a session, or a panic hook that kept one alive.
+    pub fn buses_still_open(&self) -> usize {
+        locked(&self.buses).iter().filter(|bus| bus.strong_count() > 0).count()
+    }
+
     /// The channels the store holds a saved original for.
     pub fn stored_channels(&self) -> Vec<String> {
         locked(&self.records).iter().map(|(id, _)| id.clone()).collect()
@@ -135,6 +142,10 @@ impl FanAccess for ReplayAccess {
         }
         let io = ReplaySuperIo::new(fixture);
         locked(&self.handles.logs).push(io.write_log());
+        // The bus lock stands for the open driver handle: the session's bus
+        // holds it, so it lives exactly as long as something holds the bus.
+        let locks = Arc::new(FakeBusLocks::free());
+        locked(&self.handles.buses).push(Arc::downgrade(&locks));
         let catalog = BoardCatalog::parse("test", BOARD).map_err(|error| error.to_string())?;
         let grant = catalog
             .offer("ACME", "TEST BOARD", Chip::Nct6779D)
@@ -151,7 +162,7 @@ impl FanAccess for ReplayAccess {
             &detected,
             curves,
             Box::new(io),
-            Arc::new(FakeBusLocks::free()),
+            locks,
             Box::new(SharedStore(self.handles.records.clone())),
         )
         .map_err(|error| error.to_string())
