@@ -287,16 +287,41 @@ pub fn page(title: &str, subtitle: &str, content: impl IntoIterator<Item = Keyed
     )
 }
 
-/// A small line chart of recent values, oldest on the left. Gaps (failed
-/// readings) are left open. `floor` and `ceiling` widen the scale so that a
-/// nearly flat series does not look dramatic.
-pub fn sparkline(
+/// Points a chart's coordinates are counted from before they all restart,
+/// so the numbers stay small.
+const CHART_REBASE: u64 = 4096;
+
+/// End points of one segment, in the strip's coordinates.
+type SegmentEnds = ((f64, f64), (f64, f64));
+
+/// Where a chart's segments go. `slots[k]` is the segment drawn by element
+/// `k`, or `None` for an element with nothing to draw (a gap, or a history
+/// shorter than the chart). The strip holding them is moved `shift` to the
+/// right and is `strip_width` wide.
+#[derive(Debug, PartialEq)]
+struct ChartLayout {
+    slots: Vec<Option<SegmentEnds>>,
+    shift: f64,
+    strip_width: f64,
+}
+
+/// Lays out `values`, the first of which is point number `first`.
+///
+/// The chart keeps a fixed set of line elements, one per slot, and never
+/// adds, removes or reorders them: the segment starting at point `n` is
+/// always drawn by slot `n % slots`, at an x that depends only on `n`. When
+/// a new point arrives the strip moves one step left and only the slot it
+/// reuses changes, instead of every segment moving (one property update
+/// per line per refresh was the app's main CPU cost). A change of scale
+/// still moves every segment, as it must.
+fn chart_layout(
+    first: u64,
     values: &[Option<f64>],
     slots: usize,
     (width, height): (f64, f64),
     (floor, ceiling): (Option<f64>, Option<f64>),
-    colour: Brush,
-) -> View {
+) -> ChartLayout {
+    let slots = slots.max(2);
     let known = values.iter().flatten();
     let low = known.clone().copied().fold(f64::INFINITY, f64::min);
     let high = known.copied().fold(f64::NEG_INFINITY, f64::max);
@@ -304,21 +329,60 @@ pub fn sparkline(
     let high = ceiling.map_or(high, |ceiling| high.max(ceiling));
     // A flat series still needs a scale; draw it through the middle.
     let span = if (high - low).abs() < f64::EPSILON { 1.0 } else { high - low };
-    let step = width / (slots.max(2) - 1) as f64;
-    // New values enter on the right, so a short history is right-aligned.
-    let offset = slots.saturating_sub(values.len());
-    let point = |index: usize, value: f64| {
-        let x = (offset + index) as f64 * step;
+    let step = width / (slots - 1) as f64;
+    let base = first - first % CHART_REBASE;
+    let point = |number: u64, value: f64| {
+        let x = (number - base) as f64 * step;
         let y = (height - 1.0) - (value - low) / span * (height - 2.0);
         (x, y)
     };
-    let segments = values.windows(2).enumerate().filter_map(|(index, pair)| {
-        let (from, to) = (pair[0]?, pair[1]?);
-        let ((x1, y1), (x2, y2)) = (point(index, from), point(index + 1, to));
-        let line = Line::new().x1(x1).y1(y1).x2(x2).y2(y2).stroke(colour).stroke_thickness(1.5);
-        Some(KeyedView::new(index.to_string(), line))
+    let mut layout_slots = vec![None; slots];
+    // At most `slots - 1` segments, on consecutive numbers: no two share a slot.
+    for (pair, number) in values.windows(2).zip(first..).take(slots - 1) {
+        if let (Some(from), Some(to)) = (pair[0], pair[1]) {
+            layout_slots[(number % slots as u64) as usize] =
+                Some((point(number, from), point(number + 1, to)));
+        }
+    }
+    // New values enter on the right, so a short history is right-aligned.
+    let offset = slots.saturating_sub(values.len()) as f64;
+    let shift = (offset - (first - base) as f64) * step;
+    // The strip reaches the chart's right edge. With no values the shift is
+    // past that edge; WinUI refuses a negative width, and nothing is drawn.
+    ChartLayout { slots: layout_slots, shift, strip_width: (width - shift).max(0.0) }
+}
+
+/// A small line chart of recent values, oldest on the left; `first` is the
+/// number of the first value (see [`crate::model::Trends::numbered_chart_points`]).
+/// Gaps (failed readings) are left open. `floor` and `ceiling` widen the
+/// scale so that a nearly flat series does not look dramatic.
+pub fn sparkline(
+    (first, values): (u64, &[Option<f64>]),
+    slots: usize,
+    (width, height): (f64, f64),
+    scale: (Option<f64>, Option<f64>),
+    colour: Brush,
+) -> View {
+    let layout = chart_layout(first, values, slots, (width, height), scale);
+    let lines = layout.slots.into_iter().enumerate().map(|(slot, segment)| {
+        let line = Line::new().stroke(colour).stroke_thickness(1.5);
+        // An unused slot keeps its element, invisible, so the set of
+        // elements never changes.
+        let line = match segment {
+            Some(((x1, y1), (x2, y2))) => line.x1(x1).y1(y1).x2(x2).y2(y2),
+            None => line.opacity(0.0),
+        };
+        KeyedView::new(slot.to_string(), line)
     });
-    Canvas::new().width(width).height(height).keyed_children(segments)
+    // The strip's right edge is always the chart's right edge, so it is
+    // right-aligned and only its width changes; moving it by margin left
+    // lines that did not change drawn in the wrong place.
+    let strip = Canvas::new()
+        .width(layout.strip_width)
+        .height(height)
+        .horizontal_alignment(HorizontalAlignment::Right)
+        .keyed_children(lines);
+    Grid::new().width(width).height(height).children((strip,))
 }
 
 /// Size of the dots on a curve's points.
@@ -393,6 +457,72 @@ mod tests {
     use super::*;
 
     const TONES: [Tone; 4] = [Tone::Neutral, Tone::Good, Tone::Caution, Tone::Bad];
+
+    /// The x range on screen of the segment drawn by `slot`.
+    fn on_screen(layout: &ChartLayout, slot: usize) -> (f64, f64) {
+        let ((x1, _), (x2, _)) = layout.slots[slot].expect("slot draws a segment");
+        (x1 + layout.shift, x2 + layout.shift)
+    }
+
+    #[test]
+    fn a_new_point_changes_one_slot_and_moves_the_strip_one_step() {
+        let scale = (Some(0.0), Some(100.0));
+        let (size, slots) = ((20.0, 10.0), 3);
+        let before = chart_layout(0, &[Some(10.0), Some(20.0), Some(30.0)], slots, size, scale);
+        let after = chart_layout(1, &[Some(20.0), Some(30.0), Some(40.0)], slots, size, scale);
+        let changed: Vec<usize> =
+            (0..slots).filter(|&slot| before.slots[slot] != after.slots[slot]).collect();
+        // One slot is always free: the leaving segment's slot empties and
+        // the new segment takes the free one. Two lines change, however long
+        // the chart.
+        assert_eq!(changed, [0, 2], "(changed slots): expected the leaving and the new one");
+        assert_eq!(
+            on_screen(&before, 1),
+            (10.0, 20.0),
+            "(segment 1 before): expected the right edge"
+        );
+        assert_eq!(on_screen(&after, 1), (0.0, 10.0), "(segment 1 after): expected one step left");
+        assert_eq!(
+            on_screen(&after, 2 % slots),
+            (10.0, 20.0),
+            "(segment 2): expected the right edge"
+        );
+    }
+
+    #[test]
+    fn a_short_history_is_right_aligned_and_gaps_leave_their_slot_empty() {
+        let values = [Some(1.0), None, Some(3.0), Some(4.0)];
+        let layout = chart_layout(0, &values, 6, (50.0, 10.0), (None, None));
+        let drawn: Vec<usize> = (0..6).filter(|&slot| layout.slots[slot].is_some()).collect();
+        assert_eq!(drawn, [2], "(drawn slots): expected only 3 → 4, around the failed reading");
+        assert_eq!(on_screen(&layout, 2), (40.0, 50.0), "(last segment): expected the right edge");
+    }
+
+    #[test]
+    fn the_strip_always_reaches_the_right_edge_and_is_never_negative() {
+        let values = vec![Some(1.0); 30];
+        for first in [0, 1, 29, CHART_REBASE - 1, CHART_REBASE + 3] {
+            let layout = chart_layout(first, &values, 30, (180.0, 28.0), (None, None));
+            let right_edge = layout.shift + layout.strip_width;
+            assert!(
+                (right_edge - 180.0).abs() < 1e-9,
+                "(strip right edge at point {first}): expected 180 | received: {right_edge}"
+            );
+        }
+        let empty = chart_layout(0, &[], 30, (180.0, 28.0), (None, None));
+        assert!(empty.slots.iter().all(Option::is_none));
+        assert_eq!(empty.strip_width, 0.0, "(strip width with no values): expected 0");
+    }
+
+    #[test]
+    fn coordinates_restart_every_few_thousand_points() {
+        let first = CHART_REBASE * 3 + 1;
+        let layout = chart_layout(first, &[Some(1.0), Some(2.0)], 2, (10.0, 10.0), (None, None));
+        let slot = (first % 2) as usize;
+        let ((x1, _), _) = layout.slots[slot].unwrap();
+        assert_eq!(x1, 10.0, "(x of point {first}): expected 1 step past the rebase");
+        assert_eq!(on_screen(&layout, slot), (0.0, 10.0));
+    }
 
     #[test]
     fn states_have_their_own_colours_in_both_schemes() {

@@ -461,17 +461,21 @@ impl Trends {
     /// over what is left rather than dropped, so the number of points (and
     /// with it every segment's position) does not change between two
     /// completed buckets.
-    pub fn chart_points(&self, id: u32) -> Vec<Option<f64>> {
+    ///
+    /// Also returns the number of the first point, counted in buckets since
+    /// the sensor set last changed, so a chart can give each point a place
+    /// that does not move when newer points arrive.
+    pub fn numbered_chart_points(&self, id: u32) -> (u64, Vec<Option<f64>>) {
         let values = self.series(id);
         if values.is_empty() {
-            return Vec::new();
+            return (0, Vec::new());
         }
         let size = CHART_BUCKET as u64;
         let end = self.pushes;
         let first = end - values.len() as u64;
         let start = first - first % size;
         let complete_end = end - end % size;
-        (start..complete_end)
+        let points = (start..complete_end)
             .step_by(CHART_BUCKET)
             .map(|bucket| {
                 let from = (bucket.max(first) - first) as usize;
@@ -479,7 +483,8 @@ impl Trends {
                 let known: Vec<f64> = values[from..to].iter().flatten().copied().collect();
                 (!known.is_empty()).then(|| known.iter().sum::<f64>() / known.len() as f64)
             })
-            .collect()
+            .collect();
+        (start / size, points)
     }
 
     /// Lowest and highest recent value of a sensor.
@@ -1141,6 +1146,11 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
         assert_eq!(trends.series(0), [Some(1.0)], "IDs of a new set mean other sensors");
     }
 
+    /// The points of a trend line, without their numbers.
+    fn chart_points(trends: &Trends, id: u32) -> Vec<Option<f64>> {
+        trends.numbered_chart_points(id).1
+    }
+
     #[test]
     fn chart_points_average_complete_buckets_and_only_move_when_one_completes() {
         let mut trends = Trends::default();
@@ -1148,17 +1158,17 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
             trends.push(1, &[Sample { id: 0, value }]);
         };
         push(&mut trends, Some(1.0));
-        assert!(trends.chart_points(0).is_empty(), "(1 sample): expected no complete bucket");
+        assert!(chart_points(&trends, 0).is_empty(), "(1 sample): expected no complete bucket");
         push(&mut trends, Some(3.0));
-        assert_eq!(trends.chart_points(0), [Some(2.0)]);
+        assert_eq!(chart_points(&trends, 0), [Some(2.0)]);
         push(&mut trends, None);
-        assert_eq!(trends.chart_points(0), [Some(2.0)], "a half bucket changes nothing");
+        assert_eq!(chart_points(&trends, 0), [Some(2.0)], "a half bucket changes nothing");
         push(&mut trends, Some(5.0));
-        assert_eq!(trends.chart_points(0), [Some(2.0), Some(5.0)], "a failed read is skipped");
+        assert_eq!(chart_points(&trends, 0), [Some(2.0), Some(5.0)], "a failed read is skipped");
         push(&mut trends, None);
         push(&mut trends, None);
         assert_eq!(
-            trends.chart_points(0),
+            chart_points(&trends, 0),
             [Some(2.0), Some(5.0), None],
             "an empty bucket is a gap"
         );
@@ -1170,12 +1180,12 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
         for second in 0..TREND_LEN {
             trends.push(1, &[Sample { id: 0, value: Some(second as f64) }]);
         }
-        let full = trends.chart_points(0);
+        let full = chart_points(&trends, 0);
         assert_eq!(full.len(), CHART_POINTS);
 
         // Samples 1..=60 are kept: bucket 0-1 lost sample 0, bucket 60-61 is half full.
         trends.push(1, &[Sample { id: 0, value: Some(TREND_LEN as f64) }]);
-        let points = trends.chart_points(0);
+        let points = chart_points(&trends, 0);
         assert_eq!(
             points.len(),
             CHART_POINTS,
@@ -1184,7 +1194,13 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
         );
         assert_eq!(points[0], Some(1.0), "(oldest point): expected what is left, sample 1");
         assert_eq!(points[1..], full[1..], "the other points are unchanged, so nothing moves");
-        assert!(trends.chart_points(9).is_empty(), "an unknown sensor has no points");
+        assert_eq!(trends.numbered_chart_points(0).0, 0, "(first point): expected bucket 0");
+
+        trends.push(1, &[Sample { id: 0, value: Some(61.0) }]);
+        let (first, points) = trends.numbered_chart_points(0);
+        assert_eq!(first, 1, "(first point after bucket 0 left): expected bucket 1");
+        assert_eq!(points.last(), Some(&Some(60.5)), "(newest point): expected samples 60 and 61");
+        assert!(chart_points(&trends, 9).is_empty(), "an unknown sensor has no points");
     }
 
     #[test]
