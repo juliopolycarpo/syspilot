@@ -81,8 +81,29 @@ leaves bank 0 selected, also when a step fails.
   record and is retried on every tick.
 - Stop, pre-shutdown, suspend, drop and a panic path restore the originals.
   The release profile has `panic = "abort"`, so `Drop` does not run on a
-  panic: `install_panic_release` wraps the panic hook and `release_on_panic`
-  restores from it, waiting at most 250 ms for the controller lock.
+  panic: `install_panic_release` wraps the panic hook and `PanicRelease`
+  restores from it.
+- **The panic path does not go through the controller.** A panic during
+  `tick`, `suspend` or `stop` runs the hook on the same thread in the middle
+  of the step, and the step holds the controller across its register I/O. A
+  hook that waited for the controller (the first design waited 250 ms and
+  gave up) leaves the channel in manual mode when the process then aborts.
+  Instead, each channel keeps its saved registers in a small shared record
+  (`Original`) that the controller sets before its first write to the channel
+  and clears after a confirmed restore; the controller hands the hook a
+  `PanicRelease` made of those records, a second handle on each channel's
+  output (`FanChannel::duplicate`, the same bus and the same allow-listed
+  writes) and the store behind a per-call lock (`SharedStore`). The hook
+  restores each channel that has a record and clears its stored record. None
+  of these three locks is held across register I/O (the bus lock is, for one
+  operation), and every wait in the hook, the bus lock included, is bounded
+  to 250 ms. The session owns its
+  controller outright, with no lock around it. One case remains: a panic
+  inside a bus transaction itself (not the driver returning an error, which is
+  an ordinary failure) leaves the bus lock held by the thread now running the
+  hook, so the hook gives up after 250 ms; the record stays in
+  `fan-originals.toml` and the next start restores it. A record the hook
+  could not clear is harmless: the next start writes the same registers again.
 - A missing, `None`, non-finite or implausible reading (outside -20 to
   125 degrees C), or a gap between ticks longer than the policy allows,
   drives the channels using that sensor to 100 % without ramping. Control is
@@ -151,7 +172,7 @@ neither.
   | The plan has no enabled curve | Restores the channels it holds and every channel the store still records, then holds no session (unless a restore failed and is being retried) |
   | The machine sleeps | Restores every channel at once and writes nothing until it wakes |
   | The machine wakes | Takes control again after a run of good readings |
-  | A panic in the worker | The panic hook restores from the controller (the release profile aborts) |
+  | A panic in the worker | The panic hook restores from the saved registers, without the controller (the release profile aborts) |
   | The worker is killed | Nothing runs. The chip keeps the last duty written, which is never below the minimum, until the next worker that gets a plan restores the BIOS mode from the saved registers, whatever the plan holds. No worker is started only for that: with no curve and no one looking at the sensors, the channel waits for the next one |
   | A restore fails | The record is kept and the restore is retried on every step |
 

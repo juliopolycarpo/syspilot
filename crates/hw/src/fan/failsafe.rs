@@ -10,8 +10,9 @@
 //!    [`OriginalStore`] (a file in the service, so it survives a crash) and
 //!    only then is the channel written.
 //! 2. **BIOS control comes back** on stop, before shutdown, on suspend and
-//!    from the panic path ([`release_on_panic`]); a restore that fails is
-//!    retried on every tick and keeps its record.
+//!    from the panic path ([`PanicRelease`], which does not need the
+//!    controller); a restore that fails is retried on every tick and keeps its
+//!    record.
 //! 3. **A sensor that fails drives its fans to 100 %**: a missing, `None`,
 //!    non-finite or implausible reading, or a gap between ticks so long that
 //!    the machine was probably asleep. Only the channels that use the sensor
@@ -29,12 +30,12 @@
 //!    ([`ChannelPlan::restore_only`]).
 //!
 //! The release profile builds with `panic = "abort"`, so `Drop` does not run
-//! on a panic there. The service has to install [`install_panic_release`];
+//! on a panic there. The process has to install [`install_panic_release`];
 //! this crate does not install a hook by itself.
 
 use std::collections::BTreeSet;
 use std::fmt;
-use std::sync::{Arc, Mutex, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 use crate::bus::BusError;
@@ -86,6 +87,11 @@ pub trait FanChannel: Send {
 
     /// Writes `original` back, handing the channel to the BIOS again.
     fn restore(&mut self, original: &ControlSnapshot) -> Result<(), BusError>;
+
+    /// A second handle on the same output, for the panic path
+    /// ([`PanicRelease`]): it must restore without anything the controller
+    /// holds across its own I/O, so it shares the bus and nothing else.
+    fn duplicate(&self) -> Box<dyn FanChannel>;
 }
 
 /// The store could not read or write a record.
@@ -280,8 +286,6 @@ pub enum ReleaseReason {
     Shutdown,
     /// The machine is about to sleep.
     Suspend,
-    /// A panic hook is releasing the fans.
-    Panic,
     /// The controller was dropped.
     Dropped,
     /// A crashed predecessor left a stored original.
@@ -358,6 +362,82 @@ pub enum Phase {
 }
 
 // ---------------------------------------------------------------------------
+// What the panic path shares with the controller
+// ---------------------------------------------------------------------------
+
+/// Locks `mutex` even if a panic poisoned it: everything behind the locks
+/// of this section stays consistent whichever thread panicked, because none
+/// of them is held across anything that can panic.
+fn locked<T: ?Sized>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Locks `mutex`, waiting until `deadline`; `None` when it is still taken
+/// then. A thread that holds the lock may be the one that panicked and is
+/// now running the hook, which would wait for itself forever.
+fn locked_before<T: ?Sized>(mutex: &Mutex<T>, deadline: Instant) -> Option<MutexGuard<'_, T>> {
+    loop {
+        match mutex.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(TryLockError::Poisoned(poisoned)) => return Some(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(TryLockError::WouldBlock) => return None,
+        }
+    }
+}
+
+/// A channel's saved BIOS registers, shared by the controller and the panic
+/// path. The lock is held only to copy or replace the value, never across
+/// register I/O, so the panic path can always read it.
+#[derive(Clone, Default)]
+struct Original(Arc<Mutex<Option<ControlSnapshot>>>);
+
+impl Original {
+    fn get(&self) -> Option<ControlSnapshot> {
+        locked(&self.0).clone()
+    }
+
+    fn set(&self, original: Option<ControlSnapshot>) {
+        *locked(&self.0) = original;
+    }
+}
+
+/// The controller's [`OriginalStore`], shared with the panic path. Each call
+/// takes the lock for that call alone, so the controller never holds it
+/// across register I/O.
+#[derive(Clone)]
+struct SharedStore(Arc<Mutex<Box<dyn OriginalStore>>>);
+
+impl SharedStore {
+    /// Forgets `channel`'s record, giving up at `deadline`. `false` when it
+    /// could not: the record stays, and the next start restores the same
+    /// registers again, which is harmless.
+    fn clear_before(&self, channel: &str, deadline: Instant) -> bool {
+        locked_before(&self.0, deadline).is_some_and(|mut store| store.clear(channel).is_ok())
+    }
+}
+
+impl OriginalStore for SharedStore {
+    fn load(&mut self, channel: &str) -> Result<Option<ControlSnapshot>, StoreError> {
+        locked(&self.0).load(channel)
+    }
+
+    fn save(&mut self, channel: &str, original: &ControlSnapshot) -> Result<(), StoreError> {
+        locked(&self.0).save(channel, original)
+    }
+
+    fn clear(&mut self, channel: &str) -> Result<(), StoreError> {
+        locked(&self.0).clear(channel)
+    }
+
+    fn channels(&mut self) -> Result<Vec<String>, StoreError> {
+        locked(&self.0).channels()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // One managed channel
 // ---------------------------------------------------------------------------
 
@@ -366,8 +446,9 @@ struct ManagedChannel {
     io: Box<dyn FanChannel>,
     phase: Phase,
     /// The saved BIOS registers while SysPilot holds the channel, or while a
-    /// restore is pending. Set before the first write.
-    original: Option<ControlSnapshot>,
+    /// restore is pending. Set before the first write. Shared with the panic
+    /// path, which restores from it without the controller.
+    original: Original,
     faults: u32,
     good_readings: u32,
 }
@@ -392,7 +473,7 @@ impl ManagedChannel {
 
     /// Whether the channel is, or may be, away from BIOS control.
     fn needs_release(&self) -> bool {
-        self.original.is_some()
+        self.original.get().is_some()
             || matches!(self.phase, Phase::Manual | Phase::FailSafe | Phase::ReleasePending)
     }
 
@@ -404,7 +485,7 @@ impl ManagedChannel {
         reason: ReleaseReason,
         out: &mut Vec<Event>,
     ) {
-        let Some(original) = self.original.clone() else {
+        let Some(original) = self.original.get() else {
             // Nothing was saved, so nothing was taken (a blocked channel was
             // never ours).
             if self.phase != Phase::Blocked {
@@ -424,7 +505,7 @@ impl ManagedChannel {
             });
         match restored {
             Ok(()) => {
-                self.original = None;
+                self.original.set(None);
                 self.phase = Phase::Bios;
                 self.say(out, ChannelEvent::Released { reason });
             }
@@ -484,7 +565,7 @@ impl ManagedChannel {
         };
         // Kept before the write, so any path that fails or panics from here
         // can restore it.
-        self.original = Some(original);
+        self.original.set(Some(original));
         match self.io.take_manual(duty) {
             Ok(()) => {
                 self.phase = Phase::Manual;
@@ -607,7 +688,7 @@ impl ManagedChannel {
         }
         match (stored, state) {
             (Some(stored), _) => {
-                self.original = Some(stored);
+                self.original.set(Some(stored));
                 self.release(store, ReleaseReason::Recovery, out);
             }
             (None, Some(state)) if state.manual => {
@@ -641,9 +722,10 @@ enum Mode {
 /// Drives a set of fan channels and keeps them safe.
 pub struct FanController {
     channels: Vec<ManagedChannel>,
-    store: Box<dyn OriginalStore>,
+    store: SharedStore,
     policy: FailSafePolicy,
     mode: Mode,
+    panic: Arc<PanicRelease>,
 }
 
 impl FanController {
@@ -664,18 +746,35 @@ impl FanController {
                 });
             }
         }
+        let store = SharedStore(Arc::new(Mutex::new(store)));
+        let mut for_panic = Vec::new();
         let channels = channels
             .into_iter()
-            .map(|(plan, io)| ManagedChannel {
-                plan,
-                io,
-                phase: Phase::Bios,
-                original: None,
-                faults: 0,
-                good_readings: 0,
+            .map(|(plan, io)| {
+                let original = Original::default();
+                for_panic.push(PanicChannel {
+                    id: plan.id.clone(),
+                    io: Mutex::new(io.duplicate()),
+                    original: original.clone(),
+                });
+                ManagedChannel {
+                    plan,
+                    io,
+                    phase: Phase::Bios,
+                    original,
+                    faults: 0,
+                    good_readings: 0,
+                }
             })
             .collect();
-        Ok(Self { channels, store, policy, mode: Mode::Running })
+        let panic = Arc::new(PanicRelease { channels: for_panic, store: store.clone() });
+        Ok(Self { channels, store, policy, mode: Mode::Running, panic })
+    }
+
+    /// The way back for a panic hook: restores every channel the controller
+    /// holds without taking the controller's lock. See [`PanicRelease`].
+    pub fn panic_release(&self) -> Arc<PanicRelease> {
+        self.panic.clone()
     }
 
     /// Where a channel stands; `None` for an id the controller does not manage.
@@ -688,7 +787,7 @@ impl FanController {
     pub fn recover(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
         for channel in &mut self.channels {
-            channel.recover(self.store.as_mut(), &mut events);
+            channel.recover(&mut self.store, &mut events);
         }
         events
     }
@@ -702,7 +801,7 @@ impl FanController {
             return events;
         }
         for channel in &mut self.channels {
-            channel.tick(self.store.as_mut(), &self.policy, readings, elapsed_seconds, &mut events);
+            channel.tick(&mut self.store, &self.policy, readings, elapsed_seconds, &mut events);
         }
         events
     }
@@ -711,7 +810,7 @@ impl FanController {
         let mut events = Vec::new();
         for channel in &mut self.channels {
             if channel.needs_release() {
-                channel.release(self.store.as_mut(), reason, &mut events);
+                channel.release(&mut self.store, reason, &mut events);
             }
         }
         events
@@ -749,12 +848,6 @@ impl FanController {
             }
         }
     }
-
-    /// The panic path: releases every channel at once, from whatever state
-    /// the controller was in, and never panics itself.
-    pub fn release_for_panic(&mut self) -> Vec<Event> {
-        self.release_all(ReleaseReason::Panic)
-    }
 }
 
 impl Drop for FanController {
@@ -769,43 +862,86 @@ impl Drop for FanController {
 // Panic path
 // ---------------------------------------------------------------------------
 
-/// How long [`release_on_panic`] waits for a controller another thread is
+/// How long the panic path waits for any lock or bus another thread is
 /// using. Short: the process is going down.
 const PANIC_LOCK_WAIT: Duration = Duration::from_millis(250);
 
-/// Releases the fans of `controller` from a panic hook. The mutex may be
-/// poisoned (the panic may have been inside the controller), which is fine:
-/// the saved originals do not depend on what the panicking step finished.
-/// When another thread holds the lock this waits a short while and then gives
-/// up, because a hook that blocks forever would keep the process alive with
-/// the fans left in manual mode. Returns whether the release ran.
-pub fn release_on_panic(controller: &Mutex<FanController>) -> bool {
-    let deadline = Instant::now() + PANIC_LOCK_WAIT;
-    loop {
-        match controller.try_lock() {
-            Ok(mut guard) => {
-                guard.release_for_panic();
-                return true;
+/// One channel as the panic path sees it: its own handle on the output and
+/// the saved registers it shares with the controller.
+struct PanicChannel {
+    id: String,
+    /// Locked only by the panic path, which can run on two threads at once
+    /// when two threads panic.
+    io: Mutex<Box<dyn FanChannel>>,
+    original: Original,
+}
+
+/// Hands every channel of one controller back to the BIOS from a panic hook,
+/// **without going through the controller**.
+///
+/// A panic during `tick`, `suspend` or `stop` runs the hook on the same
+/// thread, in the middle of the step: the controller is borrowed and a
+/// register may be half written (with `panic = "abort"` the hook is all that
+/// runs). A hook that reached the controller through a lock would wait on
+/// the very lock the step holds across its register I/O, give up and leave
+/// the channel in manual mode. So the hook gets what it needs from
+/// the controller beforehand, in three pieces that each sit behind their own
+/// lock, held only for an instant and never across register I/O: the
+/// channel's saved registers ([`Original`], copied or replaced), the
+/// channel's own duplicate handle on the bus ([`FanChannel::duplicate`]) and
+/// the store ([`SharedStore`], locked per call). The controller writes the
+/// saved registers before its first write to a channel, so whatever step
+/// panicked, a channel that may be away from the BIOS has its registers
+/// here.
+///
+/// Every wait is bounded by [`PANIC_LOCK_WAIT`]: a hook that blocks forever
+/// would keep the process alive with the fans in manual mode, which is worse
+/// than giving up. The one thing it cannot do is restore while the panicking
+/// thread itself is inside a bus transaction (the bus lock is held by the
+/// thread that is now running the hook); the saved registers stay in the
+/// store then and the next start restores them.
+pub struct PanicRelease {
+    channels: Vec<PanicChannel>,
+    store: SharedStore,
+}
+
+impl PanicRelease {
+    /// Restores every channel that has saved registers and clears its
+    /// record. Returns whether every such channel was restored. Never
+    /// panics: a failure leaves the record for the next start.
+    pub fn release(&self) -> bool {
+        self.release_within(PANIC_LOCK_WAIT)
+    }
+
+    fn release_within(&self, wait: Duration) -> bool {
+        let deadline = Instant::now() + wait;
+        let mut every_channel_restored = true;
+        for channel in &self.channels {
+            // Nothing saved means nothing taken, or already handed back.
+            let Some(original) = channel.original.get() else { continue };
+            let restored = locked_before(&channel.io, deadline)
+                .is_some_and(|mut io| io.restore(&original).is_ok());
+            if restored {
+                channel.original.set(None);
+                // Best effort: a record left behind restores the same
+                // registers again at the next start.
+                self.store.clear_before(&channel.id, deadline);
+            } else {
+                every_channel_restored = false;
             }
-            Err(TryLockError::Poisoned(poisoned)) => {
-                poisoned.into_inner().release_for_panic();
-                return true;
-            }
-            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            Err(TryLockError::WouldBlock) => return false,
         }
+        every_channel_restored
     }
 }
 
-/// Installs a panic hook that runs [`release_on_panic`] and then the hook that
-/// was installed before. The service calls this once; in release builds
-/// (`panic = "abort"`) the hook is the only thing that runs on a panic.
-pub fn install_panic_release(controller: Arc<Mutex<FanController>>) {
+/// Installs a panic hook that runs [`PanicRelease::release`] and then the
+/// hook that was installed before. The process calls this for each session;
+/// in release builds (`panic = "abort"`) the hook is the only thing that
+/// runs on a panic.
+pub fn install_panic_release(release: Arc<PanicRelease>) {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        release_on_panic(&controller);
+        release.release();
         previous(info);
     }));
 }
@@ -993,6 +1129,10 @@ mod tests {
                 }
             }
             Ok(())
+        }
+
+        fn duplicate(&self) -> Box<dyn FanChannel> {
+            Box::new(self.clone())
         }
     }
 
@@ -1275,12 +1415,11 @@ may-stop = true
     }
 
     #[test]
-    fn shutdown_suspend_and_the_panic_path_restore_the_bios_registers() {
+    fn shutdown_and_suspend_restore_the_bios_registers() {
         type Release = fn(&mut FanController) -> Vec<Event>;
-        let cases: [(Release, ReleaseReason); 3] = [
+        let cases: [(Release, ReleaseReason); 2] = [
             (FanController::prepare_shutdown, ReleaseReason::Shutdown),
             (FanController::suspend, ReleaseReason::Suspend),
-            (FanController::release_for_panic, ReleaseReason::Panic),
         ];
         for (release, reason) in cases {
             let mut rig = controlled();
@@ -1940,9 +2079,42 @@ may-stop = true
     // -- Panic path ------------------------------------------------------
 
     #[test]
-    fn the_panic_path_releases_the_fans_even_when_the_lock_is_poisoned() {
+    fn the_panic_path_restores_while_the_controller_lock_is_held() {
+        // A process that shares the controller behind a lock holds it across
+        // a control step's register I/O, and a panic inside the step runs the
+        // hook on that thread, lock still held. (The old hook gave up after
+        // 250 ms here and left the fans in manual mode.)
         let rig = controlled();
         let Rig { controller, channels, store, .. } = rig;
+        let release = controller.panic_release();
+        let shared = Arc::new(Mutex::new(controller));
+        let step_in_progress = shared.lock().unwrap();
+
+        let started = Instant::now();
+        assert!(
+            release.release(),
+            "(panic path): expected every channel restored with the controller locked"
+        );
+        assert!(
+            started.elapsed() < PANIC_LOCK_WAIT,
+            "(panic path): expected no wait for the controller lock | received: {:?}",
+            started.elapsed()
+        );
+        let registers: Vec<_> = channels.iter().map(FakeFanChannel::registers).collect();
+        assert_eq!(
+            registers,
+            vec![(BIOS_MODE, BIOS_DUTY); 3],
+            "(panic path): expected every channel back with the BIOS"
+        );
+        assert_eq!(store.record("pwm1"), None, "the record is cleared");
+        drop(step_in_progress);
+    }
+
+    #[test]
+    fn the_panic_path_restores_even_when_the_controller_lock_is_poisoned() {
+        let rig = controlled();
+        let Rig { controller, channels, store, .. } = rig;
+        let release = controller.panic_release();
         let shared = Arc::new(Mutex::new(controller));
         let poisoner = shared.clone();
         let result = std::thread::spawn(move || {
@@ -1952,9 +2124,35 @@ may-stop = true
         .join();
         assert!(result.is_err() && shared.is_poisoned(), "setup: the mutex is poisoned");
 
-        assert!(release_on_panic(&shared));
+        assert!(release.release());
         assert!(channels.iter().all(|c| c.registers() == (BIOS_MODE, BIOS_DUTY)));
         assert_eq!(store.record("pwm1"), None);
+    }
+
+    #[test]
+    fn the_panic_path_with_nothing_taken_writes_nothing() {
+        let rig = rig();
+        assert!(rig.controller.panic_release().release());
+        assert!(rig.log.entries().is_empty(), "{:?}", rig.log.entries());
+    }
+
+    #[test]
+    fn a_controller_still_alive_after_a_panic_release_does_not_fight_the_bios() {
+        // Unwinding builds (and tests) survive a panic on another thread; the
+        // controller then still believes it holds the channels.
+        let mut rig = controlled();
+        assert!(rig.controller.panic_release().release());
+        let events = rig.controller.tick(&good(), 1.0);
+        assert!(
+            problems(&events)[0].starts_with("pwm1: setting the duty"),
+            "(controller after a panic release): expected the refused duty write reported | {events:?}"
+        );
+        assert!(all_bios(&rig), "the BIOS registers are never overwritten with manual ones");
+        assert_eq!(rig.controller.phase("pwm1"), Some(Phase::Bios));
+        // Nothing is left to restore, so a stop writes nothing more.
+        rig.log.clear();
+        rig.controller.stop();
+        assert!(rig.log.entries().is_empty(), "{:?}", rig.log.entries());
     }
 
     #[test]
@@ -1973,7 +2171,7 @@ may-stop = true
             NO_RAMP,
         )
         .unwrap();
-        let mut controller = FanController::new(
+        let controller = FanController::new(
             FailSafePolicy::default(),
             Box::new(store.clone()),
             vec![(plan, Box::new(channels[0].clone()) as Box<dyn FanChannel>)],
@@ -1982,40 +2180,73 @@ may-stop = true
         // The state a panic inside take_manual leaves: original saved and held,
         // registers already manual, phase still Bios.
         let original = channels[0].clone().read_original().unwrap();
-        controller.channels[0].original = Some(original);
+        controller.channels[0].original.set(Some(original));
         channels[0].leave_manual_at(10.0);
-        controller.release_for_panic();
+        assert!(controller.panic_release().release());
         assert_eq!(channels[0].registers(), (BIOS_MODE, BIOS_DUTY));
     }
 
     #[test]
-    fn the_panic_path_gives_up_instead_of_waiting_forever_on_a_held_lock() {
+    fn the_panic_path_gives_up_instead_of_waiting_forever_on_a_channel_it_cannot_reach() {
         let rig = controlled();
-        let shared = Arc::new(Mutex::new(rig.controller));
-        let held = shared.lock().unwrap();
+        let release = rig.controller.panic_release();
+        // Another panic's hook (or a stuck one) is using the channel's handle.
+        let busy = release.channels[0].io.lock().unwrap();
         let started = Instant::now();
-        assert!(!release_on_panic(&shared), "the lock is held by this thread");
-        assert!(started.elapsed() < Duration::from_secs(5));
-        drop(held);
+        assert!(
+            !release.release_within(Duration::from_millis(30)),
+            "(panic path): expected a refusal to wait forever on a held handle"
+        );
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        assert!(rig.channels[0].is_manual(), "the unreachable channel is untouched");
+        assert!(rig.store.record("pwm1").is_some(), "its record stays for the next start");
+        assert_eq!(rig.channels[1].registers(), (BIOS_MODE, BIOS_DUTY), "the others are restored");
+        drop(busy);
+
+        assert!(release.release(), "a later attempt restores it");
+        assert!(all_bios(&rig));
     }
 
     #[test]
-    fn an_installed_panic_hook_releases_the_fans_and_chains_to_the_previous_hook() {
+    fn a_failed_panic_restore_keeps_the_record_and_never_panics() {
         let rig = controlled();
-        let Rig { controller, channels, .. } = rig;
+        rig.channels[0].make_fail(FanOperation::Restore);
+        assert!(!rig.controller.panic_release().release());
+        assert!(rig.channels[0].is_manual());
+        assert!(rig.store.record("pwm1").is_some(), "the next start restores it");
+        assert_eq!(rig.channels[1].registers(), (BIOS_MODE, BIOS_DUTY), "the others are restored");
+    }
+
+    #[test]
+    fn an_installed_panic_hook_restores_the_fans_during_a_control_step_and_chains_on() {
+        let rig = controlled();
+        let Rig { controller, channels, store, .. } = rig;
+        let release = controller.panic_release();
         let shared = Arc::new(Mutex::new(controller));
 
         let chained = Arc::new(Mutex::new(false));
         let witness = chained.clone();
         let original_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |_| *witness.lock().unwrap() = true));
-        install_panic_release(shared.clone());
+        install_panic_release(release);
 
-        let result = std::thread::spawn(|| panic!("injected panic outside the controller")).join();
+        // The panic of issue 10: inside a step, with the controller locked.
+        let step = shared.clone();
+        let result = std::thread::spawn(move || {
+            let _controller_locked = step.lock().unwrap();
+            panic!("injected panic during a control step");
+        })
+        .join();
         std::panic::set_hook(original_hook);
 
         assert!(result.is_err());
-        assert!(channels.iter().all(|c| c.registers() == (BIOS_MODE, BIOS_DUTY)));
+        let registers: Vec<_> = channels.iter().map(FakeFanChannel::registers).collect();
+        assert_eq!(
+            registers,
+            vec![(BIOS_MODE, BIOS_DUTY); 3],
+            "(panic hook): expected the fans restored although the step held the controller"
+        );
+        assert_eq!(store.record("pwm1"), None);
         assert!(*chained.lock().unwrap(), "the previous hook still ran");
     }
 }

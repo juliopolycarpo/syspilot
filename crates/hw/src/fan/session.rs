@@ -16,7 +16,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
 
 use syspilot_proto::message::{FanPhase, FanRuntime};
 use syspilot_proto::profile::FanCurve;
@@ -28,7 +28,7 @@ use super::board::{BoardChannel, ControlGrant};
 use super::curve::{Curve, CurvePoint, Readings, TemperatureSource};
 use super::failsafe::{
     ChannelEvent, ChannelPlan, Event, FailSafePolicy, FanChannel, FanController, OriginalStore,
-    Phase, Tuning, install_panic_release,
+    PanicRelease, Phase, Tuning, install_panic_release,
 };
 use super::layout::channel_key;
 use super::nct677x::{Nct677xChannel, Nct677xFanBus};
@@ -65,7 +65,9 @@ struct Tracked {
 
 /// The curves of a profile running on one board's fans.
 pub struct FanSession {
-    controller: Arc<Mutex<FanController>>,
+    controller: FanController,
+    /// What a panic hook restores from; see [`FanSession::install_panic_hook`].
+    panic_release: Arc<PanicRelease>,
     tracked: Vec<Tracked>,
     sources: Vec<String>,
     /// Whether any curve runs. A session without one exists only to hand
@@ -76,12 +78,6 @@ pub struct FanSession {
 /// The pwm output number of a controller channel id (`pwm3` is 3).
 fn pwm_of_id(id: &str) -> Option<u8> {
     id.strip_prefix("pwm")?.parse().ok()
-}
-
-fn lock(controller: &Mutex<FanController>) -> MutexGuard<'_, FanController> {
-    // A poisoned lock means a step panicked; what the controller saved is
-    // still right, and stopping must work after it.
-    controller.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn phase_of(phase: Phase) -> FanPhase {
@@ -265,13 +261,15 @@ impl FanSession {
         }
         let controller = FanController::new(FailSafePolicy::default(), store, channels)
             .map_err(|error| SessionError::new("a valid controller", error.to_string()))?;
+        let panic_release = controller.panic_release();
         let mut session = Self {
-            controller: Arc::new(Mutex::new(controller)),
+            controller,
+            panic_release,
             tracked,
             sources: sources.into_iter().collect(),
             follows_curves,
         };
-        let events = lock(&session.controller).recover();
+        let events = session.controller.recover();
         session.apply(&events);
         Ok(Some(session))
     }
@@ -280,10 +278,9 @@ impl FanSession {
     /// channel waits for a restore that failed and is retried on every step.
     /// A session that has neither can be dropped.
     pub fn has_work(&self) -> bool {
-        let controller = lock(&self.controller);
         self.follows_curves
             || self.tracked.iter().any(|entry| {
-                entry.controller_id.as_deref().and_then(|id| controller.phase(id))
+                entry.controller_id.as_deref().and_then(|id| self.controller.phase(id))
                     == Some(Phase::ReleasePending)
             })
     }
@@ -291,8 +288,14 @@ impl FanSession {
     /// Makes a panic anywhere in the process hand the fans back to the BIOS
     /// (see [`install_panic_release`]). Called once by the process that
     /// owns the session, not by the session itself: a hook is process-wide.
+    ///
+    /// The hook restores from [`PanicRelease`], not from the controller: a
+    /// panic during `tick`, `suspend` or `stop` runs the hook in the middle
+    /// of a step, with the controller borrowed and its registers possibly
+    /// half written. The session shares nothing with the hook but that
+    /// record, so no lock is held across register I/O for the hook to wait on.
     pub fn install_panic_hook(&self) {
-        install_panic_release(self.controller.clone());
+        install_panic_release(self.panic_release.clone());
     }
 
     /// The sensor keys the curves read; readings of any other are not needed.
@@ -308,7 +311,7 @@ impl FanSession {
     /// One control step: `readings` by sensor key and the seconds since the
     /// previous step. Returns what each channel is doing afterwards.
     pub fn tick(&mut self, readings: &Readings, elapsed_seconds: f64) -> Vec<FanRuntime> {
-        let events = lock(&self.controller).tick(readings, elapsed_seconds);
+        let events = self.controller.tick(readings, elapsed_seconds);
         self.apply(&events);
         self.runtime()
     }
@@ -316,7 +319,7 @@ impl FanSession {
     /// The machine is about to sleep: every channel goes back to the BIOS and
     /// nothing is written until [`FanSession::resume`].
     pub fn suspend(&mut self) -> Vec<FanRuntime> {
-        let events = lock(&self.controller).suspend();
+        let events = self.controller.suspend();
         self.apply(&events);
         self.runtime()
     }
@@ -324,12 +327,12 @@ impl FanSession {
     /// The machine woke up. Control comes back only after the sensors have
     /// read well again for a few steps.
     pub fn resume(&mut self) {
-        lock(&self.controller).resume();
+        self.controller.resume();
     }
 
     /// Hands every channel back to the BIOS for good.
     pub fn stop(&mut self) -> Vec<FanRuntime> {
-        let events = lock(&self.controller).stop();
+        let events = self.controller.stop();
         self.apply(&events);
         self.runtime()
     }
@@ -368,9 +371,9 @@ impl FanSession {
                 ChannelEvent::Problem { detail } => runtime.problem = Some(detail.clone()),
             }
         }
-        let controller = lock(&self.controller);
         for entry in &mut self.tracked {
-            if let Some(phase) = entry.controller_id.as_deref().and_then(|id| controller.phase(id))
+            if let Some(phase) =
+                entry.controller_id.as_deref().and_then(|id| self.controller.phase(id))
             {
                 entry.runtime.phase = phase_of(phase);
             }
@@ -378,16 +381,10 @@ impl FanSession {
     }
 }
 
-impl Drop for FanSession {
-    fn drop(&mut self) {
-        // The panic hook may hold the controller too, so dropping the session
-        // does not drop it: hand the fans back here.
-        lock(&self.controller).stop();
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
     use crate::bus::replay::{ReplaySuperIo, SuperIoWrite, superio_hwm_key};
     use crate::bus::{BusKind, FakeBusLocks, Fixture, SuperIoSlot};
@@ -663,6 +660,34 @@ may-stop = false
         drop(session);
         assert_eq!(rig.register(0x102), BIOS_MODE);
         assert_eq!(rig.register(0x109), BIOS_DUTY);
+    }
+
+    #[test]
+    fn the_panic_hooks_record_restores_the_registers_in_the_middle_of_a_step() {
+        let mut rig = Rig::new();
+        let mut session = rig.start(&[curve("board.pwm1")]).unwrap();
+        steps(&mut session, Some(45.0), 3);
+        assert_eq!(rig.register(0x102), BIOS_MODE & 0x0F, "setup: manual mode");
+
+        // What the hook holds is all it uses: not the session, not the
+        // controller, which a panicking step would still be borrowing.
+        let release = session.panic_release.clone();
+        assert!(release.release(), "(panic path): expected pwm1 restored");
+        let writes = rig.fan_writes();
+        assert_eq!(
+            writes.last(),
+            Some(&(0x102, BIOS_MODE)),
+            "(panic path): expected the BIOS mode to be the last write | received: {writes:?}"
+        );
+        assert_eq!(rig.register(0x109), BIOS_DUTY);
+        assert!(rig.store.0.lock().unwrap().is_empty(), "the stored original is cleared");
+        assert_eq!(rig.locks.live_guards(), 0);
+
+        // A session that survives sees a channel that is no longer its own
+        // and writes nothing over the BIOS's registers.
+        let after = rig.fan_writes().len();
+        steps(&mut session, Some(45.0), 3);
+        assert_eq!(rig.fan_writes().len(), after, "nothing is written after the panic restore");
     }
 
     #[test]

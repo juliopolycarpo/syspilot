@@ -22,7 +22,8 @@
 //! source, not the SmartFan curves, so restoring the two registers resumes
 //! the BIOS's own curve.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
+use std::time::{Duration, Instant};
 
 use crate::bus::{
     BusError, BusKind, BusLocks, NCT677X_FAN_MODE_REGISTERS, NCT677X_MANUAL_DUTY_REGISTERS,
@@ -152,6 +153,7 @@ impl Nct677xFanBus {
 }
 
 /// One duty output of an NCT677x as a [`FanChannel`].
+#[derive(Clone)]
 pub struct Nct677xChannel {
     bus: Arc<Mutex<Nct677xFanBus>>,
     mode_register: u16,
@@ -188,10 +190,37 @@ impl Nct677xChannel {
     }
 }
 
+/// How long an operation waits for the bus lock. One operation holds it for
+/// a few register accesses, so waiting this long means the holder is stuck,
+/// or is this very thread: the panic path restores from a panic hook that may
+/// run on the thread that panicked inside an operation, and a lock that
+/// waits forever would keep the process alive with the fan in manual mode.
+const BUS_LOCK_WAIT: Duration = Duration::from_millis(250);
+
 fn lock(bus: &Mutex<Nct677xFanBus>) -> Result<std::sync::MutexGuard<'_, Nct677xFanBus>, BusError> {
-    bus.lock().map_err(|_| {
-        refuse("bus", "an unpoisoned fan bus", "a lock poisoned by a panic in another operation")
-    })
+    let deadline = Instant::now() + BUS_LOCK_WAIT;
+    loop {
+        match bus.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(TryLockError::Poisoned(_)) => {
+                return Err(refuse(
+                    "bus",
+                    "an unpoisoned fan bus",
+                    "a lock poisoned by a panic in another operation",
+                ));
+            }
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(TryLockError::WouldBlock) => {
+                return Err(refuse(
+                    "bus",
+                    format!("the fan bus free within {} ms", BUS_LOCK_WAIT.as_millis()),
+                    "a lock still held by another operation",
+                ));
+            }
+        }
+    }
 }
 
 fn is_manual(mode: u8) -> bool {
@@ -291,6 +320,12 @@ impl FanChannel for Nct677xChannel {
             bus.write(this.duty_register, duty)?;
             bus.write(this.mode_register, mode)
         })
+    }
+
+    fn duplicate(&self) -> Box<dyn FanChannel> {
+        // The same bus (and so the same ISA mutex handling and the same
+        // allow-listed writes), the same registers.
+        Box::new(self.clone())
     }
 }
 
@@ -688,6 +723,41 @@ may-stop = false
         assert!(channel.set_duty(60.0).is_err());
         assert_eq!(rig.locks.acquired(), vec![BusKind::Isa; 7]);
         assert_eq!(rig.locks.live_guards(), 0);
+    }
+
+    #[test]
+    fn a_duplicate_handle_drives_the_same_registers_over_the_same_bus() {
+        let rig = rig();
+        let mut channel = rig.channel(3);
+        let original = channel.read_original().unwrap();
+        channel.take_manual(35.0).unwrap();
+        let mut duplicate = channel.duplicate();
+        duplicate.restore(&original).unwrap();
+        assert_eq!(rig.register(0x302), BIOS_MODE, "the duplicate restored pwm 3's mode");
+        assert_eq!(rig.register(0x309), BIOS_DUTY);
+        assert_eq!(rig.locks.live_guards(), 0);
+    }
+
+    #[test]
+    fn an_operation_gives_up_on_a_bus_its_own_thread_holds_instead_of_waiting_forever() {
+        // The panic hook runs on the thread that panicked inside an operation,
+        // so the bus lock it needs may be held by the hook's own thread.
+        let rig = rig();
+        let mut channel = rig.channel(1);
+        let original = channel.read_original().unwrap();
+        let held_by_this_thread = rig.bus.lock().unwrap();
+
+        let started = Instant::now();
+        let error = channel.restore(&original).unwrap_err().to_string();
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        assert!(
+            error.contains("the fan bus free within 250 ms")
+                && error.contains("a lock still held by another operation"),
+            "{error}"
+        );
+        drop(held_by_this_thread);
+        assert!(rig.fan_writes().is_empty(), "nothing was written while the bus was held");
+        channel.restore(&original).unwrap();
     }
 
     #[test]
