@@ -62,5 +62,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $files = Get-ChildItem dist -File | ForEach-Object FullName
+          # The product's package and checksum only: dist also holds the
+          # test packages of the step above. The signature is added by the
+          # maintainer.
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $files = "dist/SysPilot-$version-x64.msi", "dist/SysPilot-$version-x64.msi.sha256"
+          foreach ($file in $files) {
+            if (-not (Test-Path $file)) {
+              throw "(release files): expected $file | received: no such file"
+            }
+          }
           gh release create $env:GITHUB_REF_NAME @files --draft --verify-tag --generate-notes --title "SysPilot $($env:GITHUB_REF_NAME.TrimStart('v'))"
