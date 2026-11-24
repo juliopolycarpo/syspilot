@@ -11,7 +11,7 @@ to no cost when nobody is looking.
 
 ![The Home page: what is on, what needs attention and the machine right now](docs/images/home.png)
 
-> **Status: [0.2.0](https://github.com/juliopolycarpo/syspilot/releases/tag/v0.2.0).**
+> **Status: [0.2.1](https://github.com/juliopolycarpo/syspilot/releases/tag/v0.2.1).**
 > The service, the catalog, the sensors, the app, the command line and the
 > installer work and are tested end to end, and an installed copy keeps itself
 > up to date. The package carries no Authenticode certificate, so Windows may
