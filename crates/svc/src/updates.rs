@@ -11,7 +11,7 @@
 //! runs against [`FakeUpdater`] in tests. [`ProcessUpdater`] is the real
 //! thing.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -85,12 +85,33 @@ impl ProcessUpdater {
     }
 }
 
+/// Removes the packages earlier installations left in `directory`, and
+/// partial downloads. The installation log stays. Best effort: a file that
+/// cannot be removed now is removed before a later look.
+///
+/// The updater only clears the directory before its next download, so
+/// without this an installed package (about 20 MB) would stay until the
+/// next release. It is not done when the new service starts: Windows
+/// Installer starts it while it still reads the package.
+fn remove_installed_packages(directory: &Path) {
+    let Ok(entries) = std::fs::read_dir(directory) else { return };
+    for path in entries.flatten().map(|entry| entry.path()) {
+        let name = path.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+        if path.is_file() && (name.ends_with(".msi") || name.ends_with(".part")) {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
 impl Updater for ProcessUpdater {
     fn start(&mut self, job: Job) {
         use std::os::windows::process::CommandExt;
         let (queue, directory) = (self.queue.clone(), self.directory.clone());
         // A job is a download; the event loop must not wait for it.
         std::thread::spawn(move || {
+            if job == Job::Check {
+                remove_installed_packages(&directory);
+            }
             let outcome = std::env::current_exe()
                 .map(|service| service.with_file_name(UPDATER_EXECUTABLE))
                 .and_then(|updater| {
@@ -394,6 +415,39 @@ mod tests {
 
     fn available(version: &str) -> UpdateState {
         UpdateState::Available { version: version.into() }
+    }
+
+    /// A directory under the temp directory, removed on drop.
+    struct DownloadDir(PathBuf);
+
+    impl Drop for DownloadDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_look_first_removes_the_packages_earlier_installations_left() {
+        let directory = DownloadDir(
+            std::env::temp_dir().join(format!("SysPilot-Test-updates-{}", std::process::id())),
+        );
+        std::fs::create_dir_all(directory.0.join("kept-folder")).unwrap();
+        for name in ["SysPilot-0.2.0-x64.MSI", "SysPilot-0.2.1-x64.msi.part", "install.log"] {
+            std::fs::write(directory.0.join(name), b"x").unwrap();
+        }
+        remove_installed_packages(&directory.0);
+        let mut left: Vec<String> = std::fs::read_dir(&directory.0)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            ["install.log", "kept-folder"],
+            "(updates directory): expected only the log and folders to stay"
+        );
+        // A directory that does not exist is no error.
+        remove_installed_packages(&directory.0.join("missing"));
     }
 
     #[test]
