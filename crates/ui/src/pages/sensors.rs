@@ -35,6 +35,7 @@ fn reading(
 ) -> KeyedView {
     let advanced = app.level() == ViewLevel::Advanced;
     let value = trends.latest(sensor.id);
+    let (first, values) = trends.numbered_series(sensor.id);
     let name: View = if advanced {
         StackPanel::new().children((widgets::body(&sensor.label), widgets::caption(&sensor.key)))
     } else {
@@ -65,7 +66,7 @@ fn reading(
         .children((
             name,
             widgets::column(1).content(widgets::sparkline(
-                &trends.series(sensor.id),
+                (first, &values),
                 TREND_LEN,
                 CHART,
                 model::chart_scale(sensor.kind),
