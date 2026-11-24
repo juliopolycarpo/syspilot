@@ -11,10 +11,11 @@ to no cost when nobody is looking.
 
 ![The Home page: what is on, what needs attention and the machine right now](docs/images/home.png)
 
-> **Status: [0.1.0](https://github.com/juliopolycarpo/syspilot/releases/tag/v0.1.0),
-> a pre-release.** The service, the catalog, the sensors, the app and the
+> **Status: [0.1.1](https://github.com/juliopolycarpo/syspilot/releases/tag/v0.1.1),
+> the first release.** The service, the catalog, the sensors, the app and the
 > command line work and are tested end to end. The executables are not
-> signed yet, so Windows may warn on first run.
+> signed, so Windows may warn on first run; see
+> [verifying a download](#verifying-a-download).
 > Hardware sensors have been checked on one machine so far
 > ([what was found](docs/research/reference-machine.md)); expect gaps on
 > others and please report them. See [the roadmap](#roadmap).
@@ -60,6 +61,23 @@ It copies the files to `Program Files\SysPilot`, registers the service and adds
 SysPilot to the Start menu and to Installed apps. Running it again updates in
 place and keeps your settings. Uninstalling, from Installed apps or with
 `uninstall.ps1`, first restores every setting SysPilot changed.
+
+### Verifying a download
+
+Releases are not code-signed, so SmartScreen may say the publisher is
+unknown, and PowerShell may refuse the scripts of a downloaded zip until it
+is unblocked. Check the zip against the checksum published with it before
+unblocking it:
+
+```console
+> (Get-FileHash .\SysPilot-0.1.1-x64.zip -Algorithm SHA256).Hash
+> Get-Content .\SysPilot-0.1.1-x64.zip.sha256
+> Unblock-File .\SysPilot-0.1.1-x64.zip
+```
+
+The two hashes must match (the first is in capitals). Every release is built
+from a signed tag in this repository, so you can also build it yourself (see
+[Building](#building)).
 
 ## The app
 
@@ -209,8 +227,8 @@ everything they create. See [CONTRIBUTING.md](CONTRIBUTING.md).
 - [x] Desktop app with Simple and Advanced levels
 - [x] Sensor logging to CSV from the app
 - [x] Package, install and uninstall scripts
-- [x] First release (0.1.0, a pre-release)
-- [ ] Code signing
+- [x] First release (0.1.0 as a pre-release, 0.1.1 as the first full release)
+- [ ] Code signing (releases ship unsigned with a published SHA-256 until a certificate is available)
 - [ ] Sensors verified on more machines (AMD processors, memory modules, more Super I/O chips)
 - [x] Fan control core: curve engine, board catalog and fail-safes, compiled out of releases and tested against recordings only ([what must be validated first](docs/research/fan-control.md))
 - [x] Fan curves in the service and the app (a Fans page, curves read from the profile), behind the same feature and replay-tested only
