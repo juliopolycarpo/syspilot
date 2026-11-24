@@ -58,7 +58,9 @@ New-Item -ItemType Directory -Force $stage | Out-Null
 # have put modules there to try the worker; the package takes them from
 # the fetched directory only.
 $cargoDirectories = 'build', 'deps', 'examples', 'incremental', '.fingerprint', 'pawnio-modules'
-$cargoFiles = '*.d', '*.pdb', '*.rlib', '*.exe', '.cargo-lock'
+# Cargo's lock files changed names across versions (.cargo-lock, then
+# .cargo-artifact-lock and .cargo-build-lock), hence the wildcard.
+$cargoFiles = '*.d', '*.pdb', '*.rlib', '*.exe', '.cargo-*'
 Get-ChildItem -Force $release | Where-Object {
     $item = $_
     if ($item.PSIsContainer) {
@@ -67,6 +69,11 @@ Get-ChildItem -Force $release | Where-Object {
         -not ($cargoFiles | Where-Object { $item.Name -like $_ })
     }
 } | Copy-Item -Recurse -Destination $stage
+# Refuse to package build leftovers, whatever a future cargo calls them.
+$leftovers = Get-ChildItem -Force -File $stage | Where-Object { $_.Name -like '.*' }
+if ($leftovers) {
+    throw "(package): expected no hidden build files in the package | received: $($leftovers.Name -join ', ')"
+}
 foreach ($executable in $executables) {
     Copy-Item (Join-Path $release $executable) $stage
 }
