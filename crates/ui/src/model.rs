@@ -404,10 +404,6 @@ pub fn bytes_text(bytes: f64) -> String {
 pub struct Trends {
     generation: u32,
     series: Vec<VecDeque<Option<f64>>>,
-    /// Samples pushed since the sensor set last changed. Every series gets
-    /// one value per push, so the oldest value kept is sample number
-    /// `pushes - len`; charts key their segments by that number.
-    pushes: u64,
 }
 
 impl Trends {
@@ -417,9 +413,7 @@ impl Trends {
         if generation != self.generation {
             self.generation = generation;
             self.series.clear();
-            self.pushes = 0;
         }
-        self.pushes += 1;
         let sensor_count = samples.iter().map(|sample| sample.id as usize + 1).max().unwrap_or(0);
         if self.series.len() < sensor_count {
             self.series.resize_with(sensor_count, VecDeque::new);
@@ -441,13 +435,6 @@ impl Trends {
     /// The recent values of a sensor, oldest first.
     pub fn series(&self, id: u32) -> Vec<Option<f64>> {
         self.series.get(id as usize).map(|s| s.iter().copied().collect()).unwrap_or_default()
-    }
-
-    /// The recent values of a sensor with the number of the oldest one, so
-    /// a chart can tell a value that moved left from a new one.
-    pub fn numbered_series(&self, id: u32) -> (u64, Vec<Option<f64>>) {
-        let values = self.series(id);
-        (self.pushes.saturating_sub(values.len() as u64), values)
     }
 
     /// Lowest and highest recent value of a sensor.
@@ -1107,25 +1094,6 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
 
         trends.push(2, &[Sample { id: 0, value: Some(1.0) }]);
         assert_eq!(trends.series(0), [Some(1.0)], "IDs of a new set mean other sensors");
-    }
-
-    #[test]
-    fn numbered_series_count_from_the_oldest_kept_sample() {
-        let mut trends = Trends::default();
-        trends.push(1, &[Sample { id: 0, value: Some(0.0) }]);
-        trends.push(1, &[Sample { id: 0, value: Some(1.0) }]);
-        assert_eq!(trends.numbered_series(0), (0, vec![Some(0.0), Some(1.0)]));
-
-        for second in 2..(TREND_LEN as u64 + 7) {
-            trends.push(1, &[Sample { id: 0, value: Some(second as f64) }]);
-        }
-        let (first, values) = trends.numbered_series(0);
-        assert_eq!(first, 7, "(oldest kept sample): expected 67 pushes - 60 kept");
-        assert_eq!(values[0], Some(7.0), "(oldest value): expected the value of sample 7");
-
-        trends.push(2, &[Sample { id: 0, value: Some(5.0) }]);
-        assert_eq!(trends.numbered_series(0), (0, vec![Some(5.0)]), "a new set counts from 0");
-        assert_eq!(trends.numbered_series(9), (1, Vec::new()), "an unknown sensor has no values");
     }
 
     #[test]

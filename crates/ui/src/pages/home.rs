@@ -82,9 +82,8 @@ fn readings(app: &App) -> View {
             .text(model::reading_text(value, vital.sensor.kind))
             .font_size(TEXT_SUBTITLE)
             .font_weight(FontWeight::SEMI_BOLD);
-        let (first, values) = trends.numbered_series(vital.sensor.id);
         let chart = widgets::sparkline(
-            (first, &values),
+            &trends.series(vital.sensor.id),
             TREND_LEN,
             (TILE.0 - GAP_MEDIUM - 2.0 * CARD_PADDING, 36.0),
             model::chart_scale(vital.sensor.kind),

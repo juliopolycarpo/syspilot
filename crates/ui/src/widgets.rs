@@ -287,37 +287,16 @@ pub fn page(title: &str, subtitle: &str, content: impl IntoIterator<Item = Keyed
     )
 }
 
-/// How many samples a chart's segments keep their coordinates for before
-/// they are all placed again, so the numbers stay small.
-const CHART_REBASE: u64 = 4096;
-
-/// One segment of a chart: the number of the sample it starts at, and its
-/// two end points in the strip's coordinates.
-type Segment = (u64, (f64, f64), (f64, f64));
-
-/// Where a chart's segments go: each one's end points, keyed by the number
-/// of the sample it starts at, and how far left the strip holding them is
-/// moved so that the newest value sits at the right edge.
-#[derive(Debug, PartialEq)]
-struct ChartLayout {
-    segments: Vec<Segment>,
-    shift: f64,
-}
-
-/// Lays out `values`, the first of which is sample number `first`.
-///
-/// A segment's coordinates depend only on its sample number and the scale,
-/// not on where it is in the window. When a new second arrives, the strip
-/// moves left by one step, one segment is added and one is dropped; the
-/// others are unchanged, so the toolkit updates three things instead of
-/// every line of every chart.
-fn chart_layout(
-    first: u64,
+/// A small line chart of recent values, oldest on the left. Gaps (failed
+/// readings) are left open. `floor` and `ceiling` widen the scale so that a
+/// nearly flat series does not look dramatic.
+pub fn sparkline(
     values: &[Option<f64>],
     slots: usize,
     (width, height): (f64, f64),
     (floor, ceiling): (Option<f64>, Option<f64>),
-) -> ChartLayout {
+    colour: Brush,
+) -> View {
     let known = values.iter().flatten();
     let low = known.clone().copied().fold(f64::INFINITY, f64::min);
     let high = known.copied().fold(f64::NEG_INFINITY, f64::max);
@@ -326,45 +305,20 @@ fn chart_layout(
     // A flat series still needs a scale; draw it through the middle.
     let span = if (high - low).abs() < f64::EPSILON { 1.0 } else { high - low };
     let step = width / (slots.max(2) - 1) as f64;
-    let base = first - first % CHART_REBASE;
-    let point = |number: u64, value: f64| {
-        let x = (number - base) as f64 * step;
+    // New values enter on the right, so a short history is right-aligned.
+    let offset = slots.saturating_sub(values.len());
+    let point = |index: usize, value: f64| {
+        let x = (offset + index) as f64 * step;
         let y = (height - 1.0) - (value - low) / span * (height - 2.0);
         (x, y)
     };
-    let segments = values
-        .windows(2)
-        .zip(first..)
-        .filter_map(|(pair, number)| {
-            let (from, to) = (pair[0]?, pair[1]?);
-            Some((number, point(number, from), point(number + 1, to)))
-        })
-        .collect();
-    // New values enter on the right, so a short history is right-aligned.
-    let offset = slots.saturating_sub(values.len()) as f64;
-    ChartLayout { segments, shift: (offset - (first - base) as f64) * step }
-}
-
-/// A small line chart of recent values, oldest on the left. `first` is the
-/// number of the first value (see [`crate::model::Trends::numbered_series`]).
-/// Gaps (failed readings) are left open. `floor` and `ceiling` widen the
-/// scale so that a nearly flat series does not look dramatic.
-pub fn sparkline(
-    (first, values): (u64, &[Option<f64>]),
-    slots: usize,
-    (width, height): (f64, f64),
-    scale: (Option<f64>, Option<f64>),
-    colour: Brush,
-) -> View {
-    let layout = chart_layout(first, values, slots, (width, height), scale);
-    let segments = layout.segments.into_iter().map(|(number, (x1, y1), (x2, y2))| {
+    let segments = values.windows(2).enumerate().filter_map(|(index, pair)| {
+        let (from, to) = (pair[0]?, pair[1]?);
+        let ((x1, y1), (x2, y2)) = (point(index, from), point(index + 1, to));
         let line = Line::new().x1(x1).y1(y1).x2(x2).y2(y2).stroke(colour).stroke_thickness(1.5);
-        KeyedView::new(number.to_string(), line)
+        Some(KeyedView::new(index.to_string(), line))
     });
-    // Only segments inside the window exist, so the strip needs no clip.
-    let strip =
-        Canvas::new().margin(Thickness::new(layout.shift, 0.0, 0.0, 0.0)).keyed_children(segments);
-    Canvas::new().width(width).height(height).children((strip,))
+    Canvas::new().width(width).height(height).keyed_children(segments)
 }
 
 /// Size of the dots on a curve's points.
@@ -439,50 +393,6 @@ mod tests {
     use super::*;
 
     const TONES: [Tone; 4] = [Tone::Neutral, Tone::Good, Tone::Caution, Tone::Bad];
-
-    /// Where segment `number` of `layout` is drawn on screen.
-    fn on_screen(layout: &ChartLayout, number: u64) -> (f64, f64) {
-        let (_, (x1, _), (x2, _)) =
-            layout.segments.iter().find(|segment| segment.0 == number).copied().unwrap();
-        (x1 + layout.shift, x2 + layout.shift)
-    }
-
-    #[test]
-    fn a_new_second_moves_the_strip_and_leaves_old_segments_as_they_were() {
-        let scale = (Some(0.0), Some(100.0));
-        let before = chart_layout(0, &[Some(10.0), Some(20.0), Some(30.0)], 3, (20.0, 10.0), scale);
-        let after = chart_layout(1, &[Some(20.0), Some(30.0), Some(40.0)], 3, (20.0, 10.0), scale);
-        // Segment 1 (20 → 30) is in both, with the same coordinates.
-        let kept = |layout: &ChartLayout| layout.segments.iter().find(|s| s.0 == 1).copied();
-        assert_eq!(kept(&before), kept(&after), "(segment 1): expected unchanged coordinates");
-        assert_eq!(on_screen(&before, 1), (10.0, 20.0));
-        assert_eq!(on_screen(&after, 1), (0.0, 10.0), "(segment 1): expected one step left");
-        assert_eq!(on_screen(&after, 2), (10.0, 20.0), "(newest segment): expected the right edge");
-        assert!(after.segments.iter().all(|segment| segment.0 != 0), "segment 0 left the window");
-    }
-
-    #[test]
-    fn a_short_history_is_right_aligned_and_gaps_stay_open() {
-        let layout = chart_layout(
-            0,
-            &[Some(1.0), None, Some(3.0), Some(4.0)],
-            6,
-            (50.0, 10.0),
-            (None, None),
-        );
-        let numbers: Vec<u64> = layout.segments.iter().map(|segment| segment.0).collect();
-        assert_eq!(numbers, [2], "(segments): expected only 3 → 4, around the failed reading");
-        assert_eq!(on_screen(&layout, 2), (40.0, 50.0), "(last segment): expected the right edge");
-    }
-
-    #[test]
-    fn coordinates_restart_every_few_thousand_samples() {
-        let first = CHART_REBASE * 3 + 1;
-        let layout = chart_layout(first, &[Some(1.0), Some(2.0)], 2, (10.0, 10.0), (None, None));
-        let (_, (x1, _), _) = layout.segments[0];
-        assert_eq!(x1, 10.0, "(x of sample {first}): expected 1 step past the rebase");
-        assert_eq!(on_screen(&layout, first), (0.0, 10.0));
-    }
 
     #[test]
     fn states_have_their_own_colours_in_both_schemes() {
