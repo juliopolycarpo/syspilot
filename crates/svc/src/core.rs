@@ -29,6 +29,8 @@ pub struct Effects {
     pub profile: bool,
     /// The logging settings changed.
     pub logging: bool,
+    /// How SysPilot updates itself changed.
+    pub updates: bool,
     /// The service should stop.
     pub stop: bool,
 }
@@ -47,6 +49,13 @@ pub struct Core<S> {
 
 fn error(code: ErrorCode, message: impl Into<String>) -> Response {
     Response::Error(ServiceError { code, message: message.into() })
+}
+
+/// The refusal a request that needs an elevated administrator gets from
+/// anyone else. One wording, whichever part of the service answers.
+pub fn refusal(request: &Request, elevated: bool) -> Option<Response> {
+    let message = "This needs administrator rights. Restart the app as administrator.";
+    (request.requires_elevation() && !elevated).then(|| error(ErrorCode::AccessDenied, message))
 }
 
 impl<S: StateStore + Clone + 'static> Core<S> {
@@ -127,13 +136,13 @@ impl<S: StateStore + Clone + 'static> Core<S> {
     /// Handles one request that only needs the core. `elevated` is whether
     /// the client is an elevated administrator.
     ///
-    /// `Hello`, `Subscribe`, `Status`, `Sensors` and `SystemInfo` belong to
-    /// the host and are answered with an error here.
+    /// `Hello`, `Subscribe`, `Status`, `Sensors`, `SystemInfo`,
+    /// `CheckForUpdate` and `InstallUpdate` belong to the host and are
+    /// answered with an error here.
     pub fn handle(&mut self, request: Request, elevated: bool) -> (Response, Effects) {
         let mut effects = Effects::default();
-        if request.requires_elevation() && !elevated {
-            let message = "This needs administrator rights. Restart the app as administrator.";
-            return (error(ErrorCode::AccessDenied, message), effects);
+        if let Some(refused) = refusal(&request, elevated) {
+            return (refused, effects);
         }
         let response = match request {
             Request::Catalog => Response::Catalog(self.catalog.clone()),
@@ -175,6 +184,12 @@ impl<S: StateStore + Clone + 'static> Core<S> {
                     Err(problem) => error(ErrorCode::Invalid, problem.to_string()),
                 }
             }
+            Request::SetUpdates(mode) => {
+                let mut profile = self.profile.clone();
+                profile.updates = mode;
+                effects.updates = true;
+                self.commit(profile, &mut effects)
+            }
             Request::ClearHistory => {
                 self.enforcer.clear_history();
                 effects.states = true;
@@ -194,7 +209,9 @@ impl<S: StateStore + Clone + 'static> Core<S> {
             | Request::Subscribe { .. }
             | Request::Status
             | Request::Sensors
-            | Request::SystemInfo => {
+            | Request::SystemInfo
+            | Request::CheckForUpdate
+            | Request::InstallUpdate => {
                 error(ErrorCode::Invalid, "(request): not valid at this point of the connection")
             }
         };
@@ -270,6 +287,7 @@ impl<S: StateStore + Clone + 'static> Core<S> {
             return error(ErrorCode::Unsupported, "Fan control is not enabled in this build.");
         }
         effects.logging = profile.logging != self.profile.logging;
+        effects.updates = profile.updates != self.profile.updates;
         self.commit(profile, effects)
     }
 
@@ -331,7 +349,7 @@ mod tests {
     use syspilot_engine::store::MemoryStateStore;
     use syspilot_proto::action::{Action, RegData, RegistryAction, Scope};
     use syspilot_proto::message::{ActionState, EntryStatus};
-    use syspilot_proto::profile::LoggingConfig;
+    use syspilot_proto::profile::{LoggingConfig, UpdateMode};
 
     const KEY: &str = r"SOFTWARE\SysPilot-Test\Core";
     const CATALOG: &str = r#"
@@ -477,6 +495,9 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Core', name = "Che
             Request::SetFans(vec![]),
             Request::ClearHistory,
             Request::Shutdown,
+            Request::SetUpdates(UpdateMode::Automatic),
+            Request::CheckForUpdate,
+            Request::InstallUpdate,
         ];
         for request in privileged {
             assert!(request.requires_elevation(), "{request:?}");
@@ -574,6 +595,21 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Core', name = "Che
         let invalid = LoggingConfig { interval_secs: 0, ..LoggingConfig::default() };
         let error = fixture.refused(Request::SetLogging(invalid), true);
         assert_eq!(error.code, ErrorCode::Invalid);
+    }
+
+    #[test]
+    fn the_update_mode_is_kept_in_the_profile_and_flagged() {
+        let mut fixture = Fixture::new();
+        assert_eq!(fixture.core.profile().updates, UpdateMode::Notify, "the default");
+        let effects = fixture.ok(Request::SetUpdates(UpdateMode::Automatic));
+        assert!(effects.updates && effects.profile);
+        let saved = Profile::parse(&fixture.store.load(PROFILE_NAME).unwrap()).unwrap();
+        assert_eq!(saved.updates, UpdateMode::Automatic);
+
+        // A whole profile flags it only when it differs.
+        let same = Profile { updates: UpdateMode::Automatic, ..Profile::default() };
+        assert!(!fixture.ok(Request::SetProfile(same)).updates);
+        assert!(fixture.ok(Request::SetProfile(Profile::default())).updates);
     }
 
     #[test]
@@ -678,7 +714,14 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Core', name = "Che
     #[test]
     fn host_requests_are_not_answered_by_the_core() {
         let mut fixture = Fixture::new();
-        for request in [Request::Status, Request::Sensors, Request::Hello { protocol: 1 }] {
+        let host_requests = [
+            Request::Status,
+            Request::Sensors,
+            Request::Hello { protocol: 1 },
+            Request::CheckForUpdate,
+            Request::InstallUpdate,
+        ];
+        for request in host_requests {
             assert_eq!(fixture.refused(request, true).code, ErrorCode::Invalid);
         }
     }

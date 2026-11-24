@@ -22,6 +22,8 @@ In scope, for example:
 - a way to make the service load a profile, state or catalog it should not
   trust;
 - a way to impersonate the service to the app;
+- a way to make an installed copy accept an update that the release key did
+  not sign, or an older version;
 - memory safety problems in `unsafe` code.
 
 Out of scope:

@@ -15,7 +15,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::catalog::Catalog;
-use crate::profile::{CustomAction, FanCurve, LoggingConfig, Profile};
+use crate::profile::{CustomAction, FanCurve, LoggingConfig, Profile, UpdateMode};
 use crate::sensor::SensorList;
 
 /// A request from a client to the service.
@@ -87,6 +87,13 @@ pub enum Request {
     /// it: services are stopped through the service control manager.
     /// Mutating.
     Shutdown,
+    /// Chooses how SysPilot keeps itself up to date. Mutating.
+    SetUpdates(UpdateMode),
+    /// Looks for a new version now, whatever the mode. Mutating: it makes the
+    /// service reach out to the network.
+    CheckForUpdate,
+    /// Downloads, verifies and installs the newest version. Mutating.
+    InstallUpdate,
 }
 
 impl Request {
@@ -112,7 +119,10 @@ impl Request {
             | Self::SetLogging(_)
             | Self::SetFans(_)
             | Self::ClearHistory
-            | Self::Shutdown => true,
+            | Self::Shutdown
+            | Self::SetUpdates(_)
+            | Self::CheckForUpdate
+            | Self::InstallUpdate => true,
         }
     }
 }
@@ -429,6 +439,43 @@ pub struct FanRuntime {
     pub problem: Option<String>,
 }
 
+/// Where the service stands with updating itself.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum UpdateState {
+    /// Nothing is known to be newer and nothing is under way.
+    #[default]
+    Idle,
+    /// Looking for a new version.
+    Checking,
+    /// A newer version is published and has not been installed.
+    Available {
+        /// The version, e.g. `0.2.1`.
+        version: String,
+    },
+    /// The new version is being downloaded, verified or installed. The
+    /// service stops while its files are replaced.
+    Installing,
+    /// The last check or installation did not work.
+    Failed {
+        /// Why, for the user.
+        reason: String,
+    },
+    /// This copy does not update itself: a console run or a test instance.
+    Unavailable,
+}
+
+/// Updates as the service sees them. Part of [`ServiceStatus`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct UpdateStatus {
+    /// What the profile asks for.
+    pub mode: UpdateMode,
+    /// Where things stand.
+    pub state: UpdateState,
+    /// When a check last succeeded, seconds since the Unix epoch. `None`
+    /// since the service started.
+    pub checked_unix: Option<u64>,
+}
+
 /// Answer to [`Request::Status`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceStatus {
@@ -459,6 +506,8 @@ pub struct ServiceStatus {
     pub fan_control: bool,
     /// What fan control does on this machine: channels, curves and phases.
     pub fans: FanStatus,
+    /// Whether a new version is available and what is done about it.
+    pub update: UpdateStatus,
     /// Things the user should know about, e.g. a profile that could not be
     /// read. Empty when all is well.
     pub problems: Vec<String>,
@@ -553,6 +602,9 @@ mod tests {
             Request::SetFans(vec![]),
             Request::ClearHistory,
             Request::Shutdown,
+            Request::SetUpdates(UpdateMode::Automatic),
+            Request::CheckForUpdate,
+            Request::InstallUpdate,
         ];
         for request in requests {
             assert_eq!(round_trip(&request), request);
@@ -584,6 +636,9 @@ mod tests {
             Request::SetFans(vec![]),
             Request::ClearHistory,
             Request::Shutdown,
+            Request::SetUpdates(UpdateMode::Off),
+            Request::CheckForUpdate,
+            Request::InstallUpdate,
         ];
         assert!(privileged.iter().all(Request::requires_elevation));
     }
@@ -626,6 +681,32 @@ mod tests {
             FanStatus::default().availability,
             FanAvailability::NotInBuild,
             "(fan status): expected a build without the feature to be the default"
+        );
+    }
+
+    #[test]
+    fn the_update_status_survives_the_wire_in_every_state() {
+        let states = [
+            UpdateState::Idle,
+            UpdateState::Checking,
+            UpdateState::Available { version: "0.2.1".into() },
+            UpdateState::Installing,
+            UpdateState::Failed { reason: "github.com did not answer".into() },
+            UpdateState::Unavailable,
+        ];
+        for state in states {
+            let status = UpdateStatus {
+                mode: UpdateMode::Automatic,
+                state,
+                checked_unix: Some(1_800_000_000),
+            };
+            assert_eq!(round_trip(&status), status);
+        }
+        let fresh = UpdateStatus::default();
+        assert_eq!(
+            (fresh.mode, fresh.state),
+            (UpdateMode::Notify, UpdateState::Idle),
+            "(update status): expected a fresh install to look and tell, nothing more"
         );
     }
 

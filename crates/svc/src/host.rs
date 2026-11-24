@@ -24,11 +24,12 @@ use syspilot_proto::win::{MappedSection, SecurityDescriptor};
 use syspilot_proto::worker::FanPlan;
 use windows_sys::Win32::System::Threading::{INFINITE, WaitForSingleObject};
 
-use crate::core::{Core, Effects};
+use crate::core::{self, Core, Effects};
 use crate::events::{Event, EventQueue};
 use crate::fans;
 use crate::hardware::{DRIVER_URL, Hardware};
 use crate::logger::SensorLogger;
+use crate::updates::{Updater, Updates};
 use crate::watch::WatchSet;
 
 /// The sensor section: writable by the service, readable by local users.
@@ -68,6 +69,11 @@ pub struct HostParts {
     /// first write, so that a crash cannot lose them. A directory only the
     /// service's own account and administrators can write.
     pub fan_store_directory: String,
+    /// What looks for and installs a new version. `None` for a copy that
+    /// does not update itself: a console run or a test instance.
+    pub updater: Option<Box<dyn Updater>>,
+    /// Where Windows Installer logs an update, as shown to the user.
+    pub update_log: String,
 }
 
 /// The running service.
@@ -100,6 +106,8 @@ pub struct Host<S> {
     fan_plan: Option<Vec<FanCurve>>,
     /// What clients were last told about the fan controller.
     fan_watch: fans::Watch,
+    /// When and whether SysPilot updates itself.
+    updates: Updates,
 }
 
 /// Where a request's answer goes.
@@ -115,10 +123,17 @@ fn unix_millis() -> u64 {
 impl<S: StateStore + Clone + 'static> Host<S> {
     /// Creates the sensor section and the host. The pipe is not served yet;
     /// see [`crate::pipe::start`].
-    pub fn new(core: Core<S>, queue: Arc<EventQueue>, parts: HostParts) -> io::Result<Self> {
+    pub fn new(core: Core<S>, queue: Arc<EventQueue>, mut parts: HostParts) -> io::Result<Self> {
         let security = SecurityDescriptor::from_sddl(SECTION_SDDL)?;
         let section = MappedSection::create(&parts.instance.sensor_section_name(), &security)?;
+        let updates = Updates::new(
+            parts.updater.take(),
+            core.profile().updates,
+            std::mem::take(&mut parts.update_log),
+            Instant::now(),
+        );
         Ok(Self {
+            updates,
             watches: WatchSet::new(queue.clone()),
             parts,
             queue,
@@ -170,6 +185,10 @@ impl<S: StateStore + Clone + 'static> Host<S> {
         self.parts.hardware.release();
         self.parts.logger.close();
         self.stop_sampling();
+        // Ends the sensor worker and waits for it. An installer replaces
+        // the worker's file as soon as the service reports itself stopped,
+        // which it cannot while the worker still runs.
+        self.hub = None;
         // The pipe outlives the loop until the process exits; requests
         // that still arrive must fail instead of waiting for an answer.
         self.queue.close();
@@ -188,6 +207,15 @@ impl<S: StateStore + Clone + 'static> Host<S> {
             Event::Unsubscribed(id) => {
                 self.subscribers.retain(|subscriber| subscriber.id != id);
                 self.settle();
+                // The app closing is what an automatic update waits for.
+                let clients = self.subscribers.len();
+                self.update_step(|updates| updates.clients_changed(clients));
+            }
+            Event::UpdateFinished { job, outcome } => {
+                let (clients, now) = (self.subscribers.len(), Instant::now());
+                self.update_step(|updates| {
+                    updates.finished(job, outcome, clients, now, unix_millis() / 1000);
+                });
             }
             Event::RegistryChanged(id) => {
                 if let Some(spec) = self.watches.fired(id, Instant::now()) {
@@ -261,8 +289,38 @@ impl<S: StateStore + Clone + 'static> Host<S> {
         self.watches.reconcile(&wanted);
     }
 
+    /// Lets `step` act on the updates and tells subscribers when what they
+    /// are shown about them has changed.
+    fn update_step(&mut self, step: impl FnOnce(&mut Updates)) {
+        let before = self.updates.status();
+        step(&mut self.updates);
+        if self.updates.status() != before {
+            self.broadcast(ClientEvent::StatusChanged, false);
+        }
+    }
+
+    /// Looks for a new version or installs it, on a client's request.
+    fn update_on_request(&mut self, install: bool) -> Response {
+        let mut asked = Ok(());
+        self.update_step(|updates| {
+            asked = if install { updates.install_now() } else { updates.check_now() };
+        });
+        match asked {
+            Ok(()) => Response::Ok,
+            Err(message) => Response::Error(ServiceError {
+                code: ErrorCode::Unsupported,
+                message: message.into(),
+            }),
+        }
+    }
+
     fn respond(&mut self, request: Request, elevated: bool) -> (Response, Effects) {
+        if let Some(refused) = core::refusal(&request, elevated) {
+            return (refused, Effects::default());
+        }
         let response = match request {
+            Request::CheckForUpdate => self.update_on_request(false),
+            Request::InstallUpdate => self.update_on_request(true),
             Request::Status => Response::Status(self.status()),
             Request::Sensors => Response::Sensors(self.sensor_list()),
             Request::SystemInfo => Response::SystemInfo(self.parts.hardware.system_info()),
@@ -280,6 +338,10 @@ impl<S: StateStore + Clone + 'static> Host<S> {
         if effects.logging {
             self.parts.logger.configure(self.core.profile().logging.clone());
             self.logger_problem = None;
+        }
+        if effects.updates {
+            let (mode, clients) = (self.core.profile().updates, self.subscribers.len());
+            self.update_step(|updates| updates.set_mode(mode, clients, Instant::now()));
         }
         if effects.profile {
             self.broadcast(ClientEvent::ProfileChanged, false);
@@ -323,6 +385,7 @@ impl<S: StateStore + Clone + 'static> Host<S> {
             log_dir: self.parts.log_dir.clone(),
             fan_control: self.core.fan_control(),
             fans,
+            update: self.updates.status(),
             problems,
         }
     }
@@ -441,6 +504,7 @@ impl<S: StateStore + Clone + 'static> Host<S> {
         if self.next_sample.is_some_and(|due| due <= now) {
             self.sample(now);
         }
+        self.update_step(|updates| updates.run_due(now));
     }
 
     fn sample(&mut self, now: Instant) {
@@ -483,6 +547,7 @@ impl<S: StateStore + Clone + 'static> Host<S> {
             self.watches.next_resume().map(until),
             self.next_sample.map(until),
             self.look_pending.then_some(LOOK_POLL),
+            self.updates.next_wake(now),
         ]
         .into_iter()
         .flatten()
@@ -496,6 +561,7 @@ mod tests {
     use crate::hardware::FakeHardware;
     use crate::pipe;
     use crate::privilege::is_process_elevated;
+    use crate::updates::{FakeUpdater, Job};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread::JoinHandle;
@@ -504,8 +570,11 @@ mod tests {
     use syspilot_engine::store::MemoryStateStore;
     use syspilot_proto::catalog::Catalog;
     use syspilot_proto::message::{FanChannelStatus, FanPhase, FanRuntime, FanStatus};
+    use syspilot_proto::message::{UpdateState, UpdateStatus};
     use syspilot_proto::profile::LoggingConfig;
+    use syspilot_proto::profile::UpdateMode;
     use syspilot_proto::sensor::SectionReader;
+    use syspilot_proto::update::UpdaterReport;
     use syspilot_proto::{Client, EventStream};
 
     const KEY: &str = r"SOFTWARE\SysPilot-Test\Host";
@@ -524,6 +593,8 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
     /// The directory the host hands the controller; the fake hardware only
     /// records it.
     const FAN_STORE: &str = r"C:\fake\SysPilot\state";
+    /// Where the fake updater's installer would log.
+    const UPDATE_LOG: &str = r"C:\fake\SysPilot\updates\install.log";
 
     static NEXT_INSTANCE: AtomicUsize = AtomicUsize::new(0);
 
@@ -534,6 +605,7 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
         queue: Arc<EventQueue>,
         fake: FakeOs,
         hardware: FakeHardware,
+        updater: FakeUpdater,
         log_dir: PathBuf,
         thread: Option<JoinHandle<()>>,
     }
@@ -560,6 +632,7 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
             let queue = EventQueue::new().unwrap();
             let fake = FakeOs::default();
             let hardware = FakeHardware::default();
+            let updater = FakeUpdater::default();
             let log_dir = std::env::temp_dir().join(&name);
             std::fs::create_dir_all(&log_dir).unwrap();
 
@@ -569,6 +642,7 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
             let thread = std::thread::spawn({
                 let (instance, queue, fake) = (instance.clone(), queue.clone(), fake.clone());
                 let (hardware, log_dir) = (hardware.clone(), log_dir.clone());
+                let updater = updater.clone();
                 move || {
                     let catalog = Catalog::parse(CATALOG).unwrap();
                     let store = MemoryStateStore::default();
@@ -584,6 +658,8 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
                         logger: SensorLogger::new(log_dir.clone(), LoggingConfig::default()),
                         log_dir: log_dir.display().to_string(),
                         fan_store_directory: FAN_STORE.into(),
+                        updater: Some(Box::new(updater)),
+                        update_log: UPDATE_LOG.into(),
                     };
                     let mut host = Host::new(core, queue, parts).unwrap();
                     ready.send(()).unwrap();
@@ -591,7 +667,7 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
                 }
             });
             started.recv().unwrap();
-            Self { instance, queue, fake, hardware, log_dir, thread: Some(thread) }
+            Self { instance, queue, fake, hardware, updater, log_dir, thread: Some(thread) }
         }
 
         fn client(&self) -> Client {
@@ -964,6 +1040,66 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
         let channel = &client.status().unwrap().fans.channels[0];
         assert_eq!(channel.phase, FanPhase::FailSafe);
         assert_eq!(channel.problem.as_deref(), Some("cpu.temp has no reading"));
+    }
+
+    /// What the fake updater reports back, as the real one does through the
+    /// queue.
+    fn finish(host: &RunningHost, job: Job, report: UpdaterReport) {
+        host.queue.push(Event::UpdateFinished { job, outcome: Ok(report) });
+    }
+
+    #[test]
+    fn a_look_on_request_shows_the_new_version_and_installing_is_the_users_call() {
+        let host = RunningHost::start();
+        let mut events = host.subscribe(false);
+        let mut client = host.client();
+        let fresh = client.status().unwrap().update;
+        assert_eq!(fresh, UpdateStatus::default(), "(update status): expected a quiet start");
+
+        client.command(&Request::CheckForUpdate).unwrap();
+        wait_for(&mut events, ClientEvent::StatusChanged);
+        assert_eq!(client.status().unwrap().update.state, UpdateState::Checking);
+        assert_eq!(host.updater.jobs(), [Job::Check]);
+
+        finish(&host, Job::Check, UpdaterReport::Available("9.9.9".into()));
+        wait_for(&mut events, ClientEvent::StatusChanged);
+        let update = client.status().unwrap().update;
+        assert_eq!(update.state, UpdateState::Available { version: "9.9.9".into() });
+        assert!(update.checked_unix.is_some());
+        assert_eq!(host.updater.jobs(), [Job::Check], "telling mode installs nothing");
+
+        client.command(&Request::InstallUpdate).unwrap();
+        wait_for(&mut events, ClientEvent::StatusChanged);
+        assert_eq!(client.status().unwrap().update.state, UpdateState::Installing);
+        assert_eq!(host.updater.jobs(), [Job::Check, Job::Install]);
+    }
+
+    #[test]
+    fn automatic_updates_install_once_the_last_client_has_gone() {
+        let host = RunningHost::start();
+        let mut client = host.client();
+        client.command(&Request::SetUpdates(UpdateMode::Automatic)).unwrap();
+        assert_eq!(client.status().unwrap().update.mode, UpdateMode::Automatic);
+        assert_eq!(client.profile().unwrap().updates, UpdateMode::Automatic);
+
+        // Found while an app is open: shown, not installed.
+        let app = host.subscribe(false);
+        finish(&host, Job::Check, UpdaterReport::Available("9.9.9".into()));
+        let shown = (0..100).any(|_| {
+            std::thread::sleep(Duration::from_millis(20));
+            client.status().unwrap().update.state != UpdateState::Idle
+        });
+        assert!(shown, "(update): expected the found version in the status");
+        assert_eq!(host.updater.jobs(), [], "an open app is not closed unasked");
+
+        drop(app);
+        // The service notices a closed stream when it next writes to it.
+        client.command(&Request::SetLogging(LoggingConfig::default())).unwrap();
+        let installing = (0..100).any(|_| {
+            std::thread::sleep(Duration::from_millis(20));
+            host.updater.jobs() == [Job::Install]
+        });
+        assert!(installing, "(update): expected the installation once the app had closed");
     }
 
     #[test]

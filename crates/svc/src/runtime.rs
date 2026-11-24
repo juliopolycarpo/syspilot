@@ -14,6 +14,7 @@ use crate::logger::SensorLogger;
 use crate::pipe;
 use crate::privilege::is_process_elevated;
 use crate::storage::{DataDir, FileStore};
+use crate::updates::{ProcessUpdater, Updater};
 use crate::worker::WorkerHardware;
 
 /// What a command that needs administrator rights says without them.
@@ -66,6 +67,10 @@ pub fn serve(
     let build = os_build();
     let core = Core::new(win::os(), FileStore::new(data.clone()), catalog, build, console);
     let logging = core.profile().logging.clone();
+    // Only the installed product is replaced by a release. A console run or
+    // a test instance looks for nothing and installs nothing.
+    let updater: Option<Box<dyn Updater>> = (!console && instance.is_product())
+        .then(|| Box::new(ProcessUpdater::new(queue.clone(), data.updates())) as _);
     let parts = HostParts {
         instance: instance.clone(),
         console,
@@ -76,6 +81,8 @@ pub fn serve(
         // The state directory is the one only SYSTEM and administrators can
         // write, which is what the saved BIOS registers need.
         fan_store_directory: data.state().display().to_string(),
+        updater,
+        update_log: data.updates().join("install.log").display().to_string(),
     };
     let mut host = Host::new(core, queue, parts)
         .map_err(|error| format!("create the sensor section: {error}"))?;

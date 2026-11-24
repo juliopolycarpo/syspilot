@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::ViewLevel;
 
-/// File name inside the app's local data directory.
-const FILE_NAME: &str = "app.toml";
+/// File name inside the app's local data directory. Uninstalling removes
+/// it, so the service's side knows the name too.
+const FILE_NAME: &str = syspilot_proto::APP_PREFERENCES_FILE;
 
 /// Which colours the app uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

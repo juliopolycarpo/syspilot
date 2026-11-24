@@ -8,9 +8,9 @@ use std::collections::{BTreeSet, VecDeque};
 use syspilot_proto::catalog::{Catalog, Category, Direction, Level, Reboot, Tweak};
 use syspilot_proto::message::{
     ActionState, DriverState, EntryStatus, FanAvailability, FanChannelStatus, FanPhase, FanStatus,
-    HistoryEvent, HistoryKind, ServiceStatus, SystemInfo,
+    HistoryEvent, HistoryKind, ServiceStatus, SystemInfo, UpdateState, UpdateStatus,
 };
-use syspilot_proto::profile::{CurvePoint, Profile};
+use syspilot_proto::profile::{CurvePoint, Profile, UpdateMode};
 use syspilot_proto::sensor::{DeviceClass, Sample, SensorInfo, SensorKind, SensorList};
 
 /// Samples kept per sensor for the small trend lines: one minute.
@@ -154,6 +154,87 @@ pub fn duration_text(seconds: u64) -> String {
         (0, _, _) => format!("{hours} h {minutes} min"),
         (_, 0, _) => format!("{days} d"),
         _ => format!("{days} d {hours} h"),
+    }
+}
+
+/// Name of an update mode in its selector.
+pub fn update_mode_name(mode: UpdateMode) -> &'static str {
+    match mode {
+        UpdateMode::Off => "Don't look for updates",
+        UpdateMode::Notify => "Tell me about updates",
+        UpdateMode::Automatic => "Install updates automatically",
+    }
+}
+
+/// What an update mode does, in a sentence.
+pub fn update_mode_detail(mode: UpdateMode) -> &'static str {
+    match mode {
+        UpdateMode::Off => "SysPilot never looks for a new version and never mentions one.",
+        UpdateMode::Notify => {
+            "SysPilot looks once a day and tells you when there is a new version. You decide when to install it."
+        }
+        UpdateMode::Automatic => {
+            "SysPilot looks once a day and installs a new version by itself while this window is closed."
+        }
+    }
+}
+
+/// What the app says while a new version is being put in place.
+const UPDATE_INSTALLING: &str = "Installing the new version of SysPilot. This window closes when it is ready; open SysPilot again afterwards.";
+
+/// Where updates stand, for the Settings page. `now_unix` is the current
+/// time, for "last looked".
+pub fn update_text(update: &UpdateStatus, now_unix: u64) -> (String, Tone) {
+    match &update.state {
+        UpdateState::Unavailable => (
+            "This copy of SysPilot does not update itself. An installed release does.".to_owned(),
+            Tone::Neutral,
+        ),
+        UpdateState::Idle => match update.checked_unix {
+            Some(checked) => {
+                let ago = match now_unix.saturating_sub(checked) {
+                    0..60 => "just now".to_owned(),
+                    seconds => format!("{} ago", duration_text(seconds)),
+                };
+                (format!("SysPilot is up to date. Last looked {ago}."), Tone::Good)
+            }
+            None if update.mode == UpdateMode::Off => {
+                ("SysPilot is not looking for updates.".to_owned(), Tone::Neutral)
+            }
+            None => (
+                "SysPilot has not looked for updates yet. It does a few minutes after the PC starts."
+                    .to_owned(),
+                Tone::Neutral,
+            ),
+        },
+        UpdateState::Checking => ("Looking for a new version.".to_owned(), Tone::Neutral),
+        UpdateState::Available { version } => {
+            (format!("SysPilot {version} is available."), Tone::Caution)
+        }
+        UpdateState::Installing => (UPDATE_INSTALLING.to_owned(), Tone::Neutral),
+        UpdateState::Failed { reason } => {
+            (format!("The last update did not work. {reason}"), Tone::Bad)
+        }
+    }
+}
+
+/// The message shown on every page while a new version waits or is being
+/// installed, and whether it comes with the offer to install now. `None`
+/// when there is nothing to say, which is always the case with updates off:
+/// the service then forgets what it found.
+pub fn update_banner(update: &UpdateStatus) -> Option<(String, bool)> {
+    match &update.state {
+        UpdateState::Available { version } if update.mode == UpdateMode::Automatic => Some((
+            format!(
+                "SysPilot {version} is ready and will be installed when you close this window."
+            ),
+            true,
+        )),
+        UpdateState::Available { version } => {
+            Some((format!("SysPilot {version} is available."), true))
+        }
+        UpdateState::Installing => Some((UPDATE_INSTALLING.to_owned(), false)),
+        _ => None,
     }
 }
 
@@ -1415,6 +1496,76 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
         assert_eq!(failed.0, "PawnIO is installed but can't be used. Access denied.");
     }
 
+    fn update(mode: UpdateMode, state: UpdateState, checked_unix: Option<u64>) -> UpdateStatus {
+        UpdateStatus { mode, state, checked_unix }
+    }
+
+    #[test]
+    fn the_update_text_says_where_things_stand() {
+        let now = 1_800_000_000;
+        let text = |status: UpdateStatus| update_text(&status, now);
+        assert_eq!(
+            text(update(UpdateMode::Notify, UpdateState::Idle, Some(now - 3 * 3600))),
+            ("SysPilot is up to date. Last looked 3 h ago.".to_owned(), Tone::Good)
+        );
+        assert_eq!(
+            text(update(UpdateMode::Notify, UpdateState::Idle, Some(now - 5))).0,
+            "SysPilot is up to date. Last looked just now."
+        );
+        assert_eq!(
+            text(update(UpdateMode::Off, UpdateState::Idle, None)).0,
+            "SysPilot is not looking for updates."
+        );
+        assert!(text(update(UpdateMode::Notify, UpdateState::Idle, None)).0.contains("not looked"));
+        let found = UpdateState::Available { version: "0.2.1".into() };
+        assert_eq!(
+            text(update(UpdateMode::Notify, found, Some(now))),
+            ("SysPilot 0.2.1 is available.".to_owned(), Tone::Caution)
+        );
+        let failed = UpdateState::Failed { reason: "github.com could not be reached.".into() };
+        assert_eq!(
+            text(update(UpdateMode::Notify, failed, None)),
+            (
+                "The last update did not work. github.com could not be reached.".to_owned(),
+                Tone::Bad
+            )
+        );
+        let unavailable = text(update(UpdateMode::Notify, UpdateState::Unavailable, None));
+        assert!(unavailable.0.starts_with("This copy of SysPilot does not update itself"));
+    }
+
+    #[test]
+    fn only_a_found_or_installing_version_gets_a_banner() {
+        let found = || UpdateState::Available { version: "0.2.1".into() };
+        assert_eq!(
+            update_banner(&update(UpdateMode::Notify, found(), None)),
+            Some(("SysPilot 0.2.1 is available.".to_owned(), true))
+        );
+        let automatic = update_banner(&update(UpdateMode::Automatic, found(), None)).unwrap();
+        assert!(automatic.0.ends_with("installed when you close this window.") && automatic.1);
+        let installing =
+            update_banner(&update(UpdateMode::Notify, UpdateState::Installing, None)).unwrap();
+        assert!(!installing.1, "(banner): expected no second offer while installing");
+        for quiet in [
+            UpdateState::Idle,
+            UpdateState::Checking,
+            UpdateState::Failed { reason: "offline".into() },
+            UpdateState::Unavailable,
+        ] {
+            assert_eq!(update_banner(&update(UpdateMode::Notify, quiet, None)), None);
+        }
+    }
+
+    #[test]
+    fn every_update_mode_has_a_name_and_a_sentence() {
+        let names: Vec<&str> = UpdateMode::ALL.into_iter().map(update_mode_name).collect();
+        assert_eq!(
+            names,
+            ["Don't look for updates", "Tell me about updates", "Install updates automatically"]
+        );
+        assert!(UpdateMode::ALL.into_iter().all(|mode| update_mode_detail(mode).ends_with('.')));
+    }
+
     /// A status whose only meaningful parts are the driver and fan control.
     fn status_with_fans(driver: DriverState, availability: FanAvailability) -> ServiceStatus {
         ServiceStatus {
@@ -1431,6 +1582,7 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
             log_dir: String::new(),
             fan_control: true,
             fans: FanStatus { availability, board: "Fake board".into(), channels: Vec::new() },
+            update: UpdateStatus::default(),
             problems: Vec::new(),
         }
     }

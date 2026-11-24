@@ -1,5 +1,9 @@
 //! Settings of the app and the service, and what this installation is.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use syspilot_proto::message::{ServiceStatus, UpdateState};
+use syspilot_proto::profile::UpdateMode;
 use windows_reactor::*;
 
 use crate::app::{App, Message};
@@ -68,6 +72,52 @@ fn logging(app: &App, context: &ViewContext<App>) -> View {
     ))
 }
 
+/// How SysPilot updates itself and where that stands.
+fn updates(app: &App, status: &ServiceStatus, context: &ViewContext<App>) -> View {
+    let update = &status.update;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs());
+    let (text, tone) = model::update_text(update, now);
+    let standing = widgets::toned(widgets::body(text), tone, app.palette);
+    // A copy that does not update itself has nothing to choose or to start.
+    if update.state == UpdateState::Unavailable {
+        return widgets::card().content(standing);
+    }
+    let found = matches!(update.state, UpdateState::Available { .. });
+    let busy = matches!(update.state, UpdateState::Checking | UpdateState::Installing);
+    let button = Button::new().is_enabled(app.can_change() && !busy);
+    let act = if found {
+        button
+            .style(ButtonStyle::Accent)
+            .on_click(context.message(Message::InstallUpdate))
+            .content("Update now")
+    } else {
+        button.on_click(context.message(Message::CheckForUpdate)).content("Look now")
+    };
+    let mode = UpdateMode::ALL.iter().position(|mode| *mode == update.mode);
+    StackPanel::new().spacing(GAP_SMALL).children((
+        setting(
+            "New versions",
+            model::update_mode_detail(update.mode),
+            ComboBox::new()
+                .items_source(UpdateMode::ALL.map(model::update_mode_name))
+                .selected_index(mode)
+                .is_enabled(app.can_change())
+                .automation_name("New versions")
+                .min_width(260.0)
+                .on_selection_changed(context.callback(Message::PickUpdateMode)),
+        ),
+        widgets::card().content(
+            Grid::new()
+                .columns([GridLength::Star(1.0), GridLength::Auto])
+                .column_spacing(GAP_LARGE)
+                .children((
+                    standing.vertical_alignment(VerticalAlignment::Center),
+                    widgets::column(1).content(act),
+                )),
+        ),
+    ))
+}
+
 fn about(app: &App, context: &ViewContext<App>) -> View {
     let mut rows = vec![("App", env!("CARGO_PKG_VERSION").to_owned())];
     if let Some(status) = &app.snapshot.status {
@@ -127,10 +177,16 @@ pub fn view(app: &App, context: &ViewContext<App>) -> View {
         KeyedView::new("logging", logging(app, context)),
     ];
     if let Some(status) = &app.snapshot.status {
+        content.push(KeyedView::new("updates-heading", widgets::heading("Updates")));
+        content.push(KeyedView::new("updates", updates(app, status, context)));
         content.push(KeyedView::new("access-heading", widgets::heading("Hardware access")));
         content.push(KeyedView::new("access", hardware_access(app, status, context)));
     }
     content.push(KeyedView::new("about-heading", widgets::heading("About")));
     content.push(KeyedView::new("about", about(app, context)));
-    widgets::page("Settings", "How SysPilot looks and what it records.", content)
+    widgets::page(
+        "Settings",
+        "How SysPilot looks, what it records and how it stays current.",
+        content,
+    )
 }

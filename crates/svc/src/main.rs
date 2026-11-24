@@ -17,6 +17,7 @@ mod privilege;
 mod runtime;
 mod service;
 mod storage;
+mod updates;
 mod watch;
 mod worker;
 

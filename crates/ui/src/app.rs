@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use syspilot_proto::catalog::Category;
 use syspilot_proto::message::Request;
-use syspilot_proto::profile::LoggingConfig;
+use syspilot_proto::profile::{LoggingConfig, UpdateMode};
 use windows_reactor::*;
 
 use crate::backend::{Backend, BackendHandle, Change, Failure, Listener};
@@ -230,6 +230,12 @@ pub enum Message {
     LoggingEnabled(bool),
     /// The logging interval was changed.
     LoggingInterval(Option<f64>),
+    /// An update mode was picked by index.
+    PickUpdateMode(Option<usize>),
+    /// "Look now" for a new version.
+    CheckForUpdate,
+    /// "Update now".
+    InstallUpdate,
 }
 
 /// What the listener wants from the app.
@@ -693,6 +699,18 @@ impl Component for App {
                     self.send(None, Request::SetLogging(logging), context);
                 }
             }
+            Message::PickUpdateMode(index) => {
+                let picked = index.and_then(|index| UpdateMode::ALL.get(index).copied());
+                let current = self.snapshot.status.as_ref().map(|status| status.update.mode);
+                // The selector echoes the current mode when it is drawn.
+                if let Some(mode) = picked.filter(|mode| Some(*mode) != current)
+                    && self.can_change()
+                {
+                    self.send(None, Request::SetUpdates(mode), context);
+                }
+            }
+            Message::CheckForUpdate => self.send(None, Request::CheckForUpdate, context),
+            Message::InstallUpdate => self.send(None, Request::InstallUpdate, context),
         }
     }
 
@@ -787,6 +805,21 @@ impl App {
                     "You can look around, but changing settings needs administrator rights.",
                     Some(restart),
                 ),
+            ));
+        }
+        let update =
+            self.snapshot.status.as_ref().and_then(|status| model::update_banner(&status.update));
+        if let Some((text, offer)) = update {
+            // Installing needs an administrator, like every other change.
+            let install = (offer && self.can_change()).then(|| {
+                Button::new()
+                    .style(ButtonStyle::Accent)
+                    .on_click(context.message(Message::InstallUpdate))
+                    .content("Update now")
+            });
+            banners.push(KeyedView::new(
+                "update",
+                widgets::banner(Tone::Neutral, self.palette, text, install),
             ));
         }
         let problems = self.snapshot.status.iter().flat_map(|status| &status.problems);

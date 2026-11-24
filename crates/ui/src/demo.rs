@@ -13,9 +13,9 @@ use syspilot_proto::catalog::Catalog;
 use syspilot_proto::message::{
     ActionState, ActionStatus, DriverState, EntryStatus, FanAvailability, FanChannelStatus,
     FanPhase, FanStatus, Feature, HistoryEvent, HistoryKind, InfoSection, Request, ServiceStatus,
-    SystemInfo, SystemSummary,
+    SystemInfo, SystemSummary, UpdateState, UpdateStatus,
 };
-use syspilot_proto::profile::{CurvePoint, CustomAction, Profile};
+use syspilot_proto::profile::{CurvePoint, CustomAction, Profile, UpdateMode};
 use syspilot_proto::sensor::{DeviceClass, DeviceInfo, Sample, SensorInfo, SensorKind, SensorList};
 
 use crate::backend::{Backend, Change, Failure, Listener};
@@ -51,6 +51,8 @@ pub enum Scenario {
     FanNoDriver,
     /// A build with fan control, on a board that is not in the catalog.
     FanUnknownBoard,
+    /// As `Healthy`, and a newer version of SysPilot has been found.
+    UpdateAvailable,
 }
 
 impl Scenario {
@@ -65,6 +67,7 @@ impl Scenario {
             "fan-read-only" => Some(Self::FanReadOnly),
             "fan-no-driver" => Some(Self::FanNoDriver),
             "fan-unknown-board" => Some(Self::FanUnknownBoard),
+            "update-available" => Some(Self::UpdateAvailable),
             _ => None,
         }
     }
@@ -542,9 +545,21 @@ fn status(scenario: Scenario) -> ServiceStatus {
         log_dir: r"C:\ProgramData\SysPilot\logs".into(),
         fan_control: scenario.has_fan_control(),
         fans: fans(scenario),
+        update: UpdateStatus {
+            mode: UpdateMode::Notify,
+            state: if scenario == Scenario::UpdateAvailable {
+                UpdateState::Available { version: DEMO_NEWER_VERSION.into() }
+            } else {
+                UpdateState::Idle
+            },
+            checked_unix: Some(unix_now().saturating_sub(3 * 3600)),
+        },
         problems: Vec::new(),
     }
 }
+
+/// The version the demo pretends has been published.
+const DEMO_NEWER_VERSION: &str = "9.9.0";
 
 fn system() -> SystemInfo {
     let rows = |rows: &[(&str, &str)]| {
@@ -691,6 +706,26 @@ fn apply(snapshot: &mut Snapshot, request: &Request) -> Result<(), Failure> {
             }
         }
         Request::ClearHistory => snapshot.history.clear(),
+        Request::SetUpdates(mode) => {
+            if let Some(profile) = &mut snapshot.profile {
+                profile.updates = *mode;
+            }
+            if let Some(status) = &mut snapshot.status {
+                status.update.mode = *mode;
+            }
+        }
+        // The demo finds nothing new and installs nothing: it only shows
+        // what the app says meanwhile.
+        Request::CheckForUpdate => {
+            if let Some(status) = &mut snapshot.status {
+                status.update.checked_unix = Some(unix_now());
+            }
+        }
+        Request::InstallUpdate => {
+            if let Some(status) = &mut snapshot.status {
+                status.update.state = UpdateState::Installing;
+            }
+        }
         _ => return Err(Failure::Other("The demo does not support this.".into())),
     }
     Ok(())

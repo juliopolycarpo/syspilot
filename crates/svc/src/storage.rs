@@ -75,12 +75,20 @@ impl DataDir {
         self.root.join("logs")
     }
 
+    /// Where the updater downloads a release and Windows Installer logs
+    /// installing it. What lands here is run as LocalSystem once its
+    /// signature has been verified, so nobody else may write it in between.
+    pub fn updates(&self) -> PathBuf {
+        self.root.join("updates")
+    }
+
     /// Creates the directories with their ACLs, or verifies and repairs
     /// existing ones. Fails when an existing directory has an untrusted
     /// owner.
     pub fn secure(&self) -> Result<(), String> {
         secure_directory(&self.root, PRIVATE_SDDL)?;
         secure_directory(&self.state(), PRIVATE_SDDL)?;
+        secure_directory(&self.updates(), PRIVATE_SDDL)?;
         secure_directory(&self.logs(), LOGS_SDDL)
     }
 
@@ -255,6 +263,7 @@ mod tests {
         assert!(dir.root().ends_with("SysPilot-Test"), "{}", dir.root().display());
         assert!(dir.state().ends_with(r"SysPilot-Test\state"));
         assert!(dir.logs().ends_with(r"SysPilot-Test\logs"));
+        assert!(dir.updates().ends_with(r"SysPilot-Test\updates"));
     }
 
     #[test]
@@ -269,7 +278,7 @@ mod tests {
             return;
         }
         dir.secure().unwrap();
-        assert!(dir.state().is_dir() && dir.logs().is_dir());
+        assert!(dir.state().is_dir() && dir.logs().is_dir() && dir.updates().is_dir());
         // The second run meets the directories it created and accepts them.
         dir.secure().unwrap();
     }

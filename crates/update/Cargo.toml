@@ -1,0 +1,30 @@
+[package]
+name = "syspilot-update"
+description = "SysPilot updater: finds, verifies and installs a new release on behalf of the service."
+license = "GPL-3.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "syspilot-update"
+path = "src/main.rs"
+
+[dependencies]
+syspilot-proto.workspace = true
+# Ed25519 verification and SHA-512, with no dependencies of its own. Windows
+# has no Ed25519 before Windows 11, so this cannot be a system call. See
+# decision 19 in docs/decisions.md.
+ed25519-compact = { version = "2.6", default-features = false, features = ["std"] }
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinHttp",
+    "Win32_System_ApplicationInstallationAndServicing",
+    "Win32_System_SystemInformation",
+] }

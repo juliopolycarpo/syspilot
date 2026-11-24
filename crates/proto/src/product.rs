@@ -13,7 +13,12 @@ pub const PRODUCT_NAME: &str = "SysPilot";
 
 /// Version of the IPC protocol. Bumped on any incompatible change to the
 /// message types or the sensor section layout.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
+
+/// File the app keeps its per-user choices in, inside a directory named
+/// after the instance under the user's local application data. Defined here
+/// because uninstalling, which is the service's job, removes it.
+pub const APP_PREFERENCES_FILE: &str = "app.toml";
 
 /// Longest accepted instance name.
 const INSTANCE_NAME_MAX: usize = 48;

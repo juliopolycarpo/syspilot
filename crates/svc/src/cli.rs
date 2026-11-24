@@ -7,9 +7,9 @@ use std::path::PathBuf;
 use syspilot_proto::catalog::{Catalog, Reboot, Tweak};
 use syspilot_proto::message::{
     ActionState, DriverState, EntryStatus, Event, FanAvailability, FanPhase, FanStatus,
-    HistoryEvent, Request, ServiceStatus, SystemInfo,
+    HistoryEvent, Request, ServiceStatus, SystemInfo, UpdateState, UpdateStatus,
 };
-use syspilot_proto::profile::Profile;
+use syspilot_proto::profile::{Profile, UpdateMode};
 use syspilot_proto::sensor::{Sample, SectionReader, SensorList};
 use syspilot_proto::win::MappedSection;
 use syspilot_proto::{Client, ClientError, Instance, PRODUCT_NAME};
@@ -47,6 +47,10 @@ pub enum Command {
     Export { path: Option<PathBuf> },
     /// Replace the profile from a TOML file.
     Apply { path: PathBuf },
+    /// Show how SysPilot updates itself, or choose it.
+    Updates { mode: Option<UpdateMode> },
+    /// Look for a new version, and install it unless only looking.
+    Update { check_only: bool },
     /// Print the version.
     Version,
     /// Print the usage text.
@@ -80,6 +84,9 @@ Change (administrator):
   reapply <id>               Apply a tweak again now
   export [file]              Write the profile as TOML
   apply <file>               Replace the profile with a TOML file
+  updates [mode]             Show or choose how SysPilot updates itself:
+                             off, notify (the default) or automatic
+  update [--check]           Install the newest version now, or only look
 
 Service (administrator):
   install [--no-start]       Register this executable as a Windows service
@@ -168,6 +175,18 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Invocation, 
             Some(path) => Command::Apply { path: path.into() },
             None => return Err(usage_error("(apply): expected a profile file")),
         },
+        "updates" => match rest.pop() {
+            None => Command::Updates { mode: None },
+            Some(key) => match UpdateMode::from_key(&key) {
+                Some(mode) => Command::Updates { mode: Some(mode) },
+                None => {
+                    return Err(usage_error(format!(
+                        "(updates): expected off | notify | automatic | received: {key:?}"
+                    )));
+                }
+            },
+        },
+        "update" => Command::Update { check_only: take_flag("--check") },
         "help" => Command::Help,
         "version" => Command::Version,
         other => return Err(usage_error(format!("(command): {other:?} is not a command"))),
@@ -202,6 +221,42 @@ fn driver_line(driver: &DriverState, url: &str) -> String {
     }
 }
 
+/// How SysPilot updates itself and where that stands, in one line.
+fn update_line(update: &UpdateStatus) -> String {
+    let state = match &update.state {
+        UpdateState::Unavailable => return "this copy does not update itself".into(),
+        UpdateState::Idle if update.checked_unix.is_some() => "up to date".to_owned(),
+        UpdateState::Idle if update.mode == UpdateMode::Off => "not looking".to_owned(),
+        UpdateState::Idle => "has not looked yet".to_owned(),
+        UpdateState::Checking => "looking for a new version".to_owned(),
+        UpdateState::Available { version } => format!("version {version} is available"),
+        UpdateState::Installing => "installing a new version".to_owned(),
+        UpdateState::Failed { reason } => format!("failed: {reason}"),
+    };
+    format!("{}, {state}", update.mode.key())
+}
+
+/// Asks the service to look for a new version and waits for what it finds.
+fn look_for_update(client: &mut Client) -> Result<String, String> {
+    let problem = |error: ClientError| error.to_string();
+    client.command(&Request::CheckForUpdate).map_err(problem)?;
+    // The look is a network request of the updater; the service answers at
+    // once and the outcome shows in its status.
+    for _ in 0..UPDATE_LOOK_POLLS {
+        let update = client.status().map_err(problem)?.update;
+        if update.state != UpdateState::Checking {
+            return Ok(format!("{}\n", update_line(&update)));
+        }
+        std::thread::sleep(UPDATE_LOOK_POLL);
+    }
+    Ok("Still looking. See `syspilot-svc status` in a moment.\n".into())
+}
+
+/// How often and how many times the outcome of a look is asked for: up to
+/// two minutes, the updater's own timeouts taken together.
+const UPDATE_LOOK_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+const UPDATE_LOOK_POLLS: u32 = 240;
+
 /// Renders the status view.
 pub fn render_status(status: &ServiceStatus) -> String {
     let mode = if status.console { "console" } else { "service" };
@@ -216,6 +271,7 @@ pub fn render_status(status: &ServiceStatus) -> String {
     let sampling = if status.sampling { "sampling sensors" } else { "not sampling" };
     let _ = writeln!(out, "  Clients        {} subscribed, {sampling}", status.subscribers);
     let _ = writeln!(out, "  Sensor logs    {}", status.log_dir);
+    let _ = writeln!(out, "  Updates        {}", update_line(&status.update));
     if !status.features.is_empty() {
         out.push_str("Features\n");
     }
@@ -576,6 +632,20 @@ pub fn run_client_command(instance: &Instance, command: Command) -> Result<Strin
             client.command(&Request::SetProfile(profile)).map_err(problem)?;
             Ok(summary)
         }
+        Command::Updates { mode: None } => {
+            Ok(format!("{}\n", update_line(&client.status().map_err(problem)?.update)))
+        }
+        Command::Updates { mode: Some(mode) } => {
+            client.command(&Request::SetUpdates(mode)).map_err(problem)?;
+            Ok(format!("Updates: {}\n", mode.key()))
+        }
+        Command::Update { check_only: true } => look_for_update(&mut client),
+        Command::Update { check_only: false } => {
+            client.command(&Request::InstallUpdate).map_err(problem)?;
+            Ok("The newest version is being downloaded, verified and installed. The service \
+                restarts when it is in place; `syspilot-svc status` shows how it went.\n"
+                .into())
+        }
         other => Err(format!("(command): {other:?} does not talk to the service")),
     }
 }
@@ -622,6 +692,13 @@ mod tests {
             command("disable a.b"),
             Command::SetTweaks { ids: vec!["a.b".into()], enabled: false }
         );
+        assert_eq!(command("updates"), Command::Updates { mode: None });
+        assert_eq!(
+            command("updates automatic"),
+            Command::Updates { mode: Some(UpdateMode::Automatic) }
+        );
+        assert_eq!(command("update"), Command::Update { check_only: false });
+        assert_eq!(command("update --check"), Command::Update { check_only: true });
         assert_eq!(command("--version"), Command::Version);
         assert_eq!(command("status --help"), Command::Help);
     }
@@ -646,6 +723,10 @@ mod tests {
             ("show", "(show): expected one ID | received: 0"),
             ("history many", r#"(history): expected a count | received: "many""#),
             ("apply", "(apply): expected a profile file"),
+            (
+                "updates sometimes",
+                r#"(updates): expected off | notify | automatic | received: "sometimes""#,
+            ),
             ("status --instance", "(--instance): expected a name after it"),
         ];
         for (line, expected) in cases {
@@ -684,6 +765,7 @@ mod tests {
             log_dir: r"C:\ProgramData\SysPilot\logs".into(),
             fan_control: false,
             fans: Default::default(),
+            update: UpdateStatus::default(),
             problems: vec!["Settings could not be saved to disk: disk full".into()],
         }
     }
@@ -697,10 +779,39 @@ mod tests {
              \x20 Driver         PawnIO is not installed. Get it from https://pawnio.eu/\n\
              \x20 Clients        1 subscribed, sampling sensors\n\
              \x20 Sensor logs    C:\\ProgramData\\SysPilot\\logs\n\
+             \x20 Updates        notify, has not looked yet\n\
              Features\n\
              \x20  no  Fan speeds (needs PawnIO)\n\
              Problems\n\
              \x20 ! Settings could not be saved to disk: disk full\n"
+        );
+    }
+
+    #[test]
+    fn the_update_line_says_the_mode_and_where_things_stand() {
+        let line =
+            |mode, state, checked_unix| update_line(&UpdateStatus { mode, state, checked_unix });
+        let found = UpdateState::Available { version: "0.2.1".into() };
+        let failed = UpdateState::Failed { reason: "github.com could not be reached".into() };
+        assert_eq!(line(UpdateMode::Notify, UpdateState::Idle, Some(1)), "notify, up to date");
+        assert_eq!(line(UpdateMode::Off, UpdateState::Idle, None), "off, not looking");
+        assert_eq!(line(UpdateMode::Off, UpdateState::Idle, Some(1)), "off, up to date");
+        assert_eq!(
+            line(UpdateMode::Automatic, UpdateState::Checking, None),
+            "automatic, looking for a new version"
+        );
+        assert_eq!(line(UpdateMode::Notify, found, Some(1)), "notify, version 0.2.1 is available");
+        assert_eq!(
+            line(UpdateMode::Automatic, UpdateState::Installing, Some(1)),
+            "automatic, installing a new version"
+        );
+        assert_eq!(
+            line(UpdateMode::Notify, failed, None),
+            "notify, failed: github.com could not be reached"
+        );
+        assert_eq!(
+            line(UpdateMode::Automatic, UpdateState::Unavailable, None),
+            "this copy does not update itself"
         );
     }
 

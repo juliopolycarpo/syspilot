@@ -111,6 +111,8 @@ registration logic is tested like everything else.
 
 **Cost.** No Add/Remove Programs entry until the script writes one.
 
+*The script half is superseded by 19; the executable still registers itself.*
+
 ## 11. Slint for the app
 
 **Decision.** The desktop app uses Slint with the Fluent style.
@@ -237,3 +239,65 @@ worker is not covered by its two-second step. A build that follows curves
 needs both features, and a worker built without it reports the board as not
 controllable, so a half-enabled build shows "not in this build" and writes
 nothing. Protocol version 2 adds the fan status.
+
+## 19. A Windows Installer package, built with WiX
+
+**Decision.** A release is one `.msi`, built from `installer/syspilot.wxs` with
+the WiX toolset (version 5, pinned). It replaces the install and uninstall
+scripts of decision 10. Windows Installer owns the files, the shortcut, the
+Installed apps entry, stopping and starting the service around a file change,
+and rollback. The service executable still registers itself (`install`) and
+still restores every setting and removes its data when the product is removed
+(`uninstall`); the package runs those two commands and nothing else of its own.
+
+**Why.** An update that nobody watches has to be undone when it fails halfway,
+and a transaction with rollback is what Windows Installer is. It installs
+without any window, which the updater needs (decision 20), and a package is
+what `winget` and administrators expect. The alternatives were measured against
+that: a script cannot roll back; a self-written package writer would be a large
+piece of installer code to trust; MSIX needs a certificate a new project cannot
+get and restricts services.
+
+**Cost.** Building a release needs the .NET SDK and the WiX tool, a build-time
+dependency outside cargo; the package script installs the pinned tool when it
+is missing. The WiX utility extension's custom action library is embedded in
+the package (it closes the app before files are replaced). A script-installed
+0.1.x is taken over by installing the package over it: its two scripts and its
+own Installed apps entry are removed.
+
+## 20. Updates: the service decides when, an updater does it, a key decides what
+
+**Decision.** The service looks for a new release once a day (ten minutes
+after it starts, then every 24 hours) unless the profile says `updates =
+"off"`. The default, `notify`, only tells the app; `automatic` installs while
+no app is connected. Looking and installing are done by a separate executable,
+`syspilot-update.exe`, which the service starts for one job and which prints
+one line (`proto::update`). A release is installed only if the package carries
+an OpenSSH signature (`ssh-keygen -Y sign`, Ed25519, namespace
+`syspilot-update`) from a key in `installer/update-signers`, which is compiled
+into the updater. The signing key is the maintainer's, held in an SSH agent,
+and never given to the build: CI makes a draft release, `scripts/sign-release.ps1`
+signs it, and publishing it is what offers it.
+
+**Why.** The service runs as LocalSystem, so it can replace itself with no
+prompt, which is the least a user can be asked to do. The same fact makes the
+updater the most dangerous code in the product, hence the shape: no network
+code in the resident process (it would also cost memory, see the overhead
+budget); the bytes from the network are a hint until a signature from a pinned
+key has been verified over the whole package; a checksum from the same server
+would prove nothing. An SSH signature because the maintainer already keeps SSH
+keys in an agent that asks before each use, and because anyone can check a
+download with stock OpenSSH. The release tag is not trusted either: after the
+signature, the package's own version must be the one the tag named, and
+Windows Installer refuses an older package on top of that. An unsigned release
+is not offered at all, so publishing before signing is harmless. Only the
+installed product updates itself; a console run or a test instance reports
+that it does not.
+
+**Cost.** One wake-up a day in a process that otherwise has none, and one more
+executable to ship (0.3 MB). One dependency, `ed25519-compact` (MIT, no
+dependencies of its own), in the updater only: Windows has no Ed25519 before
+Windows 11, so it cannot be a system call. A release needs the maintainer at a
+machine with the key. Losing the key strands every installed copy on its
+version, so a second key should be listed before the first is ever needed.
+Protocol version 3 adds the update mode, status and requests.

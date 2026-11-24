@@ -20,7 +20,8 @@ The first frame on a connection must be `Hello { protocol }`. The service
 answers `Hello(Welcome { protocol, version, elevated })`, or
 `Error(ProtocolMismatch)` if the versions differ. `PROTOCOL_VERSION` is bumped
 whenever a message changes shape; there is no negotiation, the app and the
-service are released together. Version 2 added `ServiceStatus.fans`.
+service are released together. Version 2 added `ServiceStatus.fans`; version 3
+added `Profile.updates`, `ServiceStatus.update` and the three update requests.
 
 `elevated` tells the client how the service sees it. It is computed once per
 connection from the client's token and does not change afterwards.
@@ -52,6 +53,9 @@ strict alternation.
 | `SetFans(curves)`               | `Ok`          | yes             |
 | `ClearHistory`                  | `Ok`          | yes             |
 | `Shutdown`                      | `Ok`          | yes (console runs only) |
+| `SetUpdates(mode)`              | `Ok`          | yes             |
+| `CheckForUpdate`                | `Ok`          | yes             |
+| `InstallUpdate`                 | `Ok`          | yes             |
 
 Any request can instead be answered with `Error { code, message }`. The message
 is written for the person using the app and can be shown as is.
@@ -121,6 +125,23 @@ Each channel is a `FanChannelStatus`:
 target moves by five points. Clients re-read `Status`; the sensor values of
 the fan (`board.fanN`, `board.pwmN`) travel in the section like any other.
 
+### Updates in the status
+
+`Status` carries `update`, an `UpdateStatus`:
+
+| Field          | Content                                                                 |
+| -------------- | ----------------------------------------------------------------------- |
+| `mode`         | What the profile asks for: `Off` (never look, never mention), `Notify` (look once a day and say so; the default) or `Automatic` (also install, while no client is subscribed). |
+| `state`        | `Idle`, `Checking`, `Available { version }`, `Installing`, `Failed { reason }`, or `Unavailable` for a copy that does not update itself (a console run or a test instance). |
+| `checked_unix` | When a look last succeeded, since the service started.                  |
+
+`CheckForUpdate` and `InstallUpdate` answer `Ok` at once: the work is done by
+the updater, and its outcome arrives as a `StatusChanged` event and a new
+`state`. `InstallUpdate` needs no earlier look and installs whoever is
+connected; the installation stops the service and closes the app, so a client
+that sent it should expect its connection to end. A copy in the state
+`Unavailable` answers both with `Unsupported`.
+
 ## Sensor section
 
 | Property | Value                                                    |
@@ -172,6 +193,23 @@ that does not decode ends the worker the same way. The service waits up to 20 s
 for `Probed` and 750 ms for each `Sample`. While a session holds a channel and
 no request comes for two seconds, the worker reads the sensors and steps by
 itself.
+
+## Updater
+
+The service and `syspilot-update.exe` exchange even less (`proto::update`),
+and again both come from the same build. The service starts the updater with
+one command and reads one line from its standard output.
+
+| Command               | Line on success                     |
+| --------------------- | ----------------------------------- |
+| `check`               | `current`, or `available <version>` |
+| `install <directory>` | `installing <version>`, or `current` when there was nothing newer |
+
+A failure is a non-zero exit code and a sentence on standard error, which
+becomes the `reason` of `Failed`. After `installing` the updater has started
+Windows Installer and exits; the service is stopped by the installation. If it
+is still running half an hour later, the state becomes `Failed` and names the
+installer's log.
 
 ## Compatibility rules
 

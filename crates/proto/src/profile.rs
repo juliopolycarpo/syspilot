@@ -28,6 +28,9 @@ pub struct Profile {
     /// IDs of the catalog tweaks that are enforced.
     #[serde(default)]
     pub enabled: Vec<String>,
+    /// How SysPilot keeps itself up to date.
+    #[serde(default)]
+    pub updates: UpdateMode,
     /// User-defined actions.
     #[serde(default)]
     pub custom: Vec<CustomAction>,
@@ -44,10 +47,46 @@ impl Default for Profile {
         Self {
             schema: PROFILE_SCHEMA,
             enabled: Vec::new(),
+            updates: UpdateMode::default(),
             custom: Vec::new(),
             logging: LoggingConfig::default(),
             fans: Vec::new(),
         }
+    }
+}
+
+/// How SysPilot keeps itself up to date. A machine-wide choice: the service
+/// is what looks for a new version and installs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UpdateMode {
+    /// Never look for a new version and never mention one.
+    Off,
+    /// Look once a day and say when there is a new version. Installing it is
+    /// the user's decision.
+    #[default]
+    Notify,
+    /// Look once a day and install a new version without asking, while the
+    /// app is closed.
+    Automatic,
+}
+
+impl UpdateMode {
+    /// Every mode, in display order.
+    pub const ALL: [Self; 3] = [Self::Off, Self::Notify, Self::Automatic];
+
+    /// The name used in the profile and on the command line.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Notify => "notify",
+            Self::Automatic => "automatic",
+        }
+    }
+
+    /// The mode with this key.
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|mode| mode.key() == key)
     }
 }
 
@@ -433,6 +472,20 @@ points = [[40, 30], [60, 50], [80, 100]]
         let profile = Profile::default();
         profile.validate().unwrap();
         assert_eq!(Profile::parse(&profile.to_toml()).unwrap(), profile);
+    }
+
+    #[test]
+    fn updates_default_to_telling_and_every_mode_has_a_key() {
+        assert_eq!(Profile::parse(SAMPLE).unwrap().updates, UpdateMode::Notify);
+        let chosen = Profile::parse("schema = 1\nupdates = \"automatic\"").unwrap();
+        assert_eq!(chosen.updates, UpdateMode::Automatic);
+        assert_eq!(Profile::parse(&chosen.to_toml()).unwrap(), chosen);
+        for mode in UpdateMode::ALL {
+            assert_eq!(UpdateMode::from_key(mode.key()), Some(mode));
+        }
+        assert_eq!(UpdateMode::from_key("sometimes"), None);
+        let unknown = Profile::parse("schema = 1\nupdates = \"sometimes\"").unwrap_err();
+        assert!(matches!(unknown, ProfileError::Syntax(_)), "{unknown}");
     }
 
     #[test]

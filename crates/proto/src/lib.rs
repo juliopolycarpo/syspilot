@@ -10,6 +10,7 @@
 //! - [`client`]: the pipe client.
 //! - [`win`]: the Win32 plumbing underneath.
 //! - [`worker`]: what the service and its sensor worker exchange.
+//! - [`update`]: what the service and its updater exchange.
 //!
 //! The wire format is described in `docs/protocol.md`.
 
@@ -23,8 +24,9 @@ pub mod message;
 pub mod product;
 pub mod profile;
 pub mod sensor;
+pub mod update;
 pub mod win;
 pub mod worker;
 
 pub use client::{Client, ClientError, EventStream};
-pub use product::{Instance, PRODUCT_NAME, PROTOCOL_VERSION};
+pub use product::{APP_PREFERENCES_FILE, Instance, PRODUCT_NAME, PROTOCOL_VERSION};

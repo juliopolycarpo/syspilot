@@ -4,16 +4,16 @@
 //! the installer script's job. `uninstall` puts every changed setting back
 //! before it removes the service and its data.
 
-use std::io;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::time::{Duration, Instant};
+use std::{fs, io};
 
 use syspilot_engine::win;
 use syspilot_proto::message::{Request, Response};
 use syspilot_proto::profile::Profile;
 use syspilot_proto::win::wide;
-use syspilot_proto::{Client, Instance};
+use syspilot_proto::{APP_PREFERENCES_FILE, Client, Instance};
 use windows_sys::Win32::Foundation::{
     ERROR_SERVICE_ALREADY_RUNNING, ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_EXISTS,
     ERROR_SERVICE_NOT_ACTIVE, GetLastError,
@@ -317,8 +317,60 @@ fn revert_everything(instance: &Instance, data: &DataDir) -> Result<usize, Strin
     }
 }
 
-/// Stops and removes the service of `instance` and deletes its data. Unless
-/// `keep_tweaks` is set, every setting it changed is restored first.
+/// Where Windows keeps the user profiles, e.g. `C:\Users`.
+fn profiles_root() -> PathBuf {
+    // The public profile sits beside the others, and its place is in the
+    // environment of every account, LocalSystem's included.
+    std::env::var_os("PUBLIC")
+        .map(PathBuf::from)
+        .and_then(|public| public.parent().map(Path::to_owned))
+        .unwrap_or_else(|| {
+            let mut root = std::env::var_os("SystemDrive").unwrap_or_else(|| "C:".into());
+            root.push(r"\Users");
+            PathBuf::from(root)
+        })
+}
+
+/// Whether `path` is a directory in its own right, not a link to one.
+fn is_plain_directory(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+}
+
+/// Removes what the app of `instance` kept for each user under
+/// `profiles`: its preferences file and the directory around it. Returns
+/// how many users had one.
+///
+/// This runs as an administrator or LocalSystem inside directories their
+/// owners control, so it follows no link (a junction in the path could
+/// point anywhere) and deletes one file by name and its directory only if
+/// that leaves it empty.
+fn remove_user_preferences(instance: &Instance, profiles: &Path) -> usize {
+    let Ok(users) = fs::read_dir(profiles) else { return 0 };
+    let mut removed = 0;
+    for user in users.flatten() {
+        let mut directory = user.path();
+        // Every step of the way, the profile directory itself included.
+        let plain = is_plain_directory(&directory)
+            && ["AppData", "Local", instance.name()].iter().all(|part| {
+                directory.push(part);
+                is_plain_directory(&directory)
+            });
+        let file = directory.join(APP_PREFERENCES_FILE);
+        let is_file = fs::symlink_metadata(&file).is_ok_and(|metadata| metadata.is_file());
+        if plain && is_file && fs::remove_file(&file).is_ok() {
+            removed += 1;
+            // Fails when anything else is in it, which is then not ours.
+            let _ = fs::remove_dir(&directory);
+        }
+    }
+    removed
+}
+
+/// Stops and removes the service of `instance` and deletes its data: the
+/// profile, the state, the logs, downloaded updates and what the app kept
+/// for each user. Unless `keep_tweaks` is set, every setting it changed is
+/// restored first.
 pub fn uninstall(instance: &Instance, keep_tweaks: bool) -> Result<String, String> {
     if !is_process_elevated() {
         return Err(NEEDS_ELEVATION.into());
@@ -360,6 +412,7 @@ pub fn uninstall(instance: &Instance, keep_tweaks: bool) -> Result<String, Strin
         }
     }
     data.remove().map_err(|error| format!("remove {}: {error}", data.root().display()))?;
+    remove_user_preferences(instance, &profiles_root());
 
     let summary = match (service.is_some(), keep_tweaks) {
         (true, false) => "service removed and settings restored.",
@@ -421,5 +474,83 @@ mod tests {
     #[test]
     fn program_files_is_known_on_this_machine() {
         assert!(!program_files_roots().is_empty());
+    }
+
+    /// A stand-in for `C:\Users` under the system temp directory, removed
+    /// on drop.
+    struct FakeProfiles(PathBuf);
+
+    impl FakeProfiles {
+        fn new(tag: &str) -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("SysPilot-Test-profiles-{tag}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        /// The app's directory of `user` for `instance`, created.
+        fn app_directory(&self, user: &str, instance: &str) -> PathBuf {
+            let directory = self.0.join(user).join("AppData").join("Local").join(instance);
+            fs::create_dir_all(&directory).unwrap();
+            directory
+        }
+    }
+
+    impl Drop for FakeProfiles {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn uninstalling_removes_each_users_preferences_and_nothing_else() {
+        let profiles = FakeProfiles::new("preferences");
+        let instance = Instance::named("SysPilot-Test.profiles").unwrap();
+        let ana = profiles.app_directory("ana", instance.name());
+        let bruno = profiles.app_directory("bruno", instance.name());
+        let other = profiles.app_directory("ana", "SomethingElse");
+        let never_ran = profiles.app_directory("carla", "Unrelated");
+        for directory in [&ana, &bruno, &other] {
+            fs::write(directory.join(APP_PREFERENCES_FILE), "level = \"simple\"\n").unwrap();
+        }
+        // Something that is not the app's, in the app's directory.
+        fs::write(bruno.join("notes.txt"), "mine").unwrap();
+
+        assert_eq!(remove_user_preferences(&instance, &profiles.0), 2);
+        assert!(!ana.exists(), "an emptied directory goes too");
+        assert!(!bruno.join(APP_PREFERENCES_FILE).exists());
+        assert!(bruno.join("notes.txt").is_file(), "(uninstall): expected a foreign file kept");
+        assert!(other.join(APP_PREFERENCES_FILE).is_file(), "another program's file is kept");
+        assert!(never_ran.is_dir());
+        assert_eq!(remove_user_preferences(&instance, &profiles.0), 0, "nothing is left");
+    }
+
+    #[test]
+    fn uninstalling_does_not_follow_a_link_in_a_users_profile() {
+        let profiles = FakeProfiles::new("link");
+        let instance = Instance::named("SysPilot-Test.profiles").unwrap();
+        // Where a user would like LocalSystem to delete a file for them.
+        let target = profiles.0.join("elsewhere");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join(APP_PREFERENCES_FILE), "not the app's").unwrap();
+        let local = profiles.0.join("mallory").join("AppData").join("Local");
+        fs::create_dir_all(&local).unwrap();
+        let link = local.join(instance.name());
+        let linked = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(linked.status.success(), "(fixture): expected a junction | received: {linked:?}");
+
+        assert_eq!(remove_user_preferences(&instance, &profiles.0), 0);
+        assert!(target.join(APP_PREFERENCES_FILE).is_file(), "the link's target is untouched");
+    }
+
+    #[test]
+    fn the_profiles_directory_holds_the_public_profile() {
+        assert!(profiles_root().join("Public").is_dir(), "{}", profiles_root().display());
     }
 }

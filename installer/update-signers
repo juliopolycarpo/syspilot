@@ -1,0 +1,9 @@
+# The keys that may sign a SysPilot release, in OpenSSH's allowed-signers
+# format. The updater is built with this file and installs nothing whose
+# signature does not come from one of these keys. A key listed here can make
+# every installed copy run code as LocalSystem: add or remove one only in a
+# reviewed, signed commit, and release it before the key it replaces is retired.
+#
+# To check a download by hand:
+#   ssh-keygen -Y verify -f update-signers -I syspilot -n syspilot-update -s SysPilot-x.y.z-x64.msi.sig < SysPilot-x.y.z-x64.msi
+syspilot namespaces="syspilot-update" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDShkSSYqllPScohTlO1oQEzB0JCQh0xyIB2AsDsHWtq

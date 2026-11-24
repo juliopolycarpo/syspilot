@@ -48,6 +48,13 @@ pub enum Event {
     Suspend,
     /// The machine woke up.
     Resume,
+    /// The updater ended a job.
+    UpdateFinished {
+        /// What it was asked to do.
+        job: crate::updates::Job,
+        /// What it reported, or why it failed.
+        outcome: crate::updates::Outcome,
+    },
 }
 
 /// A multi-producer queue with a Win32 event that is signalled while the

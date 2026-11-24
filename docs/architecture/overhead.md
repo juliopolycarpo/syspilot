@@ -8,7 +8,7 @@ treated as a requirement.
 
 | Measure                                   | Budget          |
 | ----------------------------------------- | --------------- |
-| Wake-ups while idle                       | none            |
+| Wake-ups while idle                       | one a day, to look for an update; none with updates off |
 | Private memory while idle                 | at most 5 MB    |
 | Release executable (`syspilot-svc.exe`)   | at most 1.5 MB  |
 | Threads while idle                        | a handful       |
@@ -23,7 +23,11 @@ all the time.
 - **No timers by default.** The event loop waits on one handle with an infinite
   timeout. A timeout exists only while something is due: a contested retry, a
   paused watch, an `interval` trigger, or sensor sampling for a connected
-  client or the logger.
+  client or the logger. The one exception is the look for a new version, once
+  every 24 hours; with updates off the timeout is infinite again.
+- **Updates in another process.** Looking for a release and installing it is
+  the work of `syspilot-update.exe`, which runs for seconds a day. The service
+  carries no network code and loads no network library.
 - **Notifications instead of polling.** Drift is detected by
   `RegNotifyChangeKeyValue`. The kernel wakes the service when a watched key
   changes and at no other time.

@@ -32,6 +32,7 @@ exists today, and the seams the app plugs into.
 | `hw`     | `proto`, `pawnio`  | Sensor providers and the hub that samples them.                   |
 | `sensors`| `proto`, `hw`, `pawnio` | The sensor worker: reads hardware on the service's behalf and, with the `fan-control` feature, follows fan curves. |
 | `svc`    | `proto`, `engine`, `hw`, `pawnio` | Event loop, pipe server, installer, command line. Uses `hw` only for the hub, `pawnio` only to see whether the driver is installed. |
+| `update` | `proto`            | The updater: finds a new release, verifies its signature and hands it to Windows Installer, on the service's behalf. |
 | `ui`     | `proto`            | The desktop app. It links none of the privileged code.            |
 
 `proto` is the only crate both sides link. If a change does not touch `proto`,
@@ -79,6 +80,7 @@ sensor providers when someone needs values and tells subscribers what changed.
   state\applied.toml    snapshots of every value before it was changed
   state\history.toml    recent enforcement events
   logs\                 sensor logs (CSV), readable by users
+  updates\              a downloaded release and the log of installing it
 ```
 
 Files are replaced atomically (write a sibling, rename over). The directory is
@@ -138,6 +140,18 @@ its input closes, on a panic, on sleep and on a new plan. The reasoning is in
 decision 18, the registers and the rules in the
 [research note](../research/fan-control.md) and the profile format in
 [fan curves](../fan-curves.md).
+
+### Updates
+
+The service decides when to look for a new release and whether to install it
+(`svc/src/updates.rs`, a state machine driven by the profile's `updates`
+mode, the daily timer and whether an app is connected). The work is done by
+`syspilot-update.exe` (crate `update`), started for one job: it asks GitHub
+for the newest release, and to install it downloads the package into
+`updates\`, verifies its signature against the keys compiled into it and
+starts Windows Installer, which stops the service, replaces the files and
+starts it again. The reasoning is in decisions 19 and 20 and what a release
+must get past is in the [security model](../security-model.md#updates).
 
 ## Instances
 

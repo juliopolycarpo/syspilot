@@ -18,6 +18,22 @@ Build-time only (not part of any shipped binary): `serde_derive`,
 The exact versions are in `Cargo.lock`. `cargo tree -p syspilot-svc` prints the
 current list.
 
+## Linked into the updater
+
+Besides `windows-sys` from the table above:
+
+| Crate                                         | Licence             | Used for                          |
+| --------------------------------------------- | ------------------- | --------------------------------- |
+| [`ed25519-compact`](https://crates.io/crates/ed25519-compact) | MIT | Verifying a release's signature (Ed25519, SHA-512) |
+
+## Inside the installer
+
+| Component                                     | Licence             | Used for                          |
+| --------------------------------------------- | ------------------- | --------------------------------- |
+| [WiX toolset](https://wixtoolset.org/) utility extension, custom action library | MS-RL | Closing the app before its files are replaced. Embedded in the `.msi` by the build; not installed |
+
+The WiX toolset itself (MS-RL) builds the package and is not part of it.
+
 ## Linked into or shipped with the app
 
 | Component                                     | Licence             | Used for                          |

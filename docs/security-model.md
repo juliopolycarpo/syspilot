@@ -10,7 +10,7 @@ it.
 | Caller                                   | May                                                        |
 | ---------------------------------------- | ---------------------------------------------------------- |
 | Any local signed-in user                 | Read status, catalog, entry states, sensors, system info.  |
-| An elevated administrator                | Everything: change settings, read and replace the profile. |
+| An elevated administrator                | Everything: change settings, read and replace the profile, look for and install an update. |
 | Remote callers                           | Nothing. The pipe rejects remote clients.                  |
 
 **The rule: no request from a non-elevated caller may cause the service to
@@ -73,6 +73,54 @@ can write the profile is LocalSystem.
   and what it sends back is decoded with the same bounded decoder as the pipe.
 - A worker that stops answering is dropped after 750 ms and terminated. It
   cannot stall enforcement.
+
+### Updates
+
+A service that installs new versions of itself is a way to run code as
+LocalSystem on every machine that has it. What a release must get past:
+
+- **The service does not download or verify anything.** It starts
+  `syspilot-update.exe` by its full path next to its own executable, for one
+  job, and reads one line of a fixed vocabulary from it. A version text that
+  is not digits and dots is discarded. The updater is given no instructions
+  beyond "look" or "install into this directory".
+- **Only an elevated administrator can ask** for a look, an installation or a
+  change of the update mode. The daily look needs nobody.
+- **The download lands where only LocalSystem and Administrators can write**:
+  `updates\` in the data directory, with the same protected ACL as the
+  profile. Between verification and installation nobody else can replace the
+  file.
+- **A signature from a pinned key, over the whole package.** The keys are in
+  `installer/update-signers` and compiled into the updater. The signature is
+  an OpenSSH file signature; the updater accepts only Ed25519, SHA-512 and the
+  namespace `syspilot-update`, so a signature the same key made for anything
+  else (a commit, a login) is not a release. Nothing in the package is read
+  or run before this check passes, and a package that fails it is deleted.
+- **The network is not trusted.** WinHTTP validates GitHub's certificate, but
+  the tag, the redirect and every byte are treated as hints. Downloads are
+  capped in size. A release without a signature is not offered at all.
+- **No going back.** After the signature, the package must declare the
+  version its tag named, which must be newer than the running one; Windows
+  Installer refuses a downgrade as well. A signed old release cannot be
+  replayed as a new one.
+- **The signing key is not on GitHub.** CI builds a draft release without it;
+  the maintainer signs with a key held in an SSH agent that asks before each
+  use. Taking over the repository or a workflow does not yield a release that
+  installed copies accept.
+- **Windows Installer does the installing**, started by its full path in the
+  system directory, with no window. A failed installation is rolled back.
+
+What this does not defend against: the release key itself being stolen, and
+a maintainer signing a bad build. The first is why a second, offline key
+should be listed before it is needed; the second is what review is for.
+
+### Removal
+
+Removing SysPilot runs `syspilot-svc uninstall` as LocalSystem. It deletes
+the data directory and, for each user profile, the app's preferences file. In
+a user's profile it follows no link and deletes that one file by name (and
+its directory only if that leaves it empty), so a junction planted there
+cannot point the deletion at anything else.
 
 ### Commands
 

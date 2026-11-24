@@ -1,0 +1,1 @@
+A file signed by OpenSSH with a throwaway key, to check the updater against the real tool.
