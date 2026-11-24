@@ -89,3 +89,96 @@ source = "https://learn.microsoft.com/windows/privacy/manage-connections-from-wi
 
 [[tweak.action]]
 registry = { scope = "machine", key = 'SOFTWARE\Policies\Microsoft\Windows\System', name = "EnableAppUriHandlers", data = { dword = 0 } }
+
+[[tweak]]
+id = "other.search-highlights"
+title = "Turn off search highlights"
+summary = "Search stops showing highlights in the search box and on the Search home page."
+detail = '''Policy: Computer Configuration > Administrative Templates > Windows Components > Search > Allow search highlights. Sets HKLM\SOFTWARE\Policies\Microsoft\Windows\Windows Search\EnableDynamicContentInWSB (REG_DWORD) to 0. Microsoft states that 0 turns off search highlights in search home and in the taskbar search box (Windows 10) or the Start menu search box (Windows 11), and that 1 is the default. Applies to Windows 10 20H2 and later with KB5011543, and Windows 11 21H2 with KB5023774 and later.'''
+level = "advanced"
+category = "other"
+source = "https://learn.microsoft.com/windows/client-management/mdm/policy-csp-search#allowsearchhighlights"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SOFTWARE\Policies\Microsoft\Windows\Windows Search', name = "EnableDynamicContentInWSB", data = { dword = 0 } }
+
+[[tweak]]
+id = "other.task-view"
+title = "Hide the Task view button"
+summary = "The Task view button no longer appears on the taskbar."
+detail = '''Policy: Start Menu and Taskbar > Hide the TaskView button (HideTaskViewButton). Sets HKLM\Software\Policies\Microsoft\Windows\Explorer\HideTaskViewButton (REG_DWORD) to 1 (button hidden). Microsoft states that the Settings toggle for the button is disabled while the policy is on. Applies to Windows 11 22H2 and later.'''
+level = "advanced"
+category = "other"
+side-effects = "The Task view switch in Settings is greyed out."
+min-build = 22621
+source = "https://learn.microsoft.com/windows/client-management/mdm/policy-csp-start#hidetaskviewbutton"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'Software\Policies\Microsoft\Windows\Explorer', name = "HideTaskViewButton", data = { dword = 1 } }
+
+[[tweak]]
+id = "other.start-recommended-section"
+title = "Remove the recommended section from Start"
+summary = "The Start menu no longer shows the section with recommended files and apps."
+detail = '''Policy: Start Menu and Taskbar > Remove Recommended section from Start Menu (HideRecommendedSection). Sets HKLM\Software\Policies\Microsoft\Windows\Explorer\HideRecommendedSection (REG_DWORD) to 1 (section hidden). This hides the whole section; the tips and shortcuts switch in "Hide recommendations in Start" is separate. Applies to Windows 11 22H2 and later.'''
+level = "advanced"
+category = "other"
+side-effects = "Files and apps that Start would have recommended are no longer listed there."
+min-build = 22621
+source = "https://learn.microsoft.com/windows/client-management/mdm/policy-csp-start#hiderecommendedsection"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'Software\Policies\Microsoft\Windows\Explorer', name = "HideRecommendedSection", data = { dword = 1 } }
+
+[[tweak]]
+id = "other.start-recently-added-apps"
+title = "Hide recently added apps in Start"
+summary = "Start no longer lists apps you installed recently."
+detail = '''Policy: Start Menu and Taskbar > Remove "Recently added" list from Start Menu (HideRecentlyAddedApps). Sets HKLM\Software\Policies\Microsoft\Windows\Explorer\HideRecentlyAddedApps (REG_DWORD) to 1 (list hidden). Microsoft states that the Show recently added apps switch in Settings is greyed out and that the policy needs a restart of explorer.exe or the PC. Applies to Windows 10 1703 and later and Windows 11.'''
+level = "advanced"
+category = "other"
+side-effects = "The Show recently added apps switch in Settings is greyed out."
+reboot = "restart"
+source = "https://learn.microsoft.com/windows/client-management/mdm/policy-csp-start#hiderecentlyaddedapps"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'Software\Policies\Microsoft\Windows\Explorer', name = "HideRecentlyAddedApps", data = { dword = 1 } }
+
+[[tweak]]
+id = "other.start-most-used-apps"
+title = "Hide most used apps in Start"
+summary = "Start no longer lists the apps you use most."
+detail = '''Policy: Start Menu and Taskbar > Remove frequent programs list from the Start Menu (NoFrequentUsedPrograms). Sets HKLM\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\NoStartMenuMFUprogramsList (REG_DWORD) to 1 (list hidden). Microsoft states that the Show most used apps switch in Settings is greyed out and that the policy needs a restart of explorer.exe or the PC. Applies to Windows 10 1703 and later and Windows 11.'''
+level = "advanced"
+category = "other"
+side-effects = "The Show most used apps switch in Settings is greyed out."
+reboot = "restart"
+source = "https://learn.microsoft.com/windows/client-management/mdm/policy-csp-start#hidefrequentlyusedapps"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'Software\Microsoft\Windows\CurrentVersion\Policies\Explorer', name = "NoStartMenuMFUprogramsList", data = { dword = 1 } }
+
+[[tweak]]
+id = "other.start-more-pins"
+title = "Show more pins in Start"
+summary = "Start gives more room to pinned apps and less to recommended items."
+detail = '''Sets HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\Start_Layout (REG_DWORD) to 1. Microsoft lists the value as the start layout: 0 is the default, 1 is More Pins and 2 is More Recommendations.'''
+level = "simple"
+category = "other"
+min-build = 22621
+source = "https://learn.microsoft.com/windows/apps/develop/settings/settings-windows-11"
+
+[[tweak.action]]
+registry = { scope = "user", key = 'Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced', name = "Start_Layout", data = { dword = 1 } }
+
+[[tweak]]
+id = "other.lock-screen"
+title = "Skip the lock screen"
+summary = "Locking the PC shows the sign-in screen directly, without the lock screen picture."
+detail = '''Policy: Computer Configuration > Administrative Templates > Control Panel > Personalization > Do not display the lock screen. Sets HKLM\SOFTWARE\Policies\Microsoft\Windows\Personalization\NoLockScreen (REG_DWORD) to 1. Microsoft's Policy CSP reference says that with the policy on, users who are not required to press Ctrl+Alt+Delete before signing in see their selected tile after locking the PC, and lists it for Pro, Enterprise and Education on Windows 10 2004 and later with KB5005101 and Windows 11 21H2 and later. The data value 1 is the one in Microsoft's device lockdown guide.'''
+level = "advanced"
+category = "other"
+source = "https://learn.microsoft.com/windows/iot/iot-enterprise/commercialization/iot-ent-device-lockdown-features"
+
+[[tweak.action]]
+registry = { scope = "machine", key = 'SOFTWARE\Policies\Microsoft\Windows\Personalization', name = "NoLockScreen", data = { dword = 1 } }

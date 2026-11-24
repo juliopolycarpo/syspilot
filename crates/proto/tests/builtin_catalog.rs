@@ -65,6 +65,7 @@ const PROPER_NOUNS: &[&str] = &[
     "Search",
     "Storage",
     "Sense",
+    "Task",
     "Find",
     "My",
     "Device",
