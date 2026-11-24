@@ -123,7 +123,12 @@ fn row(app: &App, row: &TweakRow, context: &ViewContext<App>) -> KeyedView {
     let view = if app.level() == ViewLevel::Advanced {
         // Named, so that a screen reader says which tweak the details are
         // of; the switch inside carries the tweak's own title.
+        let id = row.id.clone();
         Expander::new()
+            .is_expanded(app.details_open.contains(&row.id))
+            .on_is_expanded_changed(
+                context.callback(move |open| Message::ShowDetails(id.clone(), open)),
+            )
             .horizontal_alignment(HorizontalAlignment::Stretch)
             .automation_name(format!("Details of {}", row.title))
             .slots([

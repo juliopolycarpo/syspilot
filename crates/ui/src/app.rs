@@ -215,6 +215,8 @@ pub enum Message {
     FormText(Field, String),
     /// The per-thread readings of a device were unfolded or folded.
     Unfold(String, bool),
+    /// The details of a tweak, by id, were opened or closed.
+    ShowDetails(String, bool),
     /// A sensor, by key, was hidden from the Sensors page (`true`) or
     /// shown again.
     HideSensor(String, bool),
@@ -290,6 +292,19 @@ pub struct App {
     pub form: CustomForm,
     /// Devices whose per-thread and per-core readings are unfolded.
     pub unfolded: HashSet<String>,
+    /// Tweaks whose details are open at the Advanced level.
+    pub details_open: HashSet<String>,
+}
+
+/// Records an expander being opened or closed. An expander must be told
+/// whether it is open on every render: one left to itself is closed again
+/// by the toolkit as soon as it opens.
+fn set_open(open_keys: &mut HashSet<String>, key: String, open: bool) {
+    if open {
+        open_keys.insert(key);
+    } else {
+        open_keys.remove(&key);
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -560,6 +575,7 @@ impl Component for App {
             notice: None,
             form: CustomForm::default(),
             unfolded: HashSet::new(),
+            details_open: HashSet::new(),
         };
         app.go(Page::Home);
         app.go(launch.page);
@@ -654,8 +670,8 @@ impl Component for App {
                 }
             }
             Message::FormText(field, text) => self.form.set_text(field, text),
-            Message::Unfold(device, true) => _ = self.unfolded.insert(device),
-            Message::Unfold(device, false) => _ = self.unfolded.remove(&device),
+            Message::Unfold(device, open) => set_open(&mut self.unfolded, device, open),
+            Message::ShowDetails(id, open) => set_open(&mut self.details_open, id, open),
             Message::HideSensor(key, hide) => {
                 let hidden = &mut self.preferences.hidden_sensors;
                 let changed = if hide { hidden.insert(key) } else { hidden.remove(&key) };
@@ -915,6 +931,22 @@ mod tests {
             assert_eq!(Page::from_tag(page.tag()), Some(page), "{page:?}");
         }
         assert_eq!(Page::from_tag("nowhere"), None);
+    }
+
+    #[test]
+    fn an_expander_stays_open_until_it_is_closed() {
+        let mut open = HashSet::new();
+        set_open(&mut open, "privacy.advertising-id".to_owned(), true);
+        set_open(&mut open, "privacy.advertising-id".to_owned(), true);
+        assert!(
+            open.contains("privacy.advertising-id"),
+            "(details): expected open after opening | received: {open:?}"
+        );
+        set_open(&mut open, "privacy.advertising-id".to_owned(), false);
+        assert!(
+            open.is_empty(),
+            "(details): expected none open after closing | received: {open:?}"
+        );
     }
 
     #[test]
