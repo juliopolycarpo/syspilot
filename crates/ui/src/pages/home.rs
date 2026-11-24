@@ -4,7 +4,7 @@ use syspilot_proto::message::DriverState;
 use windows_reactor::*;
 
 use crate::app::{App, Message, Page};
-use crate::model::{self, Overview, TREND_LEN, Tone, ViewLevel};
+use crate::model::{self, CHART_POINTS, Overview, Tone, ViewLevel};
 use crate::widgets::{
     self, CARD_PADDING, GAP_MEDIUM, GAP_SMALL, GAP_TIGHT, TEXT_FIGURE, TEXT_SUBTITLE,
 };
@@ -83,8 +83,8 @@ fn readings(app: &App) -> View {
             .font_size(TEXT_SUBTITLE)
             .font_weight(FontWeight::SEMI_BOLD);
         let chart = widgets::sparkline(
-            &trends.series(vital.sensor.id),
-            TREND_LEN,
+            &trends.chart_points(vital.sensor.id),
+            CHART_POINTS,
             (TILE.0 - GAP_MEDIUM - 2.0 * CARD_PADDING, 36.0),
             model::chart_scale(vital.sensor.kind),
             app.palette.chart(),

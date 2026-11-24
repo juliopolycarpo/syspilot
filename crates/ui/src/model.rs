@@ -16,6 +16,14 @@ use syspilot_proto::sensor::{DeviceClass, Sample, SensorInfo, SensorKind, Sensor
 /// Samples kept per sensor for the small trend lines: one minute.
 pub const TREND_LEN: usize = 60;
 
+/// Seconds averaged into one point of a trend line. Every changed point
+/// redraws a line segment, so a chart that only changes when a whole
+/// bucket is complete costs about a quarter of one that moves each second.
+pub const CHART_BUCKET: usize = 2;
+
+/// Points on a trend line.
+pub const CHART_POINTS: usize = TREND_LEN / CHART_BUCKET;
+
 /// Everything read from the service in one refresh.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Snapshot {
@@ -404,6 +412,10 @@ pub fn bytes_text(bytes: f64) -> String {
 pub struct Trends {
     generation: u32,
     series: Vec<VecDeque<Option<f64>>>,
+    /// Samples pushed since the sensor set last changed. Every series gets
+    /// one value per push, so the oldest value kept is sample number
+    /// `pushes - len`.
+    pushes: u64,
 }
 
 impl Trends {
@@ -413,7 +425,9 @@ impl Trends {
         if generation != self.generation {
             self.generation = generation;
             self.series.clear();
+            self.pushes = 0;
         }
+        self.pushes += 1;
         let sensor_count = samples.iter().map(|sample| sample.id as usize + 1).max().unwrap_or(0);
         if self.series.len() < sensor_count {
             self.series.resize_with(sensor_count, VecDeque::new);
@@ -435,6 +449,29 @@ impl Trends {
     /// The recent values of a sensor, oldest first.
     pub fn series(&self, id: u32) -> Vec<Option<f64>> {
         self.series.get(id as usize).map(|s| s.iter().copied().collect()).unwrap_or_default()
+    }
+
+    /// The points of a sensor's trend line: the average of each complete
+    /// [`CHART_BUCKET`] of samples, oldest first. Buckets are aligned to the
+    /// sample count, not to the window, so a point never changes once drawn
+    /// and the line moves only when a bucket completes. A bucket without a
+    /// single reading is a gap.
+    pub fn chart_points(&self, id: u32) -> Vec<Option<f64>> {
+        let values = self.series(id);
+        let size = CHART_BUCKET as u64;
+        let end = self.pushes;
+        let first = end.saturating_sub(values.len() as u64);
+        let start = first.div_ceil(size) * size;
+        (start..end)
+            .step_by(CHART_BUCKET)
+            .take_while(|bucket| bucket + size <= end)
+            .map(|bucket| {
+                let from = (bucket - first) as usize;
+                let known: Vec<f64> =
+                    values[from..from + CHART_BUCKET].iter().flatten().copied().collect();
+                (!known.is_empty()).then(|| known.iter().sum::<f64>() / known.len() as f64)
+            })
+            .collect()
     }
 
     /// Lowest and highest recent value of a sensor.
@@ -1094,6 +1131,49 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
 
         trends.push(2, &[Sample { id: 0, value: Some(1.0) }]);
         assert_eq!(trends.series(0), [Some(1.0)], "IDs of a new set mean other sensors");
+    }
+
+    #[test]
+    fn chart_points_average_complete_buckets_and_only_move_when_one_completes() {
+        let mut trends = Trends::default();
+        let push = |trends: &mut Trends, value: Option<f64>| {
+            trends.push(1, &[Sample { id: 0, value }]);
+        };
+        push(&mut trends, Some(1.0));
+        assert!(trends.chart_points(0).is_empty(), "(1 sample): expected no complete bucket");
+        push(&mut trends, Some(3.0));
+        assert_eq!(trends.chart_points(0), [Some(2.0)]);
+        push(&mut trends, None);
+        assert_eq!(trends.chart_points(0), [Some(2.0)], "a half bucket changes nothing");
+        push(&mut trends, Some(5.0));
+        assert_eq!(trends.chart_points(0), [Some(2.0), Some(5.0)], "a failed read is skipped");
+        push(&mut trends, None);
+        push(&mut trends, None);
+        assert_eq!(
+            trends.chart_points(0),
+            [Some(2.0), Some(5.0), None],
+            "an empty bucket is a gap"
+        );
+    }
+
+    #[test]
+    fn chart_points_drop_the_half_bucket_that_left_the_window() {
+        let mut trends = Trends::default();
+        for second in 0..(TREND_LEN + 1) {
+            trends.push(1, &[Sample { id: 0, value: Some(second as f64) }]);
+        }
+        // Samples 1..=60 are kept; bucket 0-1 lost sample 0, bucket 60-61 is half full.
+        let points = trends.chart_points(0);
+        assert_eq!(
+            points.len(),
+            CHART_POINTS - 1,
+            "(points with sample 0 gone): expected {} | received: {}",
+            CHART_POINTS - 1,
+            points.len()
+        );
+        assert_eq!(points.first(), Some(&Some(2.5)), "(oldest point): expected samples 2 and 3");
+        assert_eq!(points.last(), Some(&Some(58.5)), "(newest point): expected samples 58 and 59");
+        assert!(trends.chart_points(9).is_empty(), "an unknown sensor has no points");
     }
 
     #[test]

@@ -5,7 +5,7 @@ use syspilot_proto::sensor::{DeviceInfo, SensorInfo};
 use windows_reactor::*;
 
 use crate::app::{App, Message};
-use crate::model::{self, TREND_LEN, Trends, ViewLevel};
+use crate::model::{self, CHART_POINTS, Trends, ViewLevel};
 use crate::widgets::{self, GAP_MEDIUM, GAP_SMALL, GAP_TIGHT};
 
 /// Width and height of a row's chart.
@@ -65,8 +65,8 @@ fn reading(
         .children((
             name,
             widgets::column(1).content(widgets::sparkline(
-                &trends.series(sensor.id),
-                TREND_LEN,
+                &trends.chart_points(sensor.id),
+                CHART_POINTS,
                 CHART,
                 model::chart_scale(sensor.kind),
                 app.palette.chart(),
