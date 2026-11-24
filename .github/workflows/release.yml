@@ -1,7 +1,9 @@
 name: Release
 
-# A tag such as v0.1.0 builds the package and publishes it as a draft
-# release, to be read over and published by a maintainer.
+# A tag such as v0.2.0 builds the installer and publishes it as a draft
+# release. The draft is not offered to anyone: a maintainer signs the package
+# with the release key, which is not in this repository or its secrets, and
+# publishes it (scripts/sign-release.ps1 -Tag v0.2.0 -Publish).
 on:
   push:
     tags: ['v*']
@@ -43,9 +45,17 @@ jobs:
       - name: Fetch the PawnIO modules
         run: cargo xtask fetch-modules
 
+      # Builds the workspace and the installer. The script installs the
+      # pinned WiX toolset with the .NET SDK of the runner.
       - name: Package
         shell: pwsh
         run: ./scripts/package.ps1
+
+      # The same package, as a test instance: installed, checked and removed
+      # on the runner, which must leave nothing behind.
+      - name: Install and remove the package
+        shell: pwsh
+        run: ./scripts/test-package.ps1
 
       - name: Publish a draft release
         shell: pwsh

@@ -1,0 +1,187 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The SysPilot installer, built by scripts/package.ps1 with the WiX toolset.
+
+  Variables given on the command line:
+    Stage     the folder with everything that is installed
+    Version   the product version, the same as the executables'
+    Instance  SysPilot for a release. A name starting with SysPilot-Test builds
+              a package for the tests: its own folder, service, shortcut and
+              upgrade code, so it installs next to a real SysPilot and goes
+              through the same steps.
+
+  What Windows Installer does itself: the files, the Start menu shortcut, the
+  Installed apps entry, stopping the service before files are replaced and
+  starting it afterwards, and rolling all of it back if a step fails.
+
+  What the service executable does, because it is tested there: registering
+  the service (`install`), and on removal restoring every setting it changed
+  and deleting its data (`uninstall`).
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <!-- The upgrade code is what makes a newer package replace an older one.
+       It never changes. The test packages have their own, so that installing
+       one can never replace a real SysPilot. -->
+  <?if $(Instance) = "SysPilot" ?>
+    <?define UpgradeCode = "3A9CAE69-F553-4C20-BF4C-04BDD4E44512" ?>
+  <?else?>
+    <?define UpgradeCode = "180ADA8B-C779-4355-AF12-A1741CEC2DEC" ?>
+  <?endif?>
+  <?define Service = "[INSTALLFOLDER]syspilot-svc.exe" ?>
+
+  <Package Name="$(Instance)"
+           Manufacturer="SysPilot contributors"
+           Version="$(Version)"
+           UpgradeCode="$(UpgradeCode)"
+           Scope="perMachine"
+           InstallerVersion="500"
+           Compressed="yes">
+    <SummaryInformation Description="Keeps this PC the way you set it up" />
+
+    <!-- A newer package removes the installed one and then installs itself,
+         in one transaction: if anything fails, the old version is back. The
+         removal is early so that no file of the old version survives into
+         the new one. An older package is refused. -->
+    <MajorUpgrade Schedule="afterInstallInitialize"
+                  DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Icon Id="ProductIcon" SourceFile="$(Stage)\syspilot.ico" />
+    <Property Id="ARPPRODUCTICON" Value="ProductIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/juliopolycarpo/syspilot" />
+    <!-- Nothing to choose and nothing to repair: the files are either all
+         there or the package is installed again. -->
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPNOREPAIR" Value="1" />
+    <!-- Installed apps shows where it is; Windows Installer does not fill
+         this in by itself. -->
+    <SetProperty Id="ARPINSTALLLOCATION" Value="[INSTALLFOLDER]" After="CostFinalize" />
+
+    <!-- Always under Program Files and nowhere else: the service refuses to
+         run from a place a standard user could write to. -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="$(Instance)" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+    <!-- The same folder as a property, set before the folders are worked
+         out, which is when the removal of the whole folder is planned. -->
+    <SetProperty Id="WHOLEINSTALLFOLDER"
+                 Value="[ProgramFiles64Folder]$(Instance)"
+                 Before="AppSearch"
+                 Sequence="execute" />
+
+    <ComponentGroup Id="Product" Directory="INSTALLFOLDER">
+      <!-- Everything in the stage folder, in its subfolders: the runtime the
+           app needs, the sensor worker, the updater, the PawnIO modules and
+           the licence texts. The two executables below are named so that
+           something can be attached to them. -->
+      <Files Include="$(Stage)\**">
+        <Exclude Files="$(Stage)\syspilot.exe" />
+        <Exclude Files="$(Stage)\syspilot-svc.exe" />
+      </Files>
+
+      <Component Id="App">
+        <File Id="AppExecutable" Source="$(Stage)\syspilot.exe" KeyPath="yes">
+          <?if $(Instance) = "SysPilot" ?>
+            <Shortcut Id="StartMenuShortcut"
+                      Directory="ProgramMenuFolder"
+                      Name="$(Instance)"
+                      Description="Keeps this PC the way you set it up"
+                      WorkingDirectory="INSTALLFOLDER" />
+          <?else?>
+            <Shortcut Id="StartMenuShortcut"
+                      Directory="ProgramMenuFolder"
+                      Name="$(Instance)"
+                      Description="Keeps this PC the way you set it up"
+                      Arguments="--instance $(Instance)"
+                      WorkingDirectory="INSTALLFOLDER" />
+          <?endif?>
+        </File>
+      </Component>
+
+      <Component Id="Service">
+        <File Id="ServiceExecutable" Source="$(Stage)\syspilot-svc.exe" KeyPath="yes" />
+        <!-- Stopped before its files are replaced or removed, started once
+             they are in place. The registration itself is the RegisterService
+             action below; an update keeps it, with the profile. -->
+        <ServiceControl Id="ServiceControl" Name="$(Instance)" Stop="both" Start="install" Wait="yes" />
+
+        <!-- Versions up to 0.1.1 were installed by a script that copied these
+             two files and wrote its own Installed apps entry. Installing over
+             one takes them away, so that SysPilot is listed once. -->
+        <RemoveFile Id="ScriptInstaller" Name="install.ps1" On="install" />
+        <RemoveFile Id="ScriptUninstaller" Name="uninstall.ps1" On="install" />
+        <RemoveRegistryKey Id="ScriptInstalledAppsEntry"
+                           Root="HKLM"
+                           Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\$(Instance)"
+                           Action="removeOnInstall" />
+
+        <!-- Windows Installer removes only the folders it created, and only
+             the files it installed. The folder is SysPilot's alone, so on
+             removal all of it goes: also folders the script installer made
+             and anything put there since. -->
+        <util:RemoveFolderEx Id="WholeInstallFolder" Property="WHOLEINSTALLFOLDER" On="uninstall" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="Main" Title="$(Instance)">
+      <ComponentGroupRef Id="Product" />
+    </Feature>
+
+    <!-- The app holds files that are about to be replaced or removed. It is
+         asked to close and, if it does not, ended: it keeps no state that a
+         close could lose. Also works when the installation runs unseen from
+         the service's session, where no window can be reached. -->
+    <util:CloseApplication Id="CloseApp"
+                           Target="syspilot.exe"
+                           CloseMessage="yes"
+                           ElevatedCloseMessage="yes"
+                           RebootPrompt="no"
+                           TerminateProcess="0"
+                           Timeout="5" />
+
+    <!-- All three run the installed service executable as LocalSystem, by
+         its full path, and fail the installation if they fail. -->
+    <CustomAction Id="RegisterService"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand='"$(Service)" --instance $(Instance) install --no-start'
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="RemoveService"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand='"$(Service)" --instance $(Instance) uninstall'
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="RemoveServiceKeepingTweaks"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand='"$(Service)" --instance $(Instance) uninstall --keep-tweaks'
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <!-- Undoes RegisterService when a first installation fails later on. An
+         update that fails keeps the registration: the old version, which the
+         rollback puts back, is run by it. -->
+    <CustomAction Id="UnregisterServiceOnRollback"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand='"$(Service)" --instance $(Instance) uninstall --keep-tweaks'
+                  Execute="rollback" Impersonate="no" Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="UnregisterServiceOnRollback"
+              Before="RegisterService"
+              Condition="NOT Installed AND NOT WIX_UPGRADE_DETECTED" />
+      <!-- After the files are there and before the service is started. -->
+      <Custom Action="RegisterService"
+              Before="StartServices"
+              Condition='NOT (REMOVE = "ALL")' />
+      <!-- Only when SysPilot is really removed, not when a newer version
+           replaces it: restore every setting, then remove the service and
+           its data. Runs while the executable still exists. KEEPTWEAKS=1 on
+           the command line leaves the settings as they are. -->
+      <Custom Action="RemoveService"
+              After="StopServices"
+              Condition='REMOVE = "ALL" AND NOT UPGRADINGPRODUCTCODE AND NOT KEEPTWEAKS' />
+      <Custom Action="RemoveServiceKeepingTweaks"
+              After="StopServices"
+              Condition='REMOVE = "ALL" AND NOT UPGRADINGPRODUCTCODE AND KEEPTWEAKS' />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

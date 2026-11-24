@@ -50,34 +50,54 @@ to no cost when nobody is looking.
 
 ## Installing
 
-Unpack a release (or the folder `scripts/package.ps1` builds) and, from an
-elevated PowerShell in that folder:
+Download `SysPilot-<version>-x64.msi` from the
+[latest release](https://github.com/juliopolycarpo/syspilot/releases/latest)
+and open it. It puts the files in `Program Files\SysPilot`, registers and
+starts the service and adds SysPilot to the Start menu and to Installed apps.
+Without any window:
 
 ```console
-> ./install.ps1
+> msiexec /i SysPilot-0.2.0-x64.msi /qn
 ```
 
-It copies the files to `Program Files\SysPilot`, registers the service and adds
-SysPilot to the Start menu and to Installed apps. Running it again updates in
-place and keeps your settings. Uninstalling, from Installed apps or with
-`uninstall.ps1`, first restores every setting SysPilot changed.
+Installing a newer package over an older one updates in place and keeps your
+settings; that includes a 0.1 installed by its script.
+
+Uninstalling, from Installed apps or with `msiexec /x`, first restores every
+setting SysPilot changed, then removes the service, the files, the data in
+`ProgramData\SysPilot` and each user's app preferences. Nothing of SysPilot
+stays behind. To leave the settings as SysPilot set them, uninstall with
+`msiexec /x SysPilot-0.2.0-x64.msi KEEPTWEAKS=1`.
+
+### Updates
+
+The service looks for a new release once a day. What it does then is yours to
+choose, under Settings in the app or with `syspilot-svc updates <mode>`:
+
+| Mode        | What happens                                                        |
+| ----------- | ------------------------------------------------------------------- |
+| `notify`    | The default. The app says that a new version is there; you install it with one click (or `syspilot-svc update`). |
+| `automatic` | A new version is installed by itself, without a prompt, while the app is closed. |
+| `off`       | SysPilot never looks and never mentions a new version.               |
+
+An update is only ever installed if the package carries a signature made with
+the project's release key, which is not stored on GitHub. How that holds up is
+in the [security model](docs/security-model.md#updates).
 
 ### Verifying a download
 
-Releases are not code-signed, so SmartScreen may say the publisher is
-unknown, and PowerShell may refuse the scripts of a downloaded zip until it
-is unblocked. Check the zip against the checksum published with it before
-unblocking it:
+Every package comes with that signature, `SysPilot-<version>-x64.msi.sig`.
+With the OpenSSH that is part of Windows, and the key list from this
+repository ([`installer/update-signers`](installer/update-signers)):
 
 ```console
-> (Get-FileHash .\SysPilot-0.1.1-x64.zip -Algorithm SHA256).Hash
-> Get-Content .\SysPilot-0.1.1-x64.zip.sha256
-> Unblock-File .\SysPilot-0.1.1-x64.zip
+> cmd /c "ssh-keygen -Y verify -f update-signers -I syspilot -n syspilot-update -s SysPilot-0.2.0-x64.msi.sig < SysPilot-0.2.0-x64.msi"
+Good "syspilot-update" signature for syspilot with ED25519 key SHA256:...
 ```
 
-The two hashes must match (the first is in capitals). Every release is built
-from a signed tag in this repository, so you can also build it yourself (see
-[Building](#building)).
+The packages carry no Authenticode certificate yet, so SmartScreen may say the
+publisher is unknown. Every release is built from a signed tag in this
+repository, so you can also build it yourself (see [Building](#building)).
 
 ## The app
 
@@ -110,9 +130,6 @@ Everything the app does, the service's own executable does too. From an
 elevated terminal:
 
 ```console
-> syspilot-svc install
-SysPilot service installed and running.
-
 > syspilot-svc list
 performance.disk-idle-timeout-ac  off                Keep the hard disk on while plugged in
 privacy.advertising-id            off (already set)  Turn off the advertising ID
@@ -122,13 +139,13 @@ security.audit-secure-boot        ok                 Check that Secure Boot is o
 > syspilot-svc show privacy.advertising-id
 > syspilot-svc enable privacy.advertising-id
 > syspilot-svc history
-> syspilot-svc uninstall
-SysPilot service removed and settings restored.
+> syspilot-svc updates automatic
+> syspilot-svc update --check
 ```
 
-`syspilot-svc --help` lists every command. The product service must be
-installed from under `Program Files`; a LocalSystem service whose executable a
-standard user could replace would hand that user the machine.
+`syspilot-svc --help` lists every command. The product service only runs from
+under `Program Files`; a LocalSystem service whose executable a standard user
+could replace would hand that user the machine.
 
 A profile is a TOML file. Besides catalog tweaks it can hold your own actions:
 registry values, service start types, power settings and commands.
@@ -165,12 +182,13 @@ The fields, the rules and what happens when a sensor fails are in
 
 ## How it is built
 
-Three programs with a strict split of privilege:
+Four programs with a strict split of privilege:
 
 | Part               | Runs as                       | Does                                                  |
 | ------------------ | ----------------------------- | ----------------------------------------------------- |
 | `syspilot-svc`     | LocalSystem service           | Applies and restores settings. Always running, about 2 MB. |
 | `syspilot-sensors` | Started by the service, only while values are wanted | Reads the hardware. Writes to it only in a build with the `fan-control` feature, which releases do not have. |
+| `syspilot-update`  | Started by the service, for seconds a day | Finds a new release, verifies its signature and hands it to Windows Installer. |
 | `syspilot` (app)   | The signed-in user            | Shows state and sends requests. Holds no rights.      |
 
 They talk over a local named pipe. Anyone signed in can read the catalog,
@@ -185,7 +203,9 @@ client claims.
 | `crates/hw`        | Sensor providers and the sampling hub.                        |
 | `crates/pawnio`    | Thin wrapper over the PawnIO driver interface.                |
 | `crates/sensors`   | The sensor worker.                                            |
-| `crates/svc`       | The service, its installer and the command line.              |
+| `crates/svc`       | The service, its registration and the command line.           |
+| `crates/update`    | The updater.                                                  |
+| `installer`        | The Windows Installer package and the release keys.           |
 | `crates/ui`        | The desktop app.                                              |
 | `catalog/tweaks`   | The built-in tweaks, as data.                                 |
 
@@ -199,7 +219,8 @@ More in [`docs/`](docs/README.md): [architecture](docs/architecture/overview.md)
 ## Building
 
 Rust (the pinned toolchain installs itself through `rustup`) and the MSVC build
-tools are the only requirements.
+tools are the only requirements. Building the installer also needs the .NET
+SDK, for the WiX toolset, which `package.ps1` installs under `target\`.
 
 ```console
 > cargo build --release
@@ -211,8 +232,10 @@ tools are the only requirements.
 The first build of the app downloads the Windows App SDK runtime it ships
 with. `fetch-modules` downloads the PawnIO modules the sensor worker loads,
 pinned by SHA-256; they are LGPL-2.1 files kept beside the executables and are
-never part of this repository. `package.ps1` leaves an installable folder and
-a zip in `dist\`.
+never part of this repository. `package.ps1` leaves the installer,
+`SysPilot-<version>-x64.msi`, in `dist\`. A copy installed from a package you
+built only updates itself to releases signed with a key in
+`installer/update-signers`.
 
 Some tests install a temporary service named `SysPilot-Test` and write scratch
 registry keys named `SysPilot-Test`; they need an elevated terminal and remove
@@ -228,7 +251,9 @@ everything they create. See [CONTRIBUTING.md](CONTRIBUTING.md).
 - [x] Sensor logging to CSV from the app
 - [x] Package, install and uninstall scripts
 - [x] First release (0.1.0 as a pre-release, 0.1.1 as the first full release)
-- [ ] Code signing (releases ship unsigned with a published SHA-256 until a certificate is available)
+- [x] A Windows Installer package that removes everything it installed
+- [x] Updates: told about by default, automatic or off by choice, accepted only with the release key's signature
+- [ ] Authenticode signing, so that Windows names the publisher (waits for a certificate)
 - [ ] Sensors verified on more machines (AMD processors, memory modules, more Super I/O chips)
 - [x] Fan control core: curve engine, board catalog and fail-safes, compiled out of releases and tested against recordings only ([what must be validated first](docs/research/fan-control.md))
 - [x] Fan curves in the service and the app (a Fans page, curves read from the profile), behind the same feature and replay-tested only
