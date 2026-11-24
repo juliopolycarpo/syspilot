@@ -11,11 +11,11 @@ to no cost when nobody is looking.
 
 ![The Home page: what is on, what needs attention and the machine right now](docs/images/home.png)
 
-> **Status: [0.1.1](https://github.com/juliopolycarpo/syspilot/releases/tag/v0.1.1),
-> the first release.** The service, the catalog, the sensors, the app and the
-> command line work and are tested end to end. The executables are not
-> signed, so Windows may warn on first run; see
-> [verifying a download](#verifying-a-download).
+> **Status: [0.2.0](https://github.com/juliopolycarpo/syspilot/releases/tag/v0.2.0).**
+> The service, the catalog, the sensors, the app, the command line and the
+> installer work and are tested end to end, and an installed copy keeps itself
+> up to date. The package carries no Authenticode certificate, so Windows may
+> warn on first run; see [verifying a download](#verifying-a-download).
 > Hardware sensors have been checked on one machine so far
 > ([what was found](docs/research/reference-machine.md)); expect gaps on
 > others and please report them. See [the roadmap](#roadmap).
