@@ -45,9 +45,11 @@ registry = { scope = "machine", key = 'SYSTEM\CurrentControlSet\Control\FileSyst
 id = "reliability.update-no-auto-restart"
 title = "Do not restart automatically while someone is signed in"
 summary = "Windows Update does not restart the PC by itself while a user is signed in."
-detail = '''Sets HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU\NoAutoRebootWithLoggedOnUsers (REG_DWORD) to 1. With the value at 1, Automatic Updates does not automatically restart a computer while users are logged on.'''
+detail = '''Sets HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU\NoAutoRebootWithLoggedOnUsers (REG_DWORD) to 1. With the value at 1, Automatic Updates does not automatically restart a computer while users are logged on. Microsoft notes that this older policy does not work exactly as described and can mean quality updates are never finished on a PC whose user rarely signs out; active hours are the usual way to keep restarts out of working time.'''
 level = "advanced"
 category = "reliability"
+direction = "weakens"
+risk = "Security updates can wait for a restart indefinitely, so known flaws stay open on a PC that is rarely signed out of."
 side-effects = "Updates stay unfinished until someone restarts the PC, which delays the fixes they contain."
 source = "https://learn.microsoft.com/windows/deployment/update/waas-wu-settings"
 
