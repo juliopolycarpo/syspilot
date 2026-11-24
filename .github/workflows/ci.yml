@@ -74,6 +74,13 @@ jobs:
             throw "syspilot-svc.exe is over its size budget. See docs/architecture/overhead.md."
           }
 
+      # Builds the installer from the release build, as a test instance,
+      # then installs, updates and removes it on the runner and fails on
+      # anything left behind. Catches a broken package before a tag does.
+      - name: Install and remove the package
+        shell: pwsh
+        run: ./scripts/test-package.ps1
+
       - uses: actions/upload-artifact@v7
         with:
           name: syspilot-${{ github.sha }}
