@@ -1,0 +1,21 @@
+[package]
+name = "syspilot-tune"
+description = "SysPilot tuner: reads and sets hardware tuning values on behalf of the service."
+license = "GPL-3.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "syspilot-tune"
+path = "src/main.rs"
+
+[dependencies]
+syspilot-proto.workspace = true
+syspilot-hw.workspace = true
