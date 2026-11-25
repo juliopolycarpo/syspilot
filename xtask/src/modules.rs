@@ -8,6 +8,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::sha256::sha256_file_hex;
@@ -155,10 +156,14 @@ impl ScratchDir {
     /// `create_dir` (not `create_dir_all`) so a pre-existing directory,
     /// which someone else could have prepared, is an error.
     fn create() -> Result<Self, String> {
+        // The clock alone does not tell two calls in one process apart: on
+        // Windows it can stand still between them. The count does.
+        static CREATED: AtomicU32 = AtomicU32::new(0);
+        let count = CREATED.fetch_add(1, Ordering::Relaxed);
         let nanos =
             SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
         let path = std::env::temp_dir()
-            .join(format!("syspilot-fetch-modules-{}-{nanos}", std::process::id()));
+            .join(format!("syspilot-fetch-modules-{}-{nanos}-{count}", std::process::id()));
         fs::create_dir(&path).map_err(|error| {
             format!("(fetch-modules): cannot create {}: {error}", path.display())
         })?;
@@ -387,6 +392,28 @@ mod tests {
         let error = fetch_modules(&fx.pins, &fx.directory, false, &fx.transport).unwrap_err();
         assert!(error.starts_with("(A.bin): expected sha256 "), "{error}");
         assert!(!fx.directory.exists(), "nothing may be written for a bad member");
+    }
+
+    #[test]
+    fn scratch_directories_made_at_the_same_moment_are_different_ones() {
+        // Tests run as threads of one process and used to collide here.
+        let made: Vec<Result<ScratchDir, String>> = std::thread::scope(|scope| {
+            let makers: Vec<_> = (0..32).map(|_| scope.spawn(ScratchDir::create)).collect();
+            makers.into_iter().map(|maker| maker.join().expect("the maker ran")).collect()
+        });
+        let mut paths: Vec<PathBuf> = made
+            .iter()
+            .map(|scratch| match scratch {
+                Ok(scratch) => scratch.0.clone(),
+                Err(problem) => {
+                    panic!("(scratch directory): expected one each | received: {problem}")
+                }
+            })
+            .collect();
+        paths.sort();
+        paths.dedup();
+        assert_eq!(paths.len(), 32, "(scratch directories): expected 32 different paths");
+        assert!(paths.iter().all(|path| path.is_dir()));
     }
 
     #[test]
