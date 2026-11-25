@@ -135,6 +135,8 @@ code is behind a cargo feature that release builds do not enable.
 fans or hang a machine. That needs validation per board, which a first release
 cannot claim.
 
+*Narrowed by 21 for values set through a vendor's driver.*
+
 ## 13. PawnIO is detected, never distributed
 
 **Decision.** SysPilot does not ship or install the driver. It detects it,
@@ -301,3 +303,41 @@ Windows 11, so it cannot be a system call. A release needs the maintainer at a
 machine with the key. Losing the key strands every installed copy on its
 version, so a second key should be listed before the first is ever needed.
 Protocol version 3 adds the update mode, status and requests.
+
+## 21. Tuning goes through the vendor's driver, in a tuner process
+
+**Decision.** SysPilot sets power limits, clocks, voltages and fan bounds of a
+device only through the interface its own driver offers for that, today AMD's
+ADL (Overdrive N, the Radeon RX 400 and RX 500 series). It is in every build,
+with no cargo feature in front of it. The profile holds one setting per
+device: the device is held at the driver's defaults plus the values listed,
+and turning the setting off puts the defaults back. A separate executable,
+`syspilot-tune.exe`, does the reading and the writing; the service starts it
+for one job and decides when ([tuning.md](tuning.md)). This narrows decision
+12: SysPilot still writes no register of its own accord, and fan curves stay
+behind their feature (decision 18).
+
+**Why.** Decision 12 is about writes nobody validated: a wrong byte to a Super
+I/O chip can stop a fan. A driver interface is the opposite case. The vendor
+publishes it for this purpose, its own tuning tool uses it, the driver states
+the range of every value and refuses what the device cannot take, and the
+values last only until the driver or the machine restarts. So the risk left is
+the one the vendor's tool has too: a clock or a voltage inside the range that
+this particular device does not hold. That is handled where it shows: the app
+asks before such values take effect, and a mark on disk keeps the service from
+setting them again after a restart that was not a normal shutdown.
+
+A separate process for the reasons of decisions 16 and 20: the resident
+service loads no vendor library (ADL alone maps several megabytes), and a
+driver call that hangs is ended by ending the tuner. One job per start,
+because tuning is rare: a setting is applied after a start, a wake, a logon or
+a change, checked a few times, and then left alone until the next of those.
+
+**Cost.** A third helper executable (0.3 MB) and 70 KB in the service.
+Nothing holds a value in place
+between the checks: what another tool writes minutes after a logon stays until
+the next trigger or until the user opens the app. Two tools setting the same
+values fight; SysPilot gives up after three tries and says so. Devices are
+recognised by PCI device ID and bus number, so a card moved to another slot is
+a new device. Protocol version 4 adds the tuning settings, status and
+requests.

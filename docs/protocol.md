@@ -21,7 +21,9 @@ answers `Hello(Welcome { protocol, version, elevated })`, or
 `Error(ProtocolMismatch)` if the versions differ. `PROTOCOL_VERSION` is bumped
 whenever a message changes shape; there is no negotiation, the app and the
 service are released together. Version 2 added `ServiceStatus.fans`; version 3
-added `Profile.updates`, `ServiceStatus.update` and the three update requests.
+added `Profile.updates`, `ServiceStatus.update` and the three update requests;
+version 4 added `Profile.tuning`, `ServiceStatus.tuning` and the two tuning
+requests.
 
 `elevated` tells the client how the service sees it. It is computed once per
 connection from the client's token and does not change afterwards.
@@ -56,6 +58,8 @@ strict alternation.
 | `SetUpdates(mode)`              | `Ok`          | yes             |
 | `CheckForUpdate`                | `Ok`          | yes             |
 | `InstallUpdate`                 | `Ok`          | yes             |
+| `SetTuning(settings)`           | `Ok`          | yes             |
+| `ApplyTuning`                   | `Ok`          | yes             |
 
 Any request can instead be answered with `Error { code, message }`. The message
 is written for the person using the app and can be shown as is.
@@ -142,6 +146,43 @@ connected; the installation stops the service and closes the app, so a client
 that sent it should expect its connection to end. A copy in the state
 `Unavailable` answers both with `Unsupported`.
 
+### Tuning in the status
+
+`Status` carries `tuning`, a `TuningStatus`: the devices whose driver lets
+values be set, as the tuner last saw them, and `problem`, the reason when the
+last look failed. The first `Status` after the service starts waits for that
+look. Each device is a `TuningDevice`:
+
+| Field       | Content                                                                    |
+| ----------- | -------------------------------------------------------------------------- |
+| `key`       | What a profile setting names it by, e.g. `gpu.amd-699f.bus-3`: vendor, PCI device ID and bus number. |
+| `name`      | The device's name from its driver.                                         |
+| `interface` | What its values are set through, in words, e.g. "AMD Radeon driver (Overdrive N)". |
+| `controls`  | One `TuningControl` per value the driver offers.                           |
+| `enabled`   | Whether the profile has a setting in effect for it.                        |
+| `state`     | `Unmanaged` (no setting in effect), `Applied`, `Different` (other values right now; being set), `Contested` (something else keeps changing them; given up until the next trigger), `Held` (not set since a start that followed an abnormal stop), `Failed { reason }` or `Missing` (a setting for a device that is not there; it has no controls). |
+
+Each control is a `TuningControl`:
+
+| Field            | Content                                                               |
+| ---------------- | --------------------------------------------------------------------- |
+| `key`            | Its name in a setting, e.g. `power-limit` or `core-p7-voltage`.       |
+| `kind`, `state`  | What it is (`PowerLimit`, `CoreClock`, …) and, for a clock or a voltage, the number of the performance state it belongs to. |
+| `unit`           | `Percent`, `Celsius`, `Megahertz`, `Millivolt` or `Rpm`.              |
+| `min`, `max`     | The range the driver states. A value outside it is refused.           |
+| `step`           | A hint for an editor. The driver's own defaults need not be on it.    |
+| `default`        | What the driver uses when left alone.                                 |
+| `current`        | What the device has now.                                              |
+| `wanted`         | The value the profile's setting lists, if it lists one.               |
+
+`SetTuning` replaces the profile's settings. It is refused with `Invalid` when
+a value is outside its control's range or names a control the device does not
+have; a device that is not present is not judged. `ApplyTuning` starts a new
+round for every setting in effect, including one that is `Held` or
+`Contested`. Both answer `Ok` at once; what the tuner did arrives as
+`StatusChanged`. While a client is subscribed, a `Status` request that finds
+the last look older than ten seconds has the devices looked at again.
+
 ## Sensor section
 
 | Property | Value                                                    |
@@ -210,6 +251,22 @@ becomes the `reason` of `Failed`. After `installing` the updater has started
 Windows Installer and exits; the service is stopped by the installation. If it
 is still running half an hour later, the state becomes `Failed` and names the
 installer's log.
+
+## Tuner
+
+The service and `syspilot-tune.exe` exchange two frames over the tuner's
+standard streams (`proto::tuning`), in the pipe's framing; both come from the
+same build. The tuner takes no arguments.
+
+| Direction         | Content                                                        |
+| ----------------- | -------------------------------------------------------------- |
+| Service to tuner  | One `TuneJob`: the settings to apply and the keys of the devices to put back to their defaults. Both empty means "only look". |
+| Tuner to service  | One `TuneReport`: every device it found with its controls as they are after the job, and per device the problem the job ran into, if any. |
+
+The tuner does resets first, then the settings, and writes only what differs
+from what the device already has. A setting with one bad value changes
+nothing on its device. The service waits 15 s for the report and then
+terminates the tuner; a job without a report counts as failed.
 
 ## Compatibility rules
 

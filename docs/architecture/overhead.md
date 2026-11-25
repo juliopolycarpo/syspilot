@@ -22,12 +22,18 @@ all the time.
 
 - **No timers by default.** The event loop waits on one handle with an infinite
   timeout. A timeout exists only while something is due: a contested retry, a
-  paused watch, an `interval` trigger, or sensor sampling for a connected
-  client or the logger. The one exception is the look for a new version, once
+  paused watch, an `interval` trigger, a look at tuned devices, or sensor
+  sampling for a connected client or the logger. The one exception is the look for a new version, once
   every 24 hours; with updates off the timeout is infinite again.
 - **Updates in another process.** Looking for a release and installing it is
   the work of `syspilot-update.exe`, which runs for seconds a day. The service
   carries no network code and loads no network library.
+- **Tuning in another process, and only around events.** Reading and setting
+  a device's tuning values is the work of `syspilot-tune.exe`, which runs for
+  a moment. The service loads no vendor library. It looks at the devices a few
+  times in the three minutes after a start, a wake, a logon or a change of
+  the settings, and then not again; with no tuning setting on and no app
+  connected it never does.
 - **Notifications instead of polling.** Drift is detected by
   `RegNotifyChangeKeyValue`. The kernel wakes the service when a watched key
   changes and at no other time.
@@ -81,6 +87,7 @@ Executable size is checked in CI.
 | 2026-11-23 | release, after a status request and a sensor listing, then 60 s idle | 1.5 MB; 0 ms of processor time, 4 context switches | 4 | 1.41 MB |
 | 2026-11-25 | release 0.2.2 as published | not measured again | | 1.42 MB |
 | 2026-11-25 | the same, with `proto` and `engine` built for size | not measured again | | 1.22 MB |
+| 2026-11-25 | release, with tuning | not measured again | | 1.29 MB |
 
 Measured on a console run. The second row is after a status request, a sensor
 listing and a session of the app: the service itself does not grow. The sensor
