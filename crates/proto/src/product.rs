@@ -13,7 +13,7 @@ pub const PRODUCT_NAME: &str = "SysPilot";
 
 /// Version of the IPC protocol. Bumped on any incompatible change to the
 /// message types or the sensor section layout.
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 
 /// File the app keeps its per-user choices in, inside a directory named
 /// after the instance under the user's local application data. Defined here

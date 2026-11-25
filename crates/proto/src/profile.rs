@@ -10,6 +10,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::action::{Action, InvalidAction, Trigger, validate_triggers};
+use crate::tuning::{MAX_TUNING_DEVICES, MAX_TUNING_VALUES, TuningSetting, is_tuning_key};
 
 /// Current profile schema version.
 pub const PROFILE_SCHEMA: u32 = 1;
@@ -40,6 +41,9 @@ pub struct Profile {
     /// Fan curves, one per controlled channel.
     #[serde(default, rename = "fan")]
     pub fans: Vec<FanCurve>,
+    /// Hardware tuning, one setting per device.
+    #[serde(default)]
+    pub tuning: Vec<TuningSetting>,
 }
 
 impl Default for Profile {
@@ -51,6 +55,7 @@ impl Default for Profile {
             custom: Vec::new(),
             logging: LoggingConfig::default(),
             fans: Vec::new(),
+            tuning: Vec::new(),
         }
     }
 }
@@ -312,8 +317,38 @@ impl Profile {
                 return Err(invalid("fan".into(), "one curve per channel", &fan.channel));
             }
         }
-        Ok(())
+        validate_tuning(&self.tuning)
     }
+}
+
+/// Checks the tuning settings of a profile: their shape only. Whether a
+/// device exists and a value is in its range is known to the device alone;
+/// the service and the tuner check that against what the device reports.
+pub fn validate_tuning(settings: &[TuningSetting]) -> Result<(), ProfileError> {
+    if settings.len() > MAX_TUNING_DEVICES {
+        return Err(invalid("tuning".into(), "at most 16 devices", settings.len()));
+    }
+    let mut seen = HashSet::new();
+    for setting in settings {
+        if !is_tuning_key(&setting.device) {
+            return Err(invalid(
+                "tuning.device".into(),
+                "a device key like gpu.amd-699f.bus-3",
+                &setting.device,
+            ));
+        }
+        if !seen.insert(setting.device.as_str()) {
+            return Err(invalid("tuning".into(), "one setting per device", &setting.device));
+        }
+        let location = format!("tuning[{}].values", setting.device);
+        if setting.values.len() > MAX_TUNING_VALUES {
+            return Err(invalid(location, "at most 64 values", setting.values.len()));
+        }
+        if let Some(key) = setting.values.keys().find(|key| !is_tuning_key(key)) {
+            return Err(invalid(location, "control keys like power-limit", key));
+        }
+    }
+    Ok(())
 }
 
 impl CustomAction {
@@ -445,6 +480,13 @@ sensors = ["cpu.package.temp"]
 channel = "board.pwm2"
 sources = ["cpu.package.temp", "gpu0.temp"]
 points = [[40, 30], [60, 50], [80, 100]]
+
+[[tuning]]
+device = "gpu.amd-699f.bus-3"
+
+[tuning.values]
+power-limit = -20
+core-p7-voltage = 1000
 "#;
 
     fn invalid_location(profile: &Profile) -> String {
@@ -461,6 +503,8 @@ points = [[40, 30], [60, 50], [80, 100]]
         assert!(!profile.custom[1].enabled);
         assert_eq!(profile.logging.max_file_kib, 8192, "unset logging fields take defaults");
         assert_eq!(profile.fans[0].min_duty_pct, 20);
+        assert!(profile.tuning[0].enabled, "a tuning setting is in effect unless it says not");
+        assert_eq!(profile.tuning[0].values["power-limit"], -20);
 
         assert_eq!(Profile::parse(&profile.to_toml()).unwrap(), profile);
         let wire = postcard::to_stdvec(&profile).unwrap();
@@ -590,5 +634,55 @@ points = [[40, 30], [60, 50], [80, 100]]
             profile.validate().unwrap_err().to_string(),
             "(profile.fan.channel): expected a channel key like board.pwm2 | received: \"nct6779.fan2\""
         );
+    }
+
+    fn tuning_of(device: &str, values: &[(&str, i32)]) -> TuningSetting {
+        TuningSetting {
+            device: device.into(),
+            enabled: true,
+            values: values.iter().map(|(key, value)| ((*key).to_owned(), *value)).collect(),
+        }
+    }
+
+    #[test]
+    fn one_tuning_setting_per_device() {
+        let mut profile = Profile::parse(SAMPLE).unwrap();
+        profile.tuning.push(tuning_of("gpu.amd-699f.bus-3", &[]));
+        assert_eq!(
+            profile.validate().unwrap_err().to_string(),
+            "(profile.tuning): expected one setting per device | received: \"gpu.amd-699f.bus-3\""
+        );
+    }
+
+    #[test]
+    fn tuning_keys_have_one_spelling() {
+        let profile = |setting| Profile { tuning: vec![setting], ..Profile::default() };
+        assert_eq!(invalid_location(&profile(tuning_of("GPU 0", &[]))), "tuning.device");
+        assert_eq!(
+            invalid_location(&profile(tuning_of("gpu.amd-699f.bus-3", &[("Power Limit", 1)]))),
+            "tuning[gpu.amd-699f.bus-3].values"
+        );
+    }
+
+    #[test]
+    fn tuning_settings_and_their_values_are_bounded_in_number() {
+        let many: Vec<_> = (0..=MAX_TUNING_DEVICES)
+            .map(|index| tuning_of(&format!("gpu.amd-699f.bus-{index}"), &[]))
+            .collect();
+        let profile = Profile { tuning: many, ..Profile::default() };
+        assert_eq!(invalid_location(&profile), "tuning");
+
+        let mut crowded = tuning_of("gpu.amd-699f.bus-3", &[]);
+        crowded.values = (0..=MAX_TUNING_VALUES).map(|index| (format!("c{index}"), 0)).collect();
+        let profile = Profile { tuning: vec![crowded], ..Profile::default() };
+        assert_eq!(invalid_location(&profile), "tuning[gpu.amd-699f.bus-3].values");
+    }
+
+    #[test]
+    fn a_setting_that_is_off_keeps_its_values_through_toml() {
+        let mut setting = tuning_of("gpu.amd-699f.bus-3", &[("power-limit", -20)]);
+        setting.enabled = false;
+        let profile = Profile { tuning: vec![setting], ..Profile::default() };
+        assert_eq!(Profile::parse(&profile.to_toml()).unwrap(), profile);
     }
 }

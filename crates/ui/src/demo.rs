@@ -554,6 +554,7 @@ fn status(scenario: Scenario) -> ServiceStatus {
             },
             checked_unix: Some(unix_now().saturating_sub(3 * 3600)),
         },
+        tuning: Default::default(),
         problems: Vec::new(),
     }
 }

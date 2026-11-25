@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::catalog::Catalog;
 use crate::profile::{CustomAction, FanCurve, LoggingConfig, Profile, UpdateMode};
 use crate::sensor::SensorList;
+use crate::tuning::{TuningSetting, TuningStatus};
 
 /// A request from a client to the service.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +95,11 @@ pub enum Request {
     CheckForUpdate,
     /// Downloads, verifies and installs the newest version. Mutating.
     InstallUpdate,
+    /// Replaces the hardware tuning settings and applies them. Mutating.
+    SetTuning(Vec<TuningSetting>),
+    /// Applies the tuning settings again now, also after they were held back
+    /// or contested. Mutating.
+    ApplyTuning,
 }
 
 impl Request {
@@ -122,7 +128,9 @@ impl Request {
             | Self::Shutdown
             | Self::SetUpdates(_)
             | Self::CheckForUpdate
-            | Self::InstallUpdate => true,
+            | Self::InstallUpdate
+            | Self::SetTuning(_)
+            | Self::ApplyTuning => true,
         }
     }
 }
@@ -136,8 +144,9 @@ pub enum Response {
     Ok,
     /// The request failed.
     Error(ServiceError),
-    /// Answer to [`Request::Status`].
-    Status(ServiceStatus),
+    /// Answer to [`Request::Status`]. Boxed: it is several times the size
+    /// of any other response, and the encoding is the same either way.
+    Status(Box<ServiceStatus>),
     /// Answer to [`Request::Catalog`].
     Catalog(Catalog),
     /// Answer to [`Request::States`].
@@ -508,6 +517,8 @@ pub struct ServiceStatus {
     pub fans: FanStatus,
     /// Whether a new version is available and what is done about it.
     pub update: UpdateStatus,
+    /// The devices that can be tuned and where each stands.
+    pub tuning: TuningStatus,
     /// Things the user should know about, e.g. a profile that could not be
     /// read. Empty when all is well.
     pub problems: Vec<String>,
@@ -605,6 +616,8 @@ mod tests {
             Request::SetUpdates(UpdateMode::Automatic),
             Request::CheckForUpdate,
             Request::InstallUpdate,
+            Request::SetTuning(vec![]),
+            Request::ApplyTuning,
         ];
         for request in requests {
             assert_eq!(round_trip(&request), request);
@@ -639,6 +652,8 @@ mod tests {
             Request::SetUpdates(UpdateMode::Off),
             Request::CheckForUpdate,
             Request::InstallUpdate,
+            Request::SetTuning(vec![]),
+            Request::ApplyTuning,
         ];
         assert!(privileged.iter().all(Request::requires_elevation));
     }

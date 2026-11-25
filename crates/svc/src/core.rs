@@ -214,6 +214,10 @@ impl<S: StateStore + Clone + 'static> Core<S> {
             | Request::InstallUpdate => {
                 error(ErrorCode::Invalid, "(request): not valid at this point of the connection")
             }
+            // The protocol has tuning; this service does not act on it yet.
+            Request::SetTuning(_) | Request::ApplyTuning => {
+                error(ErrorCode::Unsupported, "This service does not tune devices yet.")
+            }
         };
         (response, effects)
     }
@@ -498,6 +502,8 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Core', name = "Che
             Request::SetUpdates(UpdateMode::Automatic),
             Request::CheckForUpdate,
             Request::InstallUpdate,
+            Request::SetTuning(vec![]),
+            Request::ApplyTuning,
         ];
         for request in privileged {
             assert!(request.requires_elevation(), "{request:?}");
