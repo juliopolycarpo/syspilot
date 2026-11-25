@@ -46,7 +46,8 @@ all the time.
   minute.
 - **Few dependencies.** The service links `windows-sys`, `serde`, `toml` and
   `postcard`. No async runtime, no COM, no WMI. It is built for size
-  (`opt-level = "s"`, fat LTO, `panic = "abort"`, static CRT).
+  (`opt-level = "s"`, fat LTO, `panic = "abort"`, static CRT), and so are
+  `proto` and `engine`, the two libraries that make up most of it.
 
 Adding a dependency to `crates/svc` requires an entry in
 [decisions](../decisions.md) with its size impact.
@@ -78,6 +79,8 @@ Executable size is checked in CI.
 | 2026-11-23 | release, 58 tweaks loaded, no sensor providers | 1.6 MB       | 5       | 1.31 MB    |
 | 2026-11-23 | release, with the Windows sensor providers   | 1.8 MB idle, 1.9 MB while sampling | 5 | 1.40 MB |
 | 2026-11-23 | release, after a status request and a sensor listing, then 60 s idle | 1.5 MB; 0 ms of processor time, 4 context switches | 4 | 1.41 MB |
+| 2026-11-25 | release 0.2.2 as published | not measured again | | 1.42 MB |
+| 2026-11-25 | the same, with `proto` and `engine` built for size | not measured again | | 1.22 MB |
 
 Measured on a console run. The second row is after a status request, a sensor
 listing and a session of the app: the service itself does not grow. The sensor

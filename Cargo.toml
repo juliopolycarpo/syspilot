@@ -38,8 +38,15 @@ panic = "abort"
 strip = true
 
 # The resident service is optimised for size: it must stay small in memory
-# and on disk (see docs/architecture/overhead.md).
+# and on disk (see docs/architecture/overhead.md). So are the two libraries
+# that make up most of it; neither is on a hot path in any executable.
 [profile.release.package.syspilot-svc]
+opt-level = "s"
+
+[profile.release.package.syspilot-proto]
+opt-level = "s"
+
+[profile.release.package.syspilot-engine]
 opt-level = "s"
 
 [profile.dev]
