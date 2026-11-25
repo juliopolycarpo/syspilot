@@ -57,6 +57,8 @@ pub mod glyph {
     /// A thermometer. Segoe Fluent Icons has no fan, and a fan curve is
     /// the fan's answer to temperature.
     pub const FANS: &str = "\u{E9CA}";
+    /// Sliders, as on a mixing desk.
+    pub const TUNING: &str = "\u{E9E9}";
     /// A computer.
     pub const SYSTEM: &str = "\u{E7F8}";
     /// Angle brackets.

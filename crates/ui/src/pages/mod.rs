@@ -9,4 +9,5 @@ pub mod offline;
 pub mod sensors;
 pub mod settings;
 pub mod system;
+pub mod tuning;
 pub mod tweaks;

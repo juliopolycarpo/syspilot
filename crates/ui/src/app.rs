@@ -10,11 +10,12 @@ use std::time::Duration;
 use syspilot_proto::catalog::Category;
 use syspilot_proto::message::Request;
 use syspilot_proto::profile::{LoggingConfig, UpdateMode};
+use syspilot_proto::tuning::{TuningDevice, TuningSetting};
 use windows_reactor::*;
 
 use crate::backend::{Backend, BackendHandle, Change, Failure, Listener};
 use crate::form::{Choice, CustomForm, Field};
-use crate::model::{self, Link, Snapshot, Tone, Trends, ViewLevel};
+use crate::model::{self, Link, Snapshot, Tone, Trends, TuningDrafts, ViewLevel};
 use crate::preferences::{self, Preferences, Theme};
 use crate::widgets::{self, Palette, glyph};
 use crate::{contrast, launch, pages};
@@ -53,6 +54,9 @@ pub enum Page {
     Sensors,
     /// Fan speeds and curves. Advanced level only.
     Fans,
+    /// Power limits, clocks and voltages of devices whose driver lets them
+    /// be set. Advanced level only.
+    Tuning,
     /// Hardware and software inventory.
     System,
     /// User-defined actions. Advanced level only.
@@ -65,7 +69,7 @@ pub enum Page {
 
 impl Page {
     /// Every page, in pane order.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Home,
         Self::Tweaks(Category::Performance),
         Self::Tweaks(Category::Privacy),
@@ -74,6 +78,7 @@ impl Page {
         Self::Tweaks(Category::Other),
         Self::Sensors,
         Self::Fans,
+        Self::Tuning,
         Self::System,
         Self::Custom,
         Self::History,
@@ -91,6 +96,7 @@ impl Page {
             Self::Tweaks(Category::Other) => "look-and-feel",
             Self::Sensors => "sensors",
             Self::Fans => "fans",
+            Self::Tuning => "tuning",
             Self::System => "system",
             Self::Custom => "custom-actions",
             Self::History => "history",
@@ -110,6 +116,7 @@ impl Page {
             Self::Tweaks(category) => model::category_name(category),
             Self::Sensors => "Sensors",
             Self::Fans => "Fans",
+            Self::Tuning => "Tuning",
             Self::System => "System",
             Self::Custom => "Custom actions",
             Self::History => "History",
@@ -127,6 +134,7 @@ impl Page {
             Self::Tweaks(Category::Other) => glyph::APPEARANCE,
             Self::Sensors => glyph::SENSORS,
             Self::Fans => glyph::FANS,
+            Self::Tuning => glyph::TUNING,
             Self::System => glyph::SYSTEM,
             Self::Custom => glyph::CUSTOM,
             Self::History => glyph::HISTORY,
@@ -136,7 +144,8 @@ impl Page {
 
     /// Whether the page exists at `level`.
     pub fn exists_at(self, level: ViewLevel) -> bool {
-        level == ViewLevel::Advanced || !matches!(self, Self::Fans | Self::Custom | Self::History)
+        level == ViewLevel::Advanced
+            || !matches!(self, Self::Fans | Self::Tuning | Self::Custom | Self::History)
     }
 
     /// Whether the page shows live sensor readings.
@@ -168,6 +177,21 @@ pub enum Dialog {
     },
     /// Deleting the history.
     ClearHistory,
+    /// Putting clocks or voltages that are not the driver's into effect.
+    Tuning {
+        /// Device name.
+        name: String,
+        /// The settings to send when the user agrees.
+        settings: Vec<TuningSetting>,
+        /// The device's key, whose drafts and switch wait for the answer.
+        device: String,
+    },
+}
+
+/// The name under which a device's tuning switch waits for the service, in
+/// [`App::pending`].
+pub fn tuning_switch(device: &str) -> String {
+    format!("tuning:{device}")
 }
 
 /// Everything that can happen to the app.
@@ -240,6 +264,20 @@ pub enum Message {
     CheckForUpdate,
     /// "Update now".
     InstallUpdate,
+    /// A tuning value was entered: device key, control key, the number.
+    TuningValue(String, String, Option<f64>),
+    /// The tuning switch of a device was flipped.
+    TuningEnabled(String, bool),
+    /// "Save" on a device: its entered values go to the service.
+    SaveTuning(String),
+    /// "Discard" on a device: its entered values are forgotten.
+    DiscardTuning(String),
+    /// "Use defaults" on a device: every value is entered as its default.
+    DefaultTuning(String),
+    /// "Remove" on the values kept for a device that is not there.
+    RemoveTuning(String),
+    /// "Apply again" on the Tuning page.
+    ApplyTuning,
 }
 
 /// What the listener wants from the app.
@@ -296,6 +334,8 @@ pub struct App {
     pub unfolded: HashSet<String>,
     /// Tweaks whose details are open at the Advanced level.
     pub details_open: HashSet<String>,
+    /// Tuning values entered and not saved.
+    pub tuning_drafts: TuningDrafts,
     /// Whether the navigation pane is open, once the view has said so.
     pane_open: Option<bool>,
 }
@@ -502,7 +542,76 @@ impl App {
                 self.send(None, Request::RemoveCustom { id }, context);
             }
             Dialog::ClearHistory if agreed => self.send(None, Request::ClearHistory, context),
+            Dialog::Tuning { settings, device, .. } if agreed => {
+                self.send(Some(tuning_switch(&device)), Request::SetTuning(settings), context);
+            }
+            // Declined: the switch goes back; what was entered stays.
+            Dialog::Tuning { device, .. } => _ = self.pending.remove(&tuning_switch(&device)),
             Dialog::AdvancedLevel | Dialog::RemoveCustom { .. } | Dialog::ClearHistory => {}
+        }
+    }
+
+    /// The device with this key, as the service last reported it.
+    fn tuning_device(&self, key: &str) -> Option<&TuningDevice> {
+        let status = self.snapshot.status.as_ref()?;
+        status.tuning.devices.iter().find(|device| device.key == key)
+    }
+
+    /// Where a device's tuning switch should stand: the user's choice while
+    /// a request is under way, otherwise what the service reports.
+    pub fn tuning_switch_position(&self, device: &TuningDevice) -> bool {
+        self.pending.get(&tuning_switch(&device.key)).copied().unwrap_or(device.enabled)
+    }
+
+    /// Sends the shown values of a device with its switch at `enabled`,
+    /// after asking when that puts a clock or a voltage of the user's into
+    /// effect.
+    fn set_tuning(&mut self, key: &str, enabled: bool, context: &ComponentContext<Self>) {
+        let Some(device) = self.tuning_device(key).filter(|_| self.can_change()) else { return };
+        let values = model::tuning_values(device, self.tuning_drafts.get(key));
+        let risky = enabled && model::tuning_values_are_risky(device, &values);
+        let name = device.name.clone();
+        let saved = self.snapshot.profile.as_ref().map_or(&[][..], |profile| &profile.tuning);
+        let settings = model::tuning_settings_with(saved, key, enabled, values);
+        if risky {
+            self.dialog = Some(Dialog::Tuning { name, settings, device: key.to_owned() });
+        } else {
+            self.send(Some(tuning_switch(key)), Request::SetTuning(settings), context);
+        }
+    }
+
+    fn enter_tuning_value(&mut self, device: &str, control: &str, entered: Option<f64>) {
+        let Some(found) = self.tuning_device(device) else { return };
+        let Some(control) = found.controls.iter().find(|candidate| candidate.key == control) else {
+            return;
+        };
+        let draft = self.tuning_drafts.get(device);
+        let Some(change) = model::tuning_draft_after(control, draft, entered) else { return };
+        let key = control.key.clone();
+        let draft = self.tuning_drafts.entry(device.to_owned()).or_default();
+        match change {
+            Some(value) => _ = draft.insert(key, value),
+            None => _ = draft.remove(&key),
+        }
+        if draft.is_empty() {
+            self.tuning_drafts.remove(device);
+        }
+    }
+
+    /// Enters the default of every control of a device, to be saved or
+    /// discarded like any other entry.
+    fn enter_tuning_defaults(&mut self, device: &str) {
+        let Some(found) = self.tuning_device(device) else { return };
+        let draft: std::collections::BTreeMap<String, i32> = found
+            .controls
+            .iter()
+            .filter(|control| control.wanted.is_some_and(|wanted| wanted != control.default))
+            .map(|control| (control.key.clone(), control.default))
+            .collect();
+        if draft.is_empty() {
+            self.tuning_drafts.remove(device);
+        } else {
+            self.tuning_drafts.insert(device.to_owned(), draft);
         }
     }
 
@@ -580,6 +689,7 @@ impl Component for App {
             form: CustomForm::default(),
             unfolded: HashSet::new(),
             details_open: HashSet::new(),
+            tuning_drafts: TuningDrafts::new(),
             pane_open: None,
         };
         app.go(Page::Home);
@@ -623,7 +733,13 @@ impl Component for App {
             Message::Sent(entry, result) => {
                 match (&result, entry) {
                     // The service has it; the next load shows the outcome.
-                    (Ok(()), Some(id)) => self.settled.push(id),
+                    (Ok(()), Some(id)) => {
+                        // What was entered for a device is now what is saved.
+                        if let Some(device) = id.strip_prefix("tuning:") {
+                            self.tuning_drafts.remove(device);
+                        }
+                        self.settled.push(id);
+                    }
                     (Err(_), Some(id)) => _ = self.pending.remove(&id),
                     (_, None) => {}
                 }
@@ -733,6 +849,33 @@ impl Component for App {
             }
             Message::CheckForUpdate => self.send(None, Request::CheckForUpdate, context),
             Message::InstallUpdate => self.send(None, Request::InstallUpdate, context),
+            Message::TuningValue(device, control, entered) => {
+                self.enter_tuning_value(&device, &control, entered);
+            }
+            Message::TuningEnabled(key, on) => {
+                // The switch echoes its position when it is drawn.
+                let differs = self
+                    .tuning_device(&key)
+                    .is_some_and(|device| self.tuning_switch_position(device) != on);
+                if differs && self.can_change() {
+                    self.pending.insert(tuning_switch(&key), on);
+                    self.set_tuning(&key, on, context);
+                }
+            }
+            Message::SaveTuning(key) => {
+                let enabled = self.tuning_device(&key).is_some_and(|device| device.enabled);
+                self.set_tuning(&key, enabled, context);
+            }
+            Message::DiscardTuning(key) => _ = self.tuning_drafts.remove(&key),
+            Message::DefaultTuning(key) => self.enter_tuning_defaults(&key),
+            Message::RemoveTuning(key) => {
+                let saved = self.snapshot.profile.as_ref().map(|profile| profile.tuning.clone());
+                if let Some(mut settings) = saved.filter(|_| self.can_change()) {
+                    settings.retain(|setting| setting.device != key);
+                    self.send(None, Request::SetTuning(settings), context);
+                }
+            }
+            Message::ApplyTuning => self.send(None, Request::ApplyTuning, context),
         }
     }
 
@@ -871,6 +1014,7 @@ impl App {
             Page::Tweaks(category) => pages::tweaks::view(self, category, context),
             Page::Sensors => pages::sensors::view(self, context),
             Page::Fans => pages::fans::view(self, context),
+            Page::Tuning => pages::tuning::view(self, context),
             Page::System => pages::system::view(self),
             Page::Custom => pages::custom::view(self, context),
             Page::History => pages::history::view(self, context),
@@ -919,6 +1063,11 @@ impl App {
                 "The record of what SysPilot applied, restored and turned off is cleared. Your settings stay as they are.".to_owned(),
                 "Clear",
             ),
+            Some(Dialog::Tuning { name, .. }) => (
+                format!("Set your own clocks and voltages on {name}?"),
+                "Values the device can't hold make it unstable: the picture can freeze or go black, and Windows can stop. A voltage that is too high makes it hotter and can shorten its life.\n\nIf Windows stops, SysPilot does not set these values again by itself after the restart. Turning tuning off puts the driver's defaults back.".to_owned(),
+                "Set these values",
+            ),
             None => (String::new(), String::new(), ""),
         };
         ContentDialog::new()
@@ -944,6 +1093,14 @@ mod tests {
     }
 
     #[test]
+    fn a_tuning_switch_is_named_after_its_device() {
+        // The answer of the service is matched to the device by this prefix.
+        let name = tuning_switch("gpu.amd-699f.bus-3");
+        assert_eq!(name.strip_prefix("tuning:"), Some("gpu.amd-699f.bus-3"));
+        assert_ne!(name, tuning_switch("gpu.amd-699f.bus-4"));
+    }
+
+    #[test]
     fn an_expander_stays_open_until_it_is_closed() {
         let mut open = HashSet::new();
         set_open(&mut open, "privacy.advertising-id".to_owned(), true);
@@ -960,10 +1117,10 @@ mod tests {
     }
 
     #[test]
-    fn simple_level_has_no_fans_custom_actions_or_history() {
+    fn simple_level_has_no_fans_tuning_custom_actions_or_history() {
         let hidden: Vec<Page> =
             Page::ALL.into_iter().filter(|page| !page.exists_at(ViewLevel::Simple)).collect();
-        assert_eq!(hidden, [Page::Fans, Page::Custom, Page::History]);
+        assert_eq!(hidden, [Page::Fans, Page::Tuning, Page::Custom, Page::History]);
         assert!(Page::ALL.into_iter().all(|page| page.exists_at(ViewLevel::Advanced)));
     }
 
