@@ -55,6 +55,8 @@ pub enum Event {
         /// What it reported, or why it failed.
         outcome: crate::updates::Outcome,
     },
+    /// The tuner ended a job: what it reported, or why it failed.
+    TuningFinished(crate::tuning::Outcome),
 }
 
 /// A multi-producer queue with a Win32 event that is signalled while the
