@@ -1275,7 +1275,7 @@ pub fn tuning_settings_with(
 /// made meanwhile (a question was open, another client saved) is not undone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TuningAction {
-    /// "Save", or a switch flipped: the device's switch and values.
+    /// "Save": the device's switch and the values the page shows.
     Save {
         /// Key of the device.
         device: String,
@@ -1286,6 +1286,15 @@ pub enum TuningAction {
         /// The device's draft as it was when the user asked: what is
         /// forgotten once the service has these values, and no more.
         draft: BTreeMap<String, i32>,
+    },
+    /// The switch of a device was flipped. What is saved goes with it, as the
+    /// profile has it when the request is made; values entered and not saved
+    /// stay drafts, to be saved with "Save".
+    Switch {
+        /// Key of the device.
+        device: String,
+        /// Where the switch was put.
+        enabled: bool,
     },
     /// "Remove" on a device that is not there: its setting goes.
     Remove {
@@ -1314,11 +1323,24 @@ impl TuningAction {
 }
 
 /// The settings in effect once `action` is done, on top of the profile's
-/// `saved` ones.
-pub fn tuning_settings_after(action: &TuningAction, saved: &[TuningSetting]) -> Vec<TuningSetting> {
+/// `saved` ones. `devices` are the ones the service reports now.
+pub fn tuning_settings_after(
+    action: &TuningAction,
+    devices: &[TuningDevice],
+    saved: &[TuningSetting],
+) -> Vec<TuningSetting> {
     match action {
         TuningAction::Save { device, enabled, values, .. } => {
             tuning_settings_with(saved, device, *enabled, values.clone())
+        }
+        TuningAction::Switch { device, enabled } => {
+            // A device that is no longer listed has nothing to switch.
+            match devices.iter().find(|found| found.key == *device) {
+                Some(found) => {
+                    tuning_settings_with(saved, device, *enabled, tuning_values(found, None))
+                }
+                None => saved.to_vec(),
+            }
         }
         TuningAction::Remove { device } => {
             saved.iter().filter(|setting| setting.device != *device).cloned().collect()
@@ -1337,17 +1359,21 @@ pub fn tuning_question<'a>(
     devices: &'a [TuningDevice],
     saved: &[TuningSetting],
 ) -> Option<&'a TuningDevice> {
-    tuning_risky_device(devices, &tuning_settings_after(action, saved))
+    tuning_risky_device(devices, &tuning_settings_after(action, devices, saved))
 }
 
-/// The request that does `action`, made from the profile's `saved` settings
-/// as they are now.
-pub fn tuning_request(action: &TuningAction, saved: &[TuningSetting]) -> Request {
+/// The request that does `action`, made from the devices and the profile's
+/// `saved` settings as they are now.
+pub fn tuning_request(
+    action: &TuningAction,
+    devices: &[TuningDevice],
+    saved: &[TuningSetting],
+) -> Request {
     match action {
         // Nothing to replace: the service applies what the profile holds.
         TuningAction::ApplyAgain => Request::ApplyTuning,
-        TuningAction::Save { .. } | TuningAction::Remove { .. } => {
-            Request::SetTuning(tuning_settings_after(action, saved))
+        TuningAction::Save { .. } | TuningAction::Switch { .. } | TuningAction::Remove { .. } => {
+            Request::SetTuning(tuning_settings_after(action, devices, saved))
         }
     }
 }
@@ -2206,11 +2232,11 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
         ];
         let card = setting("gpu.card", true, &[("a", 2)]);
         assert_eq!(
-            tuning_request(&save, &at_the_click),
+            tuning_request(&save, &[], &at_the_click),
             Request::SetTuning(vec![setting("gpu.other", true, &[]), card.clone()])
         );
         assert_eq!(
-            tuning_request(&save, &at_the_send),
+            tuning_request(&save, &[], &at_the_send),
             Request::SetTuning(vec![
                 setting("gpu.other", true, &[("b", 5)]),
                 setting("gpu.third", true, &[("c", 7)]),
@@ -2229,17 +2255,64 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
         ];
         let remove = TuningAction::Remove { device: "gpu.gone".into() };
         assert_eq!(
-            tuning_request(&remove, &saved),
+            tuning_request(&remove, &[], &saved),
             Request::SetTuning(vec![saved[0].clone(), saved[2].clone()])
         );
 
         let again = TuningAction::ApplyAgain;
-        assert_eq!(tuning_request(&again, &saved), Request::ApplyTuning);
+        assert_eq!(tuning_request(&again, &[], &saved), Request::ApplyTuning);
         assert_eq!(
-            tuning_settings_after(&again, &saved),
+            tuning_settings_after(&again, &[], &saved),
             saved,
             "(settings): expected the saved ones to stay in effect"
         );
+    }
+
+    #[test]
+    fn the_switch_sends_what_is_saved_as_the_profile_has_it_when_it_is_sent() {
+        let mut card = tuning_card();
+        card.controls[0].wanted = Some(-20);
+        let on = TuningAction::Switch { device: card.key.clone(), enabled: true };
+        let off = TuningAction::Switch { device: card.key.clone(), enabled: false };
+        let saved = [setting("gpu.other", true, &[("b", 5)])];
+
+        // With -30 entered and not saved, a Save would send it. The switch
+        // sends the saved -20 and leaves the entry a draft.
+        let entered = draft(&[("power-limit", -30)]);
+        let save = TuningAction::save(&card, Some(&entered), true);
+        let saved_by_save = tuning_settings_after(&save, std::slice::from_ref(&card), &saved);
+        assert_eq!(saved_by_save[1], setting(&card.key, true, &[("power-limit", -30)]));
+        let expected = setting(&card.key, true, &[("power-limit", -20)]);
+        let sent = tuning_settings_after(&on, std::slice::from_ref(&card), &saved);
+        assert_eq!(
+            sent,
+            [saved[0].clone(), expected],
+            "(switch on): expected the other device and the saved -20, not the entered -30"
+        );
+        let sent = tuning_settings_after(&off, std::slice::from_ref(&card), &saved);
+        assert_eq!(
+            sent,
+            [saved[0].clone(), setting(&card.key, false, &[("power-limit", -20)])],
+            "(switch off): expected the saved values kept, switched off"
+        );
+
+        // The values are those the device reports when the request is made:
+        // another client saved a different limit in between.
+        card.controls[0].wanted = Some(-10);
+        let later = tuning_request(&on, std::slice::from_ref(&card), &saved);
+        assert_eq!(
+            later,
+            Request::SetTuning(vec![
+                saved[0].clone(),
+                setting(&card.key, true, &[("power-limit", -10)])
+            ])
+        );
+
+        // Nothing saved and switched off leaves no setting, and a device
+        // that is gone is not switched.
+        card.controls[0].wanted = None;
+        assert_eq!(tuning_settings_after(&off, std::slice::from_ref(&card), &saved), saved);
+        assert_eq!(tuning_settings_after(&on, &[], &saved), saved);
     }
 
     /// A card with `key` and `name` whose voltage of state 7 is saved as
@@ -2322,7 +2395,10 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
 
     #[test]
     fn turning_on_a_device_with_a_saved_voltage_asks_and_turning_it_off_does_not() {
-        let off = card_at("gpu.card", "RX 550", TuningState::Unmanaged, None, 1050);
+        // Saved earlier and switched off since: the profile still lists the
+        // voltage, which the card reports as what it would be set to.
+        let mut off = card_at("gpu.card", "RX 550", TuningState::Unmanaged, Some(1000), 1050);
+        off.enabled = false;
         let devices = [off];
         // Saved earlier, off since: the device holds the default.
         let saved = [setting("gpu.card", false, &[("core-p7-voltage", 1000)])];
@@ -2336,6 +2412,17 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
 
         let turn_off = saving("gpu.card", false, draft(&[("core-p7-voltage", 1000)]));
         assert_eq!(question(&turn_off, &devices, &saved), None);
+
+        // The switch itself: it sends what is saved.
+        let flip_on = TuningAction::Switch { device: "gpu.card".into(), enabled: true };
+        let asked = question(&flip_on, &devices, &saved);
+        assert_eq!(
+            asked,
+            Some("RX 550"),
+            "(question): expected one naming RX 550 for {flip_on:?} | received: {asked:?}"
+        );
+        let flip_off = TuningAction::Switch { device: "gpu.card".into(), enabled: false };
+        assert_eq!(question(&flip_off, &devices, &saved), None);
     }
 
     #[test]

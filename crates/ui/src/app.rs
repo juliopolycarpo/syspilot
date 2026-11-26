@@ -553,8 +553,8 @@ impl App {
             }
             Dialog::ClearHistory if agreed => self.send(None, Request::ClearHistory, context),
             Dialog::Tuning { action, .. } if agreed => self.send_tuning(action, context),
-            // Declined: the switch goes back; what was entered stays.
-            Dialog::Tuning { action: TuningAction::Save { device, .. }, .. } => {
+            // Declined: a flipped switch goes back. What was entered stays.
+            Dialog::Tuning { action: TuningAction::Switch { device, .. }, .. } => {
                 _ = self.pending.remove(&tuning_switch(&device));
             }
             Dialog::Tuning { .. } => {}
@@ -583,9 +583,12 @@ impl App {
         self.snapshot.profile.as_ref().map_or(&[][..], |profile| &profile.tuning)
     }
 
-    /// Saves the shown values of a device with its switch at `enabled`.
-    fn save_tuning(&mut self, key: &str, enabled: bool, context: &ComponentContext<Self>) {
+    /// Saves the shown values of a device. Its switch goes where it stands,
+    /// not where the service last reported it: a flip the service has not
+    /// answered yet would be undone otherwise.
+    fn save_tuning(&mut self, key: &str, context: &ComponentContext<Self>) {
         let Some(device) = self.tuning_device(key) else { return };
+        let enabled = self.tuning_switch_position(device);
         let action = TuningAction::save(device, self.tuning_drafts.get(key), enabled);
         self.start_tuning(action, context);
     }
@@ -606,17 +609,20 @@ impl App {
 
     /// Sends `action`, made into a request from the settings as they are now.
     fn send_tuning(&mut self, action: TuningAction, context: &ComponentContext<Self>) {
-        let request = model::tuning_request(&action, self.saved_tuning());
-        // Only a save waits on the device's switch.
-        let entry = match &action {
-            TuningAction::Save { device, draft, .. } => {
-                // The answer comes with the entry and no more; the draft may
-                // have changed by then.
-                self.tuning_sent.insert(device.clone(), draft.clone());
-                Some(tuning_switch(device))
-            }
+        let request = model::tuning_request(&action, self.tuning_devices(), self.saved_tuning());
+        // A save and a flipped switch wait on the device's switch; the
+        // answer comes under its name, together with the draft that went
+        // with the request (the draft may have changed by then). A switch
+        // sends no draft, so it clears none.
+        let sent = match &action {
+            TuningAction::Save { device, draft, .. } => Some((device, draft.clone())),
+            TuningAction::Switch { device, .. } => Some((device, BTreeMap::new())),
             TuningAction::Remove { .. } | TuningAction::ApplyAgain => None,
         };
+        let entry = sent.map(|(device, draft)| {
+            self.tuning_sent.insert(device.clone(), draft);
+            tuning_switch(device)
+        });
         self.send(entry, request, context);
     }
 
@@ -911,17 +917,10 @@ impl Component for App {
                     .is_some_and(|device| self.tuning_switch_position(device) != on);
                 if differs && self.can_change() {
                     self.pending.insert(tuning_switch(&key), on);
-                    self.save_tuning(&key, on, context);
+                    self.start_tuning(TuningAction::Switch { device: key, enabled: on }, context);
                 }
             }
-            Message::SaveTuning(key) => {
-                // Where the switch stands, not what the service last reported:
-                // a flip it has not answered yet would be undone otherwise.
-                let enabled = self
-                    .tuning_device(&key)
-                    .is_some_and(|device| self.tuning_switch_position(device));
-                self.save_tuning(&key, enabled, context);
-            }
+            Message::SaveTuning(key) => self.save_tuning(&key, context),
             Message::DiscardTuning(key) => _ = self.tuning_drafts.remove(&key),
             Message::DefaultTuning(key) => self.enter_tuning_defaults(&key),
             Message::RemoveTuning(key) => {
