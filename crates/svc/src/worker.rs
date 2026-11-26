@@ -10,7 +10,7 @@
 //! The protocol is in [`syspilot_proto::worker`].
 
 use std::io::{self, Read, Write};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
@@ -39,8 +39,29 @@ const EXIT_GRACE: Duration = Duration::from_secs(2);
 const RESTART_DELAY: Duration = Duration::from_secs(5);
 /// The wait doubles after each restart that fails, up to this.
 const RESTART_DELAY_LIMIT: Duration = Duration::from_secs(60);
-/// `CREATE_NO_WINDOW`: a console service must not flash a window.
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Starts `executable` from the service's own directory with piped standard
+/// input and output, no error output and no window. It is addressed by its
+/// full path, never searched for, so nothing else can be run in its place.
+pub(crate) fn spawn_sibling(executable: &str) -> io::Result<(Child, ChildStdin, ChildStdout)> {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+    let path = std::env::current_exe()?.with_file_name(executable);
+    let mut process = Command::new(path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        // A console service must not flash a window.
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()?;
+    match process.stdin.take().zip(process.stdout.take()) {
+        Some((input, output)) => Ok((process, input, output)),
+        None => {
+            let _ = process.kill();
+            Err(io::Error::other(format!("{executable} has no standard streams")))
+        }
+    }
+}
 
 /// The two ends of a started worker.
 pub struct WorkerLink {
@@ -58,24 +79,13 @@ pub trait WorkerSpawner: Send + Sync {
     fn spawn(&self) -> io::Result<WorkerLink>;
 }
 
-/// Starts the worker executable that sits next to the service's. It is
-/// addressed by its full path, never searched for, so nothing else can be
-/// run in its place.
+/// Starts the worker executable that sits next to the service's (see
+/// [`spawn_sibling`]).
 pub struct ProcessSpawner;
 
 impl WorkerSpawner for ProcessSpawner {
     fn spawn(&self) -> io::Result<WorkerLink> {
-        use std::os::windows::process::CommandExt;
-        let executable = std::env::current_exe()?.with_file_name(WORKER_EXECUTABLE);
-        let mut process = Command::new(executable)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()?;
-        let missing = || io::Error::other("the worker has no standard streams");
-        let requests = process.stdin.take().ok_or_else(missing)?;
-        let frames = process.stdout.take().ok_or_else(missing)?;
+        let (process, requests, frames) = spawn_sibling(WORKER_EXECUTABLE)?;
         Ok(WorkerLink {
             requests: Box::new(requests),
             frames: Box::new(frames),

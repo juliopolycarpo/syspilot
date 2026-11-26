@@ -29,20 +29,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::os::windows::io::AsRawHandle;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use syspilot_proto::frame::{read_frame, write_frame};
 use syspilot_proto::tuning::{
-    TUNER_EXECUTABLE, TuneJob, TuneReport, TunedDevice, TuningControl, TuningDevice, TuningSetting,
-    TuningState, TuningStatus, check_values,
+    TUNER_EXECUTABLE, TuneJob, TuneReport, TunedDevice, TuningDevice, TuningSetting, TuningState,
+    TuningStatus, check_values,
 };
 
 use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
 use windows_sys::Win32::System::Threading::WaitForSingleObject;
 
 use crate::events::{Event, EventQueue};
+use crate::worker::spawn_sibling;
 
 /// When the devices are looked at after a trigger, counted from it. The
 /// later looks catch a vendor tool that writes its own values after logon.
@@ -59,8 +59,6 @@ const REFRESH_AFTER: Duration = Duration::from_secs(10);
 /// How long the tuner gets for one job, in milliseconds. A driver call
 /// normally takes a few; one that takes this long hangs.
 const JOB_TIMEOUT_MS: u32 = 15_000;
-/// `CREATE_NO_WINDOW`: a console service must not flash a window.
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// Name of the mark file in the state directory.
 const APPLY_MARK_FILE: &str = "tuning-applying";
 
@@ -112,9 +110,8 @@ impl ApplyMark for FileApplyMark {
     }
 }
 
-/// Runs the tuner executable that sits next to the service's. It is
-/// addressed by its full path, never searched for, so nothing else can be
-/// run in its place.
+/// Runs the tuner executable that sits next to the service's (see
+/// [`spawn_sibling`]).
 pub struct ProcessTuner {
     queue: Arc<EventQueue>,
 }
@@ -129,20 +126,8 @@ impl ProcessTuner {
 /// Runs one job in the tuner process and waits for its report, at most
 /// [`JOB_TIMEOUT_MS`].
 fn run_tuner_process(job: &TuneJob) -> Outcome {
-    use std::os::windows::process::CommandExt;
-    let started = |error: std::io::Error| format!("The tuner could not be started: {error}");
-    let executable = std::env::current_exe().map_err(started)?.with_file_name(TUNER_EXECUTABLE);
-    let mut process = Command::new(executable)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .map_err(started)?;
-    let Some((mut input, mut output)) = process.stdin.take().zip(process.stdout.take()) else {
-        let _ = process.kill();
-        return Err("(tuner): expected its standard streams | received: none".to_owned());
-    };
+    let (mut process, mut input, mut output) = spawn_sibling(TUNER_EXECUTABLE)
+        .map_err(|error| format!("The tuner could not be started: {error}"))?;
     // Written from a thread of its own, so that a tuner that never takes a
     // job larger than the pipe's buffer still ends at the timeout: ending it
     // fails the write. Dropping the input after the job is what tells the
@@ -222,9 +207,10 @@ fn first_problem(report: TuneReport) -> Result<(), String> {
 fn differs(device: &TunedDevice, setting: &TuningSetting) -> bool {
     let unknown = setting.values.keys().any(|key| device.controls.iter().all(|c| &c.key != key));
     unknown
-        || device.controls.iter().any(|control| {
-            control.current != setting.values.get(&control.key).copied().unwrap_or(control.default)
-        })
+        || device
+            .controls
+            .iter()
+            .any(|control| control.current != control.value_in(&setting.values))
 }
 
 /// Why `settings` cannot be taken, judged against the devices in `report`:
@@ -248,12 +234,10 @@ pub struct Tuning {
     report: Option<(TuneReport, Instant)>,
     /// Why the last job failed, if it did.
     problem: Option<String>,
-    /// Whether any job has ended, so that there is something to say.
-    looked: bool,
     /// The job under way. One at a time.
     running: Option<TuneJob>,
     /// When the devices are looked at next, soonest first.
-    looks: Vec<Instant>,
+    looks: BTreeSet<Instant>,
     /// Applies per device since the last trigger.
     applies: BTreeMap<String, u8>,
     /// Devices whose values something keeps changing. Nothing is applied to
@@ -267,10 +251,10 @@ pub struct Tuning {
     applied_at: Option<Instant>,
     /// Devices a setting was applied to since the service started. One of
     /// them whose setting is no longer in effect is put back to its defaults.
-    managed: Vec<String>,
+    managed: BTreeSet<String>,
     /// Devices whose last apply did not work, with the reason. They are not
     /// tried again until the next trigger.
-    failed: Vec<(String, String)>,
+    failed: BTreeMap<String, String>,
 }
 
 impl Tuning {
@@ -289,15 +273,14 @@ impl Tuning {
             settings,
             report: None,
             problem: None,
-            looked: false,
             running: None,
-            looks: Vec::new(),
+            looks: BTreeSet::new(),
             applies: BTreeMap::new(),
             contested: BTreeSet::new(),
             held: false,
             applied_at: None,
-            managed: Vec::new(),
-            failed: Vec::new(),
+            managed: BTreeSet::new(),
+            failed: BTreeMap::new(),
         };
         if !tuning.anything_in_effect() {
             // A mark with no setting left to hold back means nothing.
@@ -318,10 +301,14 @@ impl Tuning {
         self.settings.iter().find(|setting| setting.enabled && setting.device == device)
     }
 
+    /// Whether any job has ended, so that there is something to say: every
+    /// job that ends leaves either a report or a problem.
+    fn looked(&self) -> bool {
+        self.report.is_some() || self.problem.is_some()
+    }
+
     fn look_at(&mut self, at: Instant) {
-        self.looks.push(at);
-        self.looks.sort();
-        self.looks.dedup();
+        self.looks.insert(at);
     }
 
     /// Starts a new round: the devices are looked at now and twice more.
@@ -355,7 +342,7 @@ impl Tuning {
         self.release_hold();
         if self.anything_in_effect() || !self.managed.is_empty() {
             self.trigger(now);
-        } else if self.looked {
+        } else if self.looked() {
             // Nothing to apply, but what clients are shown changed.
             self.look_at(now);
         }
@@ -400,7 +387,7 @@ impl Tuning {
     /// Whether a status request has to wait for the first look at the
     /// devices. Asking makes that look due.
     pub fn first_look_pending(&mut self, now: Instant) -> bool {
-        if self.looked {
+        if self.looked() {
             return false;
         }
         if self.running.is_none() && self.looks.first().is_none_or(|due| *due > now) {
@@ -414,7 +401,7 @@ impl Tuning {
     pub fn refresh_if_stale(&mut self, now: Instant, clients: usize) {
         let stale =
             self.report.as_ref().is_none_or(|(_, at)| now.duration_since(*at) > REFRESH_AFTER);
-        if clients > 0 && stale && self.looked && self.running.is_none() {
+        if clients > 0 && stale && self.looked() && self.running.is_none() {
             self.look_at(now);
         }
     }
@@ -443,17 +430,16 @@ impl Tuning {
     /// A job ended.
     pub fn finished(&mut self, outcome: Outcome, now: Instant) {
         let job = self.running.take().unwrap_or_default();
-        self.looked = true;
         let report = match outcome {
             Ok(report) => report,
             Err(reason) => {
                 // What an apply did is unknown; it is not tried again by
                 // itself, and the next look says where the devices stand.
                 for setting in &job.apply {
-                    self.fail(&setting.device, reason.clone());
+                    self.failed.insert(setting.device.clone(), reason.clone());
                     // Values may have been written: turning the setting off
                     // must still put the defaults back.
-                    self.manage(&setting.device);
+                    self.managed.insert(setting.device.clone());
                 }
                 if !job.apply.is_empty() {
                     // Values may have been written before it failed: the
@@ -474,26 +460,6 @@ impl Tuning {
         self.report = Some((report, now));
     }
 
-    /// Records that the last apply to `device` did not work.
-    fn fail(&mut self, device: &str, reason: String) {
-        self.failed.retain(|(failed, _)| failed != device);
-        self.failed.push((device.to_owned(), reason));
-    }
-
-    /// Records that `device` may hold values of a setting, so that it is put
-    /// back to its defaults once no setting is in effect for it.
-    fn manage(&mut self, device: &str) {
-        if !self.managed.iter().any(|managed| managed == device) {
-            self.managed.push(device.to_owned());
-        }
-    }
-
-    /// Why the last apply to `device` did not work, if it did not.
-    fn failure_of(&self, device: &str) -> Option<&str> {
-        let (_, reason) = self.failed.iter().find(|(failed, _)| failed == device)?;
-        Some(reason)
-    }
-
     /// Records what an apply or a reset did and has the result looked at.
     fn after_change(&mut self, job: &TuneJob, report: &TuneReport, now: Instant) {
         let problem_of = |key: &str| {
@@ -502,13 +468,13 @@ impl Tuning {
         for key in &job.reset {
             // A reset that failed is tried again by the next look.
             if problem_of(key).is_none() {
-                self.managed.retain(|managed| managed != key);
+                self.managed.remove(key);
             }
         }
         for setting in &job.apply {
             match problem_of(&setting.device) {
-                Some(problem) => self.fail(&setting.device, problem),
-                None => self.manage(&setting.device),
+                Some(problem) => _ = self.failed.insert(setting.device.clone(), problem),
+                None => _ = self.managed.insert(setting.device.clone()),
             }
         }
         if !job.apply.is_empty() {
@@ -539,7 +505,7 @@ impl Tuning {
                 let key = &setting.device;
                 if !differs(device, setting) {
                     holding.push(key.clone());
-                } else if self.failure_of(key).is_some() || self.contested.contains(key) {
+                } else if self.failed.contains_key(key) || self.contested.contains(key) {
                     // Not tried again until the next trigger.
                 } else if self.applies.get(key).is_some_and(|&count| count >= MAX_APPLIES) {
                     given_up.push(key.clone());
@@ -551,9 +517,7 @@ impl Tuning {
         // A device found holding its setting is ours too, also when this
         // service did not write the values: an earlier run of it did, before
         // a restart of the service the driver did not notice.
-        for key in holding {
-            self.manage(&key);
-        }
+        self.managed.extend(holding);
         self.contested.extend(given_up);
         if apply.is_empty() && reset.is_empty() {
             return;
@@ -577,7 +541,7 @@ impl Tuning {
         if self.held {
             return TuningState::Held;
         }
-        if let Some(reason) = self.failure_of(&device.key) {
+        if let Some(reason) = self.failed.get(&device.key) {
             return TuningState::Failed { reason: reason.to_owned() };
         }
         match (differs(device, setting), self.contested.contains(&device.key)) {
@@ -597,44 +561,22 @@ impl Tuning {
             .devices
             .iter()
             .map(|device| {
-                let setting = setting_of(&device.key);
-                let wanted = |control: &TuningControl| {
-                    setting.and_then(|setting| setting.values.get(&control.key).copied())
+                let state = match (&device.problem, self.setting_in_effect(&device.key)) {
+                    // A device that cannot even be read.
+                    (Some(reason), Some(_)) if device.controls.is_empty() => {
+                        TuningState::Failed { reason: reason.clone() }
+                    }
+                    _ => self.state_of(device),
                 };
-                let controls = device
-                    .controls
-                    .iter()
-                    .map(|control| TuningControl { wanted: wanted(control), ..control.clone() })
-                    .collect();
-                TuningDevice {
-                    key: device.key.clone(),
-                    name: device.name.clone(),
-                    interface: device.interface.clone(),
-                    controls,
-                    enabled: setting.is_some_and(|setting| setting.enabled),
-                    state: match (&device.problem, self.setting_in_effect(&device.key)) {
-                        // A device that cannot even be read.
-                        (Some(reason), Some(_)) if device.controls.is_empty() => {
-                            TuningState::Failed { reason: reason.clone() }
-                        }
-                        _ => self.state_of(device),
-                    },
-                }
+                TuningDevice::reported(device, setting_of(&device.key), state)
             })
             .collect();
         // A setting for a device that is not there has to show somewhere.
-        for setting in &self.settings {
-            if report.devices.iter().all(|device| device.key != setting.device) {
-                devices.push(TuningDevice {
-                    key: setting.device.clone(),
-                    name: setting.device.clone(),
-                    interface: String::new(),
-                    controls: Vec::new(),
-                    enabled: setting.enabled,
-                    state: TuningState::Missing,
-                });
-            }
-        }
+        let absent = self
+            .settings
+            .iter()
+            .filter(|setting| report.devices.iter().all(|device| device.key != setting.device));
+        devices.extend(absent.map(TuningDevice::missing));
         TuningStatus { devices, problem: self.problem.clone() }
     }
 }
@@ -743,7 +685,7 @@ mod fake {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use syspilot_proto::tuning::{TuningKind, TuningUnit};
+    use syspilot_proto::tuning::{TuningControl, TuningKind, TuningUnit};
 
     const CARD: &str = "gpu.amd-699f.bus-3";
 
