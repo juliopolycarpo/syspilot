@@ -1,0 +1,30 @@
+name: PR title
+
+# A squash merge makes the PR title the subject of the commit on main, and
+# git-cliff (cliff.toml, require_conventional) fails every later release on a
+# subject that is not a Conventional Commit. main cannot be rewritten, so the
+# title is checked here, before it lands. GitHub's Revert button and merge
+# commits produce such subjects: retitle the PR to `revert: …` instead.
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions: {}
+
+jobs:
+  title:
+    name: Conventional Commit title
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      # The title goes through the environment, never into the script itself.
+      # The types are those cliff.toml groups.
+      - name: Check the title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(feat|fix|perf|revert|docs|refactor|test|build|ci|chore|style)(\([a-z0-9-]+\))?!?: [^ ]'
+          if [[ ! $TITLE =~ $pattern ]]; then
+            echo "::error::(PR title): expected type(scope): subject, with a type from cliff.toml, for example \"fix(ui): keep the chart's scale\" | received: \"$TITLE\""
+            exit 1
+          fi
