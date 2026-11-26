@@ -28,7 +28,8 @@ body = """
     {% for commit in entry.commits %}
         - {% if commit.breaking %}**Breaking:** {% endif %}\
             {% if commit.scope %}**{{ commit.scope }}:** {% endif %}\
-            {{ commit.message | upper_first }}\
+            {% if commit.group is containing("Reverted") %}{{ commit.message }}\
+            {% else %}{{ commit.message | upper_first }}{% endif %}\
     {% endfor %}
 {% endfor %}\n
 """

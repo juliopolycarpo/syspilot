@@ -91,7 +91,7 @@ messages by [git-cliff](https://git-cliff.org); do not edit it by hand.
 
 ### Reverted
 
-- Perf(ui): slide charts instead of redrawing every segment
+- perf(ui): slide charts instead of redrawing every segment
 
 ### Documentation
 
