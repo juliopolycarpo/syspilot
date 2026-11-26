@@ -77,8 +77,8 @@ thresholds barely matter there.
 **AMD.** Windows uses CPPC2, and the chipset driver brings its own
 processor settings.
 [AMD](https://www.amd.com/en/resources/support-articles/faqs/PA-400.html)
-asks for its Ryzen Balanced plan on Zen+ and Zen 2. On Zen 3 and later it
-asks for a provisioning package on top of the stock plan. AMD does not say
+asks for its Ryzen Balanced plan on Zen+ and Zen 2. On Zen 3 it asks
+for a provisioning package on top of the stock plan. AMD does not say
 what either one changes.
 
 Effects that are only reported, not documented:
@@ -139,6 +139,12 @@ Several other facts shape a design:
   one plan does nothing once another is active. The engine already writes
   to the active plan and checks again whenever the plan changes; a tuner
   that only looks at its triggers would miss that.
+- **One plan for the machine.** Microsoft documents `PowerSetActiveScheme`
+  as acting "for the current user", but the active plan is a single value,
+  `ActivePowerScheme` under
+  `HKLM\SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes`. A plan
+  the service sets is the one every session runs. That is how the engine's
+  power actions already work from the service.
 - **Defaults** come from `PowerReadACDefaultIndex` and
   `PowerReadDCDefaultIndex`
   ([doc](https://learn.microsoft.com/en-us/windows/win32/api/powrprof/nf-powrprof-powerreadacdefaultindex)).
@@ -165,7 +171,4 @@ Ryzen machine:
 
 - [ ] whether a maximum state below 100 % turns boost off;
 - [ ] whether the energy preference written to the plan holds under each
-  power mode;
-- [ ] whether `PowerSetActiveScheme` from LocalSystem changes the plan the
-  signed-in user's session runs, since Microsoft documents it "for the
-  current user".
+  power mode.
