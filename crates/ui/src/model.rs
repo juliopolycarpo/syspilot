@@ -1263,8 +1263,9 @@ pub fn tuning_draft_after(
     entered: Option<f64>,
 ) -> Option<Option<i32>> {
     let entered = entered.filter(|value| value.is_finite())?;
-    let value = (entered.round() as i64).clamp(i64::from(control.min), i64::from(control.max));
-    let value = i32::try_from(value).ok()?;
+    // Clamped to the device's own range, the number fits an `i32`, so the
+    // cast cannot wrap however large the entry was.
+    let value = entered.round().clamp(f64::from(control.min), f64::from(control.max)) as i32;
     if value == tuning_shown_value(control, draft) {
         return None;
     }
@@ -1932,8 +1933,15 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
         );
         assert_eq!(tuning_cell_note(&control, 0), "", "default, shown and current agree");
         control.current = 5;
-        assert!(tuning_control_hint(&control, 0).ends_with(" · now 5\u{a0}%"));
-        assert!(!tuning_control_hint(&control, 5).contains("now"), "shown and current agree");
+        assert_eq!(
+            tuning_control_hint(&control, 0),
+            "\u{2212}75\u{a0}% to 75\u{a0}%, default 0\u{a0}% · now 5\u{a0}%"
+        );
+        assert_eq!(
+            tuning_control_hint(&control, 5),
+            "\u{2212}75\u{a0}% to 75\u{a0}%, default 0\u{a0}%",
+            "shown and current agree"
+        );
         assert_eq!(tuning_cell_note(&control, 0), "now 5\u{a0}%");
         assert_eq!(tuning_cell_note(&control, 5), "default 0\u{a0}%");
         assert_eq!(tuning_cell_note(&control, -20), "default 0\u{a0}% · now 5\u{a0}%");
@@ -1959,7 +1967,12 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
         assert_eq!(keys(&layout.limits), ["power-limit"]);
         let states: Vec<u8> = layout.core.iter().map(|row| row.state).collect();
         assert_eq!(states, [1, 7], "lowest state first, whatever order they came in");
-        assert!(layout.core[0].clock.is_some() && layout.core[0].voltage.is_none());
+        let lowest = &layout.core[0];
+        assert_eq!(
+            (lowest.clock.map(|control| control.key.as_str()), lowest.voltage),
+            (Some("core-p1-clock"), None),
+            "(layout): expected state 1 with a clock and no voltage | received: {lowest:?}"
+        );
         assert_eq!(
             layout.core[1].voltage.map(|control| control.key.as_str()),
             Some("core-p7-voltage")
@@ -2014,6 +2027,7 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
         assert_eq!(after(None, Some(f64::NAN)), None);
         assert_eq!(after(None, Some(-30.4)), Some(Some(-30)));
         assert_eq!(after(None, Some(500.0)), Some(Some(75)), "clamped to the range");
+        assert_eq!(after(None, Some(1e30)), Some(Some(75)), "too large for an i32 still clamps");
         let entered = draft(&[("power-limit", -30)]);
         assert_eq!(after(Some(&entered), Some(-30.0)), None, "the box echoing the draft");
         assert_eq!(after(Some(&entered), Some(-20.0)), Some(None), "back at what is saved");
