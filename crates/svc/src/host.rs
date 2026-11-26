@@ -396,6 +396,8 @@ impl<S: StateStore + Clone + 'static> Host<S> {
             // What another tool changed since the last look shows up with the
             // event that the look ends in.
             Request::RefreshTuning => {
+                // Not through `tuning_step`: this only schedules a look, which
+                // changes nothing clients are shown until it ends.
                 self.tuning.refresh_if_stale(Instant::now());
                 Response::Ok
             }
