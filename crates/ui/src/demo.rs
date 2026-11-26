@@ -867,6 +867,8 @@ fn apply(scenario: Scenario, snapshot: &mut Snapshot, request: &Request) -> Resu
                 status.tuning = tuning(scenario, &settings.unwrap_or_default(), false);
             }
         }
+        // Nothing changes behind the demo's back, so a new look finds the same.
+        Request::RefreshTuning => {}
         _ => return Err(Failure::Other("The demo does not support this.".into())),
     }
     Ok(())
@@ -1157,6 +1159,10 @@ mod tests {
         );
         demo.send(&Request::ApplyTuning).unwrap();
         assert_eq!(tuning_of(&demo).devices[0].state, TuningState::Applied);
+        let before = tuning_of(&demo);
+        let refreshed = demo.send(&Request::RefreshTuning);
+        assert_eq!(refreshed, Ok(()), "(refresh): expected the demo to take it");
+        assert_eq!(tuning_of(&demo), before, "(refresh): expected the same devices");
         assert_eq!(tuning_of(&DemoBackend::new(Scenario::TuningNone)), TuningStatus::default());
     }
 

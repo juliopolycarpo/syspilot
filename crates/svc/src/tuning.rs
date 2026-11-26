@@ -55,8 +55,8 @@ const LOOKS_AFTER_TRIGGER: [Duration; 3] =
 const SURVIVAL_PERIOD: Duration = Duration::from_secs(60);
 /// Applies in one round before a device counts as contested.
 const MAX_APPLIES: u8 = 3;
-/// How old a report may be before a status request has it made again, while
-/// a client is connected.
+/// How old a report may be before a client's `RefreshTuning` has it made
+/// again.
 const REFRESH_AFTER: Duration = Duration::from_secs(10);
 /// How long the tuner gets for one job, in milliseconds. A driver call
 /// normally takes a few; one that takes this long hangs.
@@ -432,12 +432,14 @@ impl Tuning {
         true
     }
 
-    /// Has the devices looked at again when what is known about them is old
-    /// and somebody is watching.
-    pub fn refresh_if_stale(&mut self, now: Instant, clients: usize) {
+    /// Has the devices looked at again for a client that shows them, unless
+    /// what is known about them is recent. The client asks with every reload
+    /// while it shows them, so this is what keeps the tuner from starting
+    /// with each one.
+    pub fn refresh_if_stale(&mut self, now: Instant) {
         let stale =
             self.report.as_ref().is_none_or(|(_, at)| now.duration_since(*at) > REFRESH_AFTER);
-        if clients > 0 && stale && self.looked() && self.running.is_none() {
+        if stale && self.looked() && self.running.is_none() {
             self.look_at(now);
         }
     }
@@ -1368,7 +1370,7 @@ mod tests {
         // The second card loses its value too, and a client's look finds it.
         fixture.tuner.state().backend.devices[1].controls[0].current = 0;
         fixture.now += Duration::from_secs(60);
-        fixture.tuning.refresh_if_stale(fixture.now, 1);
+        fixture.tuning.refresh_if_stale(fixture.now);
         fixture.pass(0);
         let status = fixture.tuning.status();
         let second =
@@ -1476,23 +1478,24 @@ mod tests {
         assert_eq!(status.problem.as_deref(), Some("The tuner could not be started: not found"));
         assert!(status.devices.is_empty());
 
-        fixture.tuning.refresh_if_stale(fixture.now, 1);
+        fixture.tuning.refresh_if_stale(fixture.now);
         fixture.pass(0);
         assert_eq!(fixture.tuning.status().problem, None);
         assert_eq!(fixture.tuning.status().devices.len(), 1);
     }
 
     #[test]
-    fn a_stale_report_is_refreshed_only_while_somebody_watches() {
+    fn a_refresh_looks_again_only_at_a_report_that_is_no_longer_recent() {
         let mut fixture = Fixture::new(Vec::new());
         fixture.tuning.first_look_pending(fixture.now);
         fixture.pass(0);
-        fixture.tuning.refresh_if_stale(fixture.now, 1);
+        fixture.tuning.refresh_if_stale(fixture.now);
         assert_eq!(fixture.tuning.next_wake(fixture.now), None, "the report is fresh");
-        fixture.now += REFRESH_AFTER + Duration::from_secs(1);
-        fixture.tuning.refresh_if_stale(fixture.now, 0);
-        assert_eq!(fixture.tuning.next_wake(fixture.now), None, "nobody is watching");
-        fixture.tuning.refresh_if_stale(fixture.now, 1);
+        fixture.now += REFRESH_AFTER;
+        fixture.tuning.refresh_if_stale(fixture.now);
+        assert_eq!(fixture.tuning.next_wake(fixture.now), None, "the report is just recent");
+        fixture.now += Duration::from_secs(1);
+        fixture.tuning.refresh_if_stale(fixture.now);
         assert_eq!(fixture.tuning.next_wake(fixture.now), Some(Duration::ZERO));
         fixture.overwrite("power-limit", 7);
         fixture.pass(0);

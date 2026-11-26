@@ -139,8 +139,8 @@ impl<S: StateStore + Clone + 'static> Core<S> {
     /// the client is an elevated administrator.
     ///
     /// `Hello`, `Subscribe`, `Status`, `Sensors`, `SystemInfo`,
-    /// `CheckForUpdate`, `InstallUpdate` and `ApplyTuning` belong to the host
-    /// and are answered with an error here. The host also judges the values
+    /// `CheckForUpdate`, `InstallUpdate`, `ApplyTuning` and `RefreshTuning`
+    /// belong to the host and are answered with an error here. The host also judges the values
     /// of `SetTuning` against the devices before it passes the request on;
     /// here only the shape of the settings is checked.
     pub fn handle(&mut self, request: Request, elevated: bool) -> (Response, Effects) {
@@ -227,7 +227,8 @@ impl<S: StateStore + Clone + 'static> Core<S> {
             | Request::SystemInfo
             | Request::CheckForUpdate
             | Request::InstallUpdate
-            | Request::ApplyTuning => {
+            | Request::ApplyTuning
+            | Request::RefreshTuning => {
                 error(ErrorCode::Invalid, "(request): not valid at this point of the connection")
             }
         };
@@ -776,6 +777,7 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Core', name = "Che
             Request::CheckForUpdate,
             Request::InstallUpdate,
             Request::ApplyTuning,
+            Request::RefreshTuning,
         ];
         for request in host_requests {
             assert_eq!(fixture.refused(request, true).code, ErrorCode::Invalid);

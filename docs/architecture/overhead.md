@@ -34,7 +34,8 @@ all the time.
   a moment. The service loads no vendor library. It looks at the devices a few
   times in the three minutes after a start, a wake, a logon or a change of
   the settings, and then not again; with no tuning setting on and no app
-  connected it never does.
+  connected it never does. An open Tuning page has them looked at again as
+  it reloads, at most every ten seconds; no other page does.
 - **Notifications instead of polling.** Drift is detected by
   `RegNotifyChangeKeyValue`. The kernel wakes the service when a watched key
   changes and at no other time.

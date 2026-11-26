@@ -393,6 +393,12 @@ impl<S: StateStore + Clone + 'static> Host<S> {
                 self.tuning_step(|tuning| tuning.apply_again(Instant::now()));
                 Response::Ok
             }
+            // What another tool changed since the last look shows up with the
+            // event that the look ends in.
+            Request::RefreshTuning => {
+                self.tuning.refresh_if_stale(Instant::now());
+                Response::Ok
+            }
             Request::Status => Response::Status(Box::new(self.status())),
             Request::Sensors => Response::Sensors(self.sensor_list()),
             Request::SystemInfo => Response::SystemInfo(self.parts.hardware.system_info()),
@@ -447,9 +453,6 @@ impl<S: StateStore + Clone + 'static> Host<S> {
         let runtime = self.parts.hardware.fan_runtime();
         let fans =
             fans::merge(&layout, &self.core.profile().fans, &runtime, self.core.fan_control());
-        // What another tool changed since the last look shows up with the
-        // event that look ends in.
-        self.tuning.refresh_if_stale(Instant::now(), self.subscribers.len());
         ServiceStatus {
             version: env!("CARGO_PKG_VERSION").into(),
             instance: self.parts.instance.name().into(),
@@ -1071,6 +1074,24 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
         }
         assert!(client.profile().unwrap().tuning.is_empty());
         assert_eq!(host.tuner.jobs().len(), 1, "only the look for the status");
+    }
+
+    #[test]
+    fn statuses_start_no_tuner_and_a_refresh_of_a_recent_report_neither() {
+        let host = RunningHost::start();
+        let mut client = host.client();
+        // A watching client used to have every status look again.
+        let _events = host.subscribe(false);
+        client.status().unwrap();
+        client.status().unwrap();
+        client.command(&Request::RefreshTuning).unwrap();
+        client.status().unwrap();
+        let jobs = host.tuner.jobs();
+        assert_eq!(
+            jobs.len(),
+            1,
+            "(tuner jobs): expected only the first status's look | received: {jobs:?}"
+        );
     }
 
     #[test]
