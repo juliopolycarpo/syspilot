@@ -862,10 +862,15 @@ mod tests {
             );
         }
 
-        /// Whether the service counts the device as one it applied a setting
-        /// to, which is what turning the setting off later resets.
-        fn manages_device(&self) -> bool {
-            self.tuning.managed.contains(CARD)
+        /// Asserts that the service counts the device as one it applied a
+        /// setting to, which is what turning the setting off later resets.
+        #[track_caller]
+        fn assert_managed(&self, when: &str) {
+            let managed = &self.tuning.managed;
+            assert!(
+                managed.contains(CARD),
+                "(managed devices {when}): expected {CARD} | received: {managed:?}"
+            );
         }
 
         fn current(&self, key: &str) -> i32 {
@@ -1015,7 +1020,10 @@ mod tests {
         );
         // The values of the run before the stop are still on the card.
         fixture.overwrite("core-p7-voltage", 800);
-        assert!(fixture.tuning.first_look_pending(fixture.now));
+        assert!(
+            fixture.tuning.first_look_pending(fixture.now),
+            "(first status of a held start): expected to wait for a look | received: no wait"
+        );
         fixture.pass(0);
         assert_eq!(fixture.kinds_of_jobs(), ["look"], "nothing is written while held");
         fixture.assert_state(&TuningState::Applied, "of a held device that holds its values");
@@ -1219,7 +1227,7 @@ mod tests {
         fixture.tuning.finished(Err("(tuner): hung".into()), fixture.now);
         fixture.assert_state(&TuningState::Different, "after the failure of an earlier round");
         // What the failed apply wrote is unknown all the same.
-        assert!(fixture.manages_device(), "(managed): expected {CARD} | received: nothing");
+        fixture.assert_managed("after the failure of an earlier round");
         fixture.assert_mark(true, "after the failure of an earlier round");
 
         fixture.pass(0);
@@ -1237,7 +1245,7 @@ mod tests {
         let refused = fixture.tuner.outcome_of_last();
         fixture.tuning.finished(refused, fixture.now);
         fixture.assert_state(&TuningState::Different, "after the problem of an earlier round");
-        assert!(fixture.manages_device(), "(managed): expected {CARD} | received: nothing");
+        fixture.assert_managed("after the problem of an earlier round");
         fixture.assert_mark(true, "after the problem of an earlier round");
 
         fixture.pass(0);
