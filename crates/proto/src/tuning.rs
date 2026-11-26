@@ -234,7 +234,8 @@ pub enum TuningState {
     /// been applied yet, or something changed them.
     Different,
     /// Something keeps changing the values back. SysPilot stopped applying
-    /// them until it is asked again or the machine restarts.
+    /// them until the next trigger: the settings change, it is asked again,
+    /// or the service starts, the machine wakes or a user signs in.
     Contested,
     /// Not applied on purpose: the machine stopped within a minute of the
     /// last time these values were applied, so they are held back until the
