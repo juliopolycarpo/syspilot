@@ -61,7 +61,8 @@ if (-not $SkipBuild) {
     }
 }
 
-$executables = 'syspilot.exe', 'syspilot-svc.exe', 'syspilot-sensors.exe', 'syspilot-update.exe'
+$executables = 'syspilot.exe', 'syspilot-svc.exe', 'syspilot-sensors.exe', 'syspilot-update.exe',
+    'syspilot-tune.exe'
 # The window icon is a file the app's build puts beside it.
 foreach ($executable in $executables + 'syspilot.ico') {
     if (-not (Test-Path (Join-Path $release $executable))) {

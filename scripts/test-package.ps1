@@ -84,8 +84,8 @@ function Get-InstalledEntries {
 
 # The processes that run from the installed folder.
 function Get-InstalledProcesses {
-    @(Get-Process syspilot, syspilot-svc, syspilot-sensors, syspilot-update -ErrorAction SilentlyContinue |
-        Where-Object { $_.Path -like "$folder\*" })
+    $names = 'syspilot', 'syspilot-svc', 'syspilot-sensors', 'syspilot-update', 'syspilot-tune'
+    @(Get-Process $names -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$folder\*" })
 }
 
 New-Item -ItemType Directory -Force $logs | Out-Null
