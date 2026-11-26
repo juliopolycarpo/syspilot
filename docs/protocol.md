@@ -22,7 +22,7 @@ answers `Hello(Welcome { protocol, version, elevated })`, or
 whenever a message changes shape; there is no negotiation, the app and the
 service are released together. Version 2 added `ServiceStatus.fans`; version 3
 added `Profile.updates`, `ServiceStatus.update` and the three update requests;
-version 4 added `Profile.tuning`, `ServiceStatus.tuning` and the two tuning
+version 4 added `Profile.tuning`, `ServiceStatus.tuning` and the three tuning
 requests.
 
 `elevated` tells the client how the service sees it. It is computed once per
@@ -60,6 +60,7 @@ strict alternation.
 | `InstallUpdate`                 | `Ok`          | yes             |
 | `SetTuning(settings)`           | `Ok`          | yes             |
 | `ApplyTuning`                   | `Ok`          | yes             |
+| `RefreshTuning`                 | `Ok`          | no              |
 
 Any request can instead be answered with `Error { code, message }`. The message
 is written for the person using the app and can be shown as is.
@@ -180,8 +181,10 @@ a value is outside its control's range or names a control the device does not
 have; a device that is not present is not judged. `ApplyTuning` starts a new
 round for every setting in effect, including one that is `Held` or
 `Contested`. Both answer `Ok` at once; what the tuner did arrives as
-`StatusChanged`. While a client is subscribed, a `Status` request that finds
-the last look older than ten seconds has the devices looked at again.
+`StatusChanged`. `RefreshTuning`, open to anyone, has the devices looked at
+again when the last look is more than ten seconds old, and answers `Ok`
+either way. The app sends it with every reload while its Tuning page is open;
+`Status` itself never starts a look after the first.
 
 ## Sensor section
 

@@ -100,6 +100,10 @@ pub enum Request {
     /// Applies the tuning settings again now, also after they were held back
     /// or contested. Mutating.
     ApplyTuning,
+    /// Has the tunable devices looked at again, unless the last look is only
+    /// seconds old. What it finds arrives as `StatusChanged`. For a client
+    /// that shows the devices; changes nothing.
+    RefreshTuning,
 }
 
 impl Request {
@@ -114,7 +118,8 @@ impl Request {
             | Self::States
             | Self::Sensors
             | Self::SystemInfo
-            | Self::Subscribe { .. } => false,
+            | Self::Subscribe { .. }
+            | Self::RefreshTuning => false,
             Self::Profile
             | Self::History { .. }
             | Self::SetTweak { .. }
@@ -618,6 +623,7 @@ mod tests {
             Request::InstallUpdate,
             Request::SetTuning(vec![]),
             Request::ApplyTuning,
+            Request::RefreshTuning,
         ];
         for request in requests {
             assert_eq!(round_trip(&request), request);
@@ -634,6 +640,7 @@ mod tests {
             Request::Sensors,
             Request::SystemInfo,
             Request::Subscribe { sensors: false },
+            Request::RefreshTuning,
         ];
         assert!(open.iter().all(|request| !request.requires_elevation()));
 

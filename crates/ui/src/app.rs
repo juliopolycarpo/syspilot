@@ -152,6 +152,14 @@ impl Page {
     fn shows_readings(self) -> bool {
         matches!(self, Self::Home | Self::Sensors | Self::Fans)
     }
+
+    /// Whether the page shows the tunable devices as they are now, so that
+    /// each load has the service look at them again. Only this page: the
+    /// tuner is a process of its own and is not started for pages that do
+    /// not show what it finds.
+    fn refreshes_tuning(self) -> bool {
+        self == Self::Tuning
+    }
 }
 
 /// A question the app is asking before it acts.
@@ -445,7 +453,26 @@ impl App {
         }
         self.loading = true;
         let backend = Arc::clone(&self.backend);
-        _ = context.spawn_background(move |_| Message::Loaded(backend.load().map(Box::new)));
+        let refresh = self.page.refreshes_tuning();
+        _ = context.spawn_background(move |_| {
+            if refresh {
+                // The service looks at the devices again unless it did
+                // moments ago; what it finds arrives as a status change. A
+                // refused refresh only leaves the last look on the page.
+                let _ = backend.send(&Request::RefreshTuning);
+            }
+            Message::Loaded(backend.load().map(Box::new))
+        });
+    }
+
+    /// Goes to `page`, and loads again on arriving at one that shows the
+    /// tuning, so that it is looked at anew.
+    fn open(&mut self, page: Page, context: &ComponentContext<Self>) {
+        let before = self.page;
+        self.go(page);
+        if self.page != before && self.page.refreshes_tuning() {
+            self.load(context);
+        }
     }
 
     fn listen(&mut self, context: &ComponentContext<Self>) {
@@ -811,10 +838,10 @@ impl Component for App {
             }
             Message::Navigate(tag) => {
                 if let Some(page) = tag.as_deref().and_then(Page::from_tag) {
-                    self.go(page);
+                    self.open(page, context);
                 }
             }
-            Message::Go(page) => self.go(page),
+            Message::Go(page) => self.open(page, context),
             // A contrast theme comes and goes with a theme change, so it is
             // asked about again here.
             Message::Scheme(scheme) => {
@@ -1205,6 +1232,17 @@ mod tests {
         let elsewhere = HashMap::from([(tuning_switch("gpu.amd-699f.bus-4"), true)]);
         assert_eq!(tuning_save(&elsewhere, &device, None), save(false));
         assert_eq!(tuning_save(&HashMap::new(), &device, None), save(false));
+    }
+
+    #[test]
+    fn only_the_tuning_page_has_the_devices_looked_at_again() {
+        let refreshing: Vec<Page> =
+            Page::ALL.iter().copied().filter(|page| page.refreshes_tuning()).collect();
+        assert_eq!(
+            refreshing,
+            [Page::Tuning],
+            "(pages that refresh tuning): expected the Tuning page only | received: {refreshing:?}"
+        );
     }
 
     #[test]

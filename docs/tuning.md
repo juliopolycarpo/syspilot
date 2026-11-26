@@ -132,8 +132,9 @@ sets the values if they differ:
 
 After the third time in one such round, the device is **Contested** and left
 alone until the next of the moments above. Between rounds nothing runs. A
-value that another tool sets later stays until then; opening the Tuning page
-shows it.
+value that another tool sets later stays until then. The Tuning page shows
+it: while the page is open, SysPilot looks at the devices again each time the
+page reloads, at most every ten seconds.
 
 With no setting on and no app open, SysPilot does not look at the devices at
 all.
