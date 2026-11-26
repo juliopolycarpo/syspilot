@@ -14,6 +14,7 @@ use crate::logger::SensorLogger;
 use crate::pipe;
 use crate::privilege::is_process_elevated;
 use crate::storage::{DataDir, FileStore};
+use crate::tuning::{FileApplyMark, ProcessTuner};
 use crate::updates::{ProcessUpdater, Updater};
 use crate::worker::WorkerHardware;
 
@@ -83,6 +84,8 @@ pub fn serve(
         fan_store_directory: data.state().display().to_string(),
         updater,
         update_log: data.updates().join("install.log").display().to_string(),
+        tuner: Some(Box::new(ProcessTuner::new(queue.clone()))),
+        tuning_mark: Some(Box::new(FileApplyMark::in_directory(data.state()))),
     };
     let mut host = Host::new(core, queue, parts)
         .map_err(|error| format!("create the sensor section: {error}"))?;

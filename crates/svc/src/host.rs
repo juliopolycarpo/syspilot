@@ -29,6 +29,7 @@ use crate::events::{Event, EventQueue};
 use crate::fans;
 use crate::hardware::{DRIVER_URL, Hardware};
 use crate::logger::SensorLogger;
+use crate::tuning::{ApplyMark, Tuner, Tuning};
 use crate::updates::{Updater, Updates};
 use crate::watch::WatchSet;
 
@@ -74,6 +75,33 @@ pub struct HostParts {
     pub updater: Option<Box<dyn Updater>>,
     /// Where Windows Installer logs an update, as shown to the user.
     pub update_log: String,
+    /// What reads and sets hardware tuning values. Taken by [`Host::new`].
+    pub tuner: Option<Box<dyn Tuner>>,
+    /// The mark that outlives an apply the machine did not survive. Taken by
+    /// [`Host::new`].
+    pub tuning_mark: Option<Box<dyn ApplyMark>>,
+}
+
+/// A tuner for a host that was given none: every job fails at once, which
+/// the status then says.
+struct NoTuner(Arc<EventQueue>);
+
+impl Tuner for NoTuner {
+    fn start(&mut self, _job: syspilot_proto::tuning::TuneJob) {
+        let problem = "(tuner): expected one for this service | received: none".to_owned();
+        self.0.push(Event::TuningFinished(Err(problem)));
+    }
+}
+
+/// A mark for a host that was given none: nothing is remembered.
+struct NoMark;
+
+impl ApplyMark for NoMark {
+    fn is_set(&self) -> bool {
+        false
+    }
+    fn set(&mut self) {}
+    fn clear(&mut self) {}
 }
 
 /// The running service.
@@ -108,6 +136,8 @@ pub struct Host<S> {
     fan_watch: fans::Watch,
     /// When and whether SysPilot updates itself.
     updates: Updates,
+    /// When and whether tuning settings are applied.
+    tuning: Tuning,
 }
 
 /// Where a request's answer goes.
@@ -132,8 +162,12 @@ impl<S: StateStore + Clone + 'static> Host<S> {
             std::mem::take(&mut parts.update_log),
             Instant::now(),
         );
+        let tuner = parts.tuner.take().unwrap_or_else(|| Box::new(NoTuner(queue.clone())));
+        let mark = parts.tuning_mark.take().unwrap_or_else(|| Box::new(NoMark));
+        let tuning = Tuning::new(tuner, mark, core.profile().tuning.clone(), Instant::now());
         Ok(Self {
             updates,
+            tuning,
             watches: WatchSet::new(queue.clone()),
             parts,
             queue,
@@ -184,6 +218,7 @@ impl<S: StateStore + Clone + 'static> Host<S> {
         self.waiting.clear();
         self.parts.hardware.release();
         self.parts.logger.close();
+        self.tuning.stopping();
         self.stop_sampling();
         // Ends the sensor worker and waits for it. An installer replaces
         // the worker's file as soon as the service reports itself stopped,
@@ -222,10 +257,16 @@ impl<S: StateStore + Clone + 'static> Host<S> {
                     self.trigger(&TriggerEvent::Change(spec));
                 }
             }
+            Event::TuningFinished(outcome) => {
+                self.tuning_step(|tuning| tuning.finished(outcome, Instant::now()));
+            }
             Event::SessionLogon(session) => {
                 if let Some(sid) = syspilot_engine::win::session_user_sid(session) {
                     self.trigger(&TriggerEvent::Logon { sid });
                 }
+                // The vendor's own tool starts with the session and may write
+                // its values over a setting.
+                self.tuning_step(|tuning| tuning.logged_on(Instant::now()));
             }
             // Buffered log rows should not be lost if the machine does not
             // come back, and the fans go back to the BIOS before it sleeps.
@@ -236,6 +277,7 @@ impl<S: StateStore + Clone + 'static> Host<S> {
             Event::Resume => {
                 self.parts.hardware.set_fans_suspended(false);
                 self.trigger(&TriggerEvent::Resume);
+                self.tuning_step(|tuning| tuning.resumed(Instant::now()));
             }
         }
         Flow::Continue
@@ -246,7 +288,12 @@ impl<S: StateStore + Clone + 'static> Host<S> {
     /// The client waits either way, but the loop stays free to enforce.
     fn answer_or_park(&mut self, request: Request, elevated: bool, reply: Reply) -> Flow {
         let must_wait = match request {
-            Request::Status | Request::SystemInfo => self.parts.hardware.report_pending(),
+            // Both looks are started before either is waited for.
+            Request::Status => {
+                let tuning = self.tuning.first_look_pending(Instant::now());
+                self.parts.hardware.report_pending() || tuning
+            }
+            Request::SystemInfo => self.parts.hardware.report_pending(),
             Request::Sensors => self.hub.is_none() && self.parts.hardware.providers_pending(),
             _ => false,
         };
@@ -299,6 +346,16 @@ impl<S: StateStore + Clone + 'static> Host<S> {
         }
     }
 
+    /// Lets `step` act on the tuning and tells subscribers when what they
+    /// are shown about it has changed.
+    fn tuning_step(&mut self, step: impl FnOnce(&mut Tuning)) {
+        let before = self.tuning.status();
+        step(&mut self.tuning);
+        if self.tuning.status() != before {
+            self.broadcast(ClientEvent::StatusChanged, false);
+        }
+    }
+
     /// Looks for a new version or installs it, on a client's request.
     fn update_on_request(&mut self, install: bool) -> Response {
         let mut asked = Ok(());
@@ -318,9 +375,24 @@ impl<S: StateStore + Clone + 'static> Host<S> {
         if let Some(refused) = core::refusal(&request, elevated) {
             return (refused, Effects::default());
         }
+        // Values are judged against the devices here, where they are known;
+        // the core checks the shape and stores the settings.
+        let settings = match &request {
+            Request::SetTuning(settings) => Some(settings),
+            Request::SetProfile(profile) => Some(&profile.tuning),
+            _ => None,
+        };
+        if let Some(message) = settings.and_then(|settings| self.tuning.refusal(settings)) {
+            let refused = Response::Error(ServiceError { code: ErrorCode::Invalid, message });
+            return (refused, Effects::default());
+        }
         let response = match request {
             Request::CheckForUpdate => self.update_on_request(false),
             Request::InstallUpdate => self.update_on_request(true),
+            Request::ApplyTuning => {
+                self.tuning_step(|tuning| tuning.apply_again(Instant::now()));
+                Response::Ok
+            }
             Request::Status => Response::Status(Box::new(self.status())),
             Request::Sensors => Response::Sensors(self.sensor_list()),
             Request::SystemInfo => Response::SystemInfo(self.parts.hardware.system_info()),
@@ -342,6 +414,10 @@ impl<S: StateStore + Clone + 'static> Host<S> {
         if effects.updates {
             let (mode, clients) = (self.core.profile().updates, self.subscribers.len());
             self.update_step(|updates| updates.set_mode(mode, clients, Instant::now()));
+        }
+        if effects.tuning {
+            let settings = self.core.profile().tuning.clone();
+            self.tuning_step(|tuning| tuning.set_settings(settings, Instant::now()));
         }
         if effects.profile {
             self.broadcast(ClientEvent::ProfileChanged, false);
@@ -371,6 +447,9 @@ impl<S: StateStore + Clone + 'static> Host<S> {
         let runtime = self.parts.hardware.fan_runtime();
         let fans =
             fans::merge(&layout, &self.core.profile().fans, &runtime, self.core.fan_control());
+        // What another tool changed since the last look shows up with the
+        // event that look ends in.
+        self.tuning.refresh_if_stale(Instant::now(), self.subscribers.len());
         ServiceStatus {
             version: env!("CARGO_PKG_VERSION").into(),
             instance: self.parts.instance.name().into(),
@@ -386,7 +465,7 @@ impl<S: StateStore + Clone + 'static> Host<S> {
             fan_control: self.core.fan_control(),
             fans,
             update: self.updates.status(),
-            tuning: Default::default(),
+            tuning: self.tuning.status(),
             problems,
         }
     }
@@ -506,6 +585,7 @@ impl<S: StateStore + Clone + 'static> Host<S> {
             self.sample(now);
         }
         self.update_step(|updates| updates.run_due(now));
+        self.tuning.run_due(now);
     }
 
     fn sample(&mut self, now: Instant) {
@@ -549,6 +629,7 @@ impl<S: StateStore + Clone + 'static> Host<S> {
             self.next_sample.map(until),
             self.look_pending.then_some(LOOK_POLL),
             self.updates.next_wake(now),
+            self.tuning.next_wake(now),
         ]
         .into_iter()
         .flatten()
@@ -562,6 +643,7 @@ mod tests {
     use crate::hardware::FakeHardware;
     use crate::pipe;
     use crate::privilege::is_process_elevated;
+    use crate::tuning::{FakeApplyMark, FakeTuner};
     use crate::updates::{FakeUpdater, Job};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -572,9 +654,12 @@ mod tests {
     use syspilot_proto::catalog::Catalog;
     use syspilot_proto::message::{FanChannelStatus, FanPhase, FanRuntime, FanStatus};
     use syspilot_proto::message::{UpdateState, UpdateStatus};
-    use syspilot_proto::profile::LoggingConfig;
     use syspilot_proto::profile::UpdateMode;
+    use syspilot_proto::profile::{LoggingConfig, Profile};
     use syspilot_proto::sensor::SectionReader;
+    use syspilot_proto::tuning::{
+        TunedDevice, TuningControl, TuningKind, TuningSetting, TuningState, TuningUnit,
+    };
     use syspilot_proto::update::UpdaterReport;
     use syspilot_proto::{Client, EventStream};
 
@@ -607,8 +692,42 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
         fake: FakeOs,
         hardware: FakeHardware,
         updater: FakeUpdater,
+        tuner: FakeTuner,
         log_dir: PathBuf,
         thread: Option<JoinHandle<()>>,
+    }
+
+    const CARD: &str = "gpu.amd-699f.bus-3";
+
+    /// The one device the fake tuner knows: a card with a power limit.
+    fn tunable_card() -> TunedDevice {
+        let limit = TuningControl {
+            key: "power-limit".into(),
+            kind: TuningKind::PowerLimit,
+            state: None,
+            unit: TuningUnit::Percent,
+            min: -75,
+            max: 75,
+            step: 1,
+            default: 0,
+            current: 0,
+            wanted: None,
+        };
+        TunedDevice {
+            key: CARD.into(),
+            name: "Radeon RX 550 Series".into(),
+            interface: "Fake".into(),
+            controls: vec![limit],
+            problem: None,
+        }
+    }
+
+    fn power_limit(percent: i32) -> TuningSetting {
+        TuningSetting {
+            device: CARD.into(),
+            enabled: true,
+            values: [("power-limit".to_owned(), percent)].into(),
+        }
     }
 
     impl RunningHost {
@@ -634,6 +753,8 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
             let fake = FakeOs::default();
             let hardware = FakeHardware::default();
             let updater = FakeUpdater::default();
+            let tuner = FakeTuner::answering(queue.clone());
+            tuner.state().backend.devices = vec![tunable_card()];
             let log_dir = std::env::temp_dir().join(&name);
             std::fs::create_dir_all(&log_dir).unwrap();
 
@@ -643,7 +764,7 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
             let thread = std::thread::spawn({
                 let (instance, queue, fake) = (instance.clone(), queue.clone(), fake.clone());
                 let (hardware, log_dir) = (hardware.clone(), log_dir.clone());
-                let updater = updater.clone();
+                let (updater, tuner) = (updater.clone(), tuner.clone());
                 move || {
                     let catalog = Catalog::parse(CATALOG).unwrap();
                     let store = MemoryStateStore::default();
@@ -661,6 +782,8 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
                         fan_store_directory: FAN_STORE.into(),
                         updater: Some(Box::new(updater)),
                         update_log: UPDATE_LOG.into(),
+                        tuner: Some(Box::new(tuner)),
+                        tuning_mark: Some(Box::new(FakeApplyMark::default())),
                     };
                     let mut host = Host::new(core, queue, parts).unwrap();
                     ready.send(()).unwrap();
@@ -668,7 +791,7 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
                 }
             });
             started.recv().unwrap();
-            Self { instance, queue, fake, hardware, updater, log_dir, thread: Some(thread) }
+            Self { instance, queue, fake, hardware, updater, tuner, log_dir, thread: Some(thread) }
         }
 
         fn client(&self) -> Client {
@@ -706,6 +829,21 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
             }
         }
         panic!("expected the event {wanted:?} | received: 50 other events");
+    }
+
+    /// Reads a value every 20 ms, for two seconds at most, until `reached`
+    /// accepts it. Returns the last value read, so that a test can name it
+    /// when it was never reached.
+    fn settled<T>(mut read: impl FnMut() -> T, reached: impl Fn(&T) -> bool) -> T {
+        let mut value = read();
+        for _ in 0..100 {
+            if reached(&value) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            value = read();
+        }
+        value
     }
 
     fn enable_scratch(client: &mut Client) {
@@ -777,7 +915,13 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
         // The plain subscriber saw none of the sensor ticks.
         drop(client);
         enable_scratch(&mut host.client());
-        assert_eq!(observer.next_event().unwrap(), ClientEvent::ProfileChanged);
+        // The first status had the tunable devices looked at, which it was
+        // told about; that is the only thing before the profile change.
+        let seen: Vec<ClientEvent> = std::iter::repeat_with(|| observer.next_event().unwrap())
+            .take(2)
+            .filter(|event| *event != ClientEvent::StatusChanged)
+            .collect();
+        assert_eq!(seen.first(), Some(&ClientEvent::ProfileChanged), "{seen:?}");
     }
 
     #[test]
@@ -853,6 +997,99 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
         let text = std::fs::read_to_string(logs[0].path()).unwrap();
         assert!(text.starts_with("time,cpu.temp\n"), "{text}");
         assert!(text.trim_end().ends_with(",42.5"), "{text}");
+    }
+
+    #[test]
+    fn the_first_status_waits_for_a_look_at_the_tunable_devices() {
+        let host = RunningHost::start();
+        assert_eq!(host.tuner.jobs(), Vec::new(), "nothing is looked at before somebody asks");
+        let status = host.client().status().unwrap();
+        assert_eq!(host.tuner.jobs().len(), 1);
+        assert_eq!(status.tuning.problem, None);
+        let device = &status.tuning.devices[0];
+        assert_eq!((device.key.as_str(), &device.state), (CARD, &TuningState::Unmanaged));
+        assert_eq!(device.controls[0].current, 0);
+    }
+
+    #[test]
+    fn a_tuning_setting_is_applied_and_subscribers_are_told() {
+        let host = RunningHost::start();
+        let mut client = host.client();
+        client.status().unwrap();
+        let mut events = host.subscribe(false);
+        client.command(&Request::SetTuning(vec![power_limit(-20)])).unwrap();
+        wait_for(&mut events, ClientEvent::ProfileChanged);
+        // The look and the apply each end in an event of their own.
+        let state = settled(
+            || client.status().unwrap().tuning.devices[0].state.clone(),
+            |state| *state == TuningState::Applied,
+        );
+        assert_eq!(
+            state,
+            TuningState::Applied,
+            "(tuning state within 2 s): expected Applied | received: {state:?}"
+        );
+        wait_for(&mut events, ClientEvent::StatusChanged);
+        let status = client.status().unwrap();
+        let control = &status.tuning.devices[0].controls[0];
+        assert_eq!((control.current, control.wanted), (-20, Some(-20)));
+        assert_eq!(client.profile().unwrap().tuning, [power_limit(-20)]);
+
+        // Turned off: the driver's default comes back.
+        let off = TuningSetting { enabled: false, ..power_limit(-20) };
+        client.command(&Request::SetTuning(vec![off])).unwrap();
+        let current = settled(
+            || client.status().unwrap().tuning.devices[0].controls[0].current,
+            |current| *current == 0,
+        );
+        assert_eq!(
+            current, 0,
+            "(power-limit within 2 s of turning off): expected 0 | received: {current}"
+        );
+    }
+
+    #[test]
+    fn a_tuning_value_outside_the_devices_range_is_refused_and_nothing_is_stored() {
+        let host = RunningHost::start();
+        let mut client = host.client();
+        client.status().unwrap();
+        let expected =
+            "Radeon RX 550 Series: (tuning.values.power-limit): expected -75..=75 | received: 90";
+        for request in [
+            Request::SetTuning(vec![power_limit(90)]),
+            Request::SetProfile(Profile { tuning: vec![power_limit(90)], ..Profile::default() }),
+        ] {
+            match client.request(&request) {
+                Err(syspilot_proto::ClientError::Service(error)) => {
+                    assert_eq!(
+                        (error.code, error.message.as_str()),
+                        (ErrorCode::Invalid, expected)
+                    );
+                }
+                other => panic!("(response): expected a service error | received: {other:?}"),
+            }
+        }
+        assert!(client.profile().unwrap().tuning.is_empty());
+        assert_eq!(host.tuner.jobs().len(), 1, "only the look for the status");
+    }
+
+    #[test]
+    fn apply_again_starts_a_new_round_of_tuning() {
+        let host = RunningHost::start();
+        let mut client = host.client();
+        client.command(&Request::SetTuning(vec![power_limit(-20)])).unwrap();
+        client.status().unwrap();
+        // Something else writes its own value; the user asks for theirs.
+        host.tuner.state().backend.devices[0].controls[0].current = 5;
+        client.command(&Request::ApplyTuning).unwrap();
+        let current = settled(
+            || host.tuner.state().backend.devices[0].controls[0].current,
+            |current| *current == -20,
+        );
+        assert_eq!(
+            current, -20,
+            "(power-limit within 2 s of asking again): expected -20 | received: {current}"
+        );
     }
 
     #[test]

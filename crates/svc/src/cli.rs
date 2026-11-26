@@ -11,6 +11,7 @@ use syspilot_proto::message::{
 };
 use syspilot_proto::profile::{Profile, UpdateMode};
 use syspilot_proto::sensor::{Sample, SectionReader, SensorList};
+use syspilot_proto::tuning::{TuningState, TuningStatus};
 use syspilot_proto::win::MappedSection;
 use syspilot_proto::{Client, ClientError, Instance, PRODUCT_NAME};
 
@@ -284,6 +285,7 @@ pub fn render_status(status: &ServiceStatus) -> String {
         out.push('\n');
     }
     out.push_str(&fans_section(&status.fans));
+    out.push_str(&tuning_section(&status.tuning));
     if !status.problems.is_empty() {
         out.push_str("Problems\n");
     }
@@ -332,6 +334,44 @@ fn fans_section(fans: &FanStatus) -> String {
             let _ = write!(out, " ({problem})");
         }
         out.push('\n');
+    }
+    out
+}
+
+/// What the status says about tuning: each device that can be tuned, where
+/// its setting stands and the values that are not at the driver's default.
+/// Empty on a machine with nothing to tune and nothing to report.
+fn tuning_section(tuning: &TuningStatus) -> String {
+    if tuning.devices.is_empty() && tuning.problem.is_none() {
+        return String::new();
+    }
+    let mut out = "Tuning\n".to_owned();
+    if let Some(problem) = &tuning.problem {
+        let _ = writeln!(out, "  ! {problem}");
+    }
+    for device in &tuning.devices {
+        let state = match &device.state {
+            TuningState::Unmanaged => "left to its driver".to_owned(),
+            TuningState::Applied => "setting applied".to_owned(),
+            TuningState::Different => "setting not in place yet".to_owned(),
+            TuningState::Contested => {
+                "setting given up: something else keeps changing the values".to_owned()
+            }
+            TuningState::Held => {
+                "setting held back: the machine stopped after it was last applied".to_owned()
+            }
+            TuningState::Failed { reason } => format!("setting failed: {reason}"),
+            TuningState::Missing => "setting for a device that is not there".to_owned(),
+        };
+        let _ = writeln!(out, "  {} - {state}", device.name);
+        for control in device.controls.iter().filter(|control| control.current != control.default) {
+            let suffix = control.unit.suffix();
+            let _ = writeln!(
+                out,
+                "    {:<18}  {} {suffix} (default {} {suffix})",
+                control.key, control.current, control.default
+            );
+        }
     }
     out
 }
@@ -766,7 +806,7 @@ mod tests {
             fan_control: false,
             fans: Default::default(),
             update: UpdateStatus::default(),
-            tuning: Default::default(),
+            tuning: TuningStatus::default(),
             problems: vec!["Settings could not be saved to disk: disk full".into()],
         }
     }
@@ -831,6 +871,58 @@ mod tests {
     #[test]
     fn status_view_says_nothing_about_fans_a_build_without_control_cannot_describe() {
         assert!(!render_status(&status()).contains("Fans"));
+    }
+
+    #[test]
+    fn status_view_lists_each_tuned_device_with_its_changed_values() {
+        use syspilot_proto::tuning::{TuningControl, TuningDevice, TuningKind, TuningUnit};
+        assert!(!render_status(&status()).contains("Tuning"), "nothing to tune, nothing said");
+
+        let control = |key: &str, unit, default, current| TuningControl {
+            key: key.into(),
+            kind: TuningKind::PowerLimit,
+            state: None,
+            unit,
+            min: -2000,
+            max: 2000,
+            step: 1,
+            default,
+            current,
+            wanted: None,
+        };
+        let device = |name: &str, state, controls| TuningDevice {
+            key: "gpu.amd-699f.bus-3".into(),
+            name: name.into(),
+            interface: "AMD Radeon driver (Overdrive N)".into(),
+            controls,
+            enabled: true,
+            state,
+        };
+        let mut view = status();
+        view.tuning = TuningStatus {
+            devices: vec![
+                device(
+                    "Radeon RX 550 Series",
+                    TuningState::Applied,
+                    vec![
+                        control("power-limit", TuningUnit::Percent, 0, -20),
+                        control("core-p7-clock", TuningUnit::Megahertz, 1183, 1183),
+                        control("core-p7-voltage", TuningUnit::Millivolt, 1050, 1000),
+                    ],
+                ),
+                device("gpu.amd-0000.bus-9", TuningState::Missing, vec![]),
+            ],
+            problem: Some("(tuner): expected its report | received: nothing".into()),
+        };
+        let text = render_status(&view);
+        let expected = "Tuning\n\
+             \x20 ! (tuner): expected its report | received: nothing\n\
+             \x20 Radeon RX 550 Series - setting applied\n\
+             \x20   power-limit         -20 % (default 0 %)\n\
+             \x20   core-p7-voltage     1000 mV (default 1050 mV)\n\
+             \x20 gpu.amd-0000.bus-9 - setting for a device that is not there\n\
+             Problems\n";
+        assert!(text.contains(expected), "{text}");
     }
 
     #[test]

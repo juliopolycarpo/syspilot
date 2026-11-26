@@ -31,6 +31,8 @@ pub struct Effects {
     pub logging: bool,
     /// How SysPilot updates itself changed.
     pub updates: bool,
+    /// The tuning settings changed.
+    pub tuning: bool,
     /// The service should stop.
     pub stop: bool,
 }
@@ -137,8 +139,10 @@ impl<S: StateStore + Clone + 'static> Core<S> {
     /// the client is an elevated administrator.
     ///
     /// `Hello`, `Subscribe`, `Status`, `Sensors`, `SystemInfo`,
-    /// `CheckForUpdate` and `InstallUpdate` belong to the host and are
-    /// answered with an error here.
+    /// `CheckForUpdate`, `InstallUpdate` and `ApplyTuning` belong to the host
+    /// and are answered with an error here. The host also judges the values
+    /// of `SetTuning` against the devices before it passes the request on;
+    /// here only the shape of the settings is checked.
     pub fn handle(&mut self, request: Request, elevated: bool) -> (Response, Effects) {
         let mut effects = Effects::default();
         if let Some(refused) = refusal(&request, elevated) {
@@ -190,6 +194,17 @@ impl<S: StateStore + Clone + 'static> Core<S> {
                 effects.updates = true;
                 self.commit(profile, &mut effects)
             }
+            Request::SetTuning(tuning) => {
+                let mut profile = self.profile.clone();
+                profile.tuning = tuning;
+                match profile.validate() {
+                    Ok(()) => {
+                        effects.tuning = true;
+                        self.commit(profile, &mut effects)
+                    }
+                    Err(problem) => error(ErrorCode::Invalid, problem.to_string()),
+                }
+            }
             Request::ClearHistory => {
                 self.enforcer.clear_history();
                 effects.states = true;
@@ -211,12 +226,9 @@ impl<S: StateStore + Clone + 'static> Core<S> {
             | Request::Sensors
             | Request::SystemInfo
             | Request::CheckForUpdate
-            | Request::InstallUpdate => {
+            | Request::InstallUpdate
+            | Request::ApplyTuning => {
                 error(ErrorCode::Invalid, "(request): not valid at this point of the connection")
-            }
-            // The protocol has tuning; this service does not act on it yet.
-            Request::SetTuning(_) | Request::ApplyTuning => {
-                error(ErrorCode::Unsupported, "This service does not tune devices yet.")
             }
         };
         (response, effects)
@@ -292,6 +304,7 @@ impl<S: StateStore + Clone + 'static> Core<S> {
         }
         effects.logging = profile.logging != self.profile.logging;
         effects.updates = profile.updates != self.profile.updates;
+        effects.tuning = profile.tuning != self.profile.tuning;
         self.commit(profile, effects)
     }
 
@@ -618,6 +631,42 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Core', name = "Che
         assert!(fixture.ok(Request::SetProfile(Profile::default())).updates);
     }
 
+    fn tuning_setting(device: &str, limit: i32) -> syspilot_proto::tuning::TuningSetting {
+        syspilot_proto::tuning::TuningSetting {
+            device: device.into(),
+            enabled: true,
+            values: [("power-limit".to_owned(), limit)].into(),
+        }
+    }
+
+    #[test]
+    fn tuning_settings_are_kept_in_the_profile_and_flagged() {
+        let mut fixture = Fixture::new();
+        let setting = tuning_setting("gpu.amd-699f.bus-3", -20);
+        let effects = fixture.ok(Request::SetTuning(vec![setting.clone()]));
+        assert!(effects.tuning && effects.profile);
+        let saved = Profile::parse(&fixture.store.load(PROFILE_NAME).unwrap()).unwrap();
+        assert_eq!(saved.tuning, std::slice::from_ref(&setting));
+
+        // A whole profile flags them only when they differ.
+        let same = Profile { tuning: vec![setting], ..Profile::default() };
+        assert!(!fixture.ok(Request::SetProfile(same)).tuning);
+        assert!(fixture.ok(Request::SetProfile(Profile::default())).tuning);
+    }
+
+    #[test]
+    fn tuning_settings_of_the_wrong_shape_are_rejected_with_the_field() {
+        let mut fixture = Fixture::new();
+        let twice = vec![tuning_setting("gpu.a", 1), tuning_setting("gpu.a", 2)];
+        let error = fixture.refused(Request::SetTuning(twice), true);
+        assert_eq!(error.code, ErrorCode::Invalid);
+        assert_eq!(
+            error.message,
+            "(profile.tuning): expected one setting per device | received: \"gpu.a\""
+        );
+        assert!(fixture.core.profile().tuning.is_empty());
+    }
+
     #[test]
     fn fan_curves_are_refused_while_fan_control_is_off() {
         let mut fixture = Fixture::new();
@@ -726,6 +775,7 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Core', name = "Che
             Request::Hello { protocol: 1 },
             Request::CheckForUpdate,
             Request::InstallUpdate,
+            Request::ApplyTuning,
         ];
         for request in host_requests {
             assert_eq!(fixture.refused(request, true).code, ErrorCode::Invalid);

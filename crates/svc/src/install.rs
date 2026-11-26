@@ -12,6 +12,7 @@ use std::{fs, io};
 use syspilot_engine::win;
 use syspilot_proto::message::{Request, Response};
 use syspilot_proto::profile::Profile;
+use syspilot_proto::tuning::TuneJob;
 use syspilot_proto::win::wide;
 use syspilot_proto::{APP_PREFERENCES_FILE, Client, Instance};
 use windows_sys::Win32::Foundation::{
@@ -303,13 +304,18 @@ pub(crate) fn console_run_is_active(instance: &Instance) -> bool {
 }
 
 /// Puts back everything the service changed. Returns how many settings
-/// could not be restored now.
-fn revert_everything(instance: &Instance, data: &DataDir) -> Result<usize, String> {
+/// could not be restored now, and the job that puts tuned devices back to
+/// their defaults, which is the caller's to run.
+fn revert_everything(
+    instance: &Instance,
+    data: &DataDir,
+) -> Result<(usize, Option<TuneJob>), String> {
     let catalog = catalog::builtin().map_err(|error| format!("built-in catalog: {error}"))?;
     let store = FileStore::new(data.clone());
     let mut core = Core::new(win::os(), store, catalog, os_build(), false);
+    let tuning = crate::tuning::reset_job(&core.profile().tuning);
     match core.handle(Request::SetProfile(Profile::default()), true).0 {
-        Response::Ok => Ok(core.enforcer().pending_reverts()),
+        Response::Ok => Ok((core.enforcer().pending_reverts(), tuning)),
         Response::Error(error) => {
             Err(format!("restore the settings of {}: {error}", instance.name()))
         }
@@ -394,7 +400,15 @@ pub fn uninstall(instance: &Instance, keep_tweaks: bool) -> Result<String, Strin
         // Only act on state from a directory nobody else could have written.
         match data.secure() {
             Ok(()) => {
-                let pending = revert_everything(instance, &data)?;
+                let (pending, tuning) = revert_everything(instance, &data)?;
+                // The values would otherwise stay until the next restart of
+                // the machine or the driver.
+                if let Some(Err(problem)) = tuning.as_ref().map(crate::tuning::run_and_wait) {
+                    notes.push(format!(
+                        "Tuning values were not put back to their defaults ({problem}). \
+                         They last until the machine restarts."
+                    ));
+                }
                 if pending > 0 {
                     notes.push(format!(
                         "{pending} setting(s) could not be restored now (they belong to users \
