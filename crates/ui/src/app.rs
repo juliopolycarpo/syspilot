@@ -201,6 +201,23 @@ fn tuning_switch_device(name: &str) -> Option<&str> {
 
 const TUNING_SWITCH_PREFIX: &str = "tuning:";
 
+/// Where a device's tuning switch stands: the user's choice while a request
+/// for it is under way (`pending`), otherwise what the service reports.
+fn tuning_switch_standing(pending: &HashMap<String, bool>, device: &TuningDevice) -> bool {
+    pending.get(&tuning_switch(&device.key)).copied().unwrap_or(device.enabled)
+}
+
+/// The save of the values shown for `device`. Its switch goes where it stands,
+/// not where the service last reported it: a flip the service has not
+/// answered yet would be undone otherwise.
+fn tuning_save(
+    pending: &HashMap<String, bool>,
+    device: &TuningDevice,
+    draft: Option<&BTreeMap<String, i32>>,
+) -> TuningAction {
+    TuningAction::save(device, draft, tuning_switch_standing(pending, device))
+}
+
 /// Everything that can happen to the app.
 #[derive(Clone)]
 pub enum Message {
@@ -610,7 +627,7 @@ impl App {
     /// Where a device's tuning switch should stand: the user's choice while
     /// a request is under way, otherwise what the service reports.
     pub fn tuning_switch_position(&self, device: &TuningDevice) -> bool {
-        self.pending.get(&tuning_switch(&device.key)).copied().unwrap_or(device.enabled)
+        tuning_switch_standing(&self.pending, device)
     }
 
     /// The tuning settings of the profile, as the service last reported them.
@@ -618,13 +635,10 @@ impl App {
         self.snapshot.profile.as_ref().map_or(&[][..], |profile| &profile.tuning)
     }
 
-    /// Saves the shown values of a device. Its switch goes where it stands,
-    /// not where the service last reported it: a flip the service has not
-    /// answered yet would be undone otherwise.
+    /// Saves the shown values of a device.
     fn save_tuning(&mut self, key: &str, context: &ComponentContext<Self>) {
         let Some(device) = self.tuning_device(key) else { return };
-        let enabled = self.tuning_switch_position(device);
-        let action = TuningAction::save(device, self.tuning_drafts.get(key), enabled);
+        let action = tuning_save(&self.pending, device, self.tuning_drafts.get(key));
         self.start_tuning(action, context);
     }
 
@@ -1163,6 +1177,34 @@ mod tests {
         assert_eq!(tuning_switch_device(&name), Some("gpu.amd-699f.bus-3"));
         assert_ne!(name, tuning_switch("gpu.amd-699f.bus-4"));
         assert_eq!(tuning_switch_device("tweak.game-mode"), None, "a tweak is not a device");
+    }
+
+    #[test]
+    fn a_save_takes_the_switch_where_the_user_put_it_not_where_the_service_reported_it() {
+        // The service still reports the device off; the user flipped it on
+        // and the request has not been answered.
+        let device = TuningDevice {
+            key: "gpu.amd-699f.bus-3".into(),
+            enabled: false,
+            ..TuningDevice::default()
+        };
+        let flipped = HashMap::from([(tuning_switch(&device.key), true)]);
+        let save = |enabled| TuningAction::Save {
+            device: device.key.clone(),
+            enabled,
+            values: BTreeMap::new(),
+            draft: BTreeMap::new(),
+        };
+        let received = tuning_save(&flipped, &device, None);
+        assert_eq!(
+            received,
+            save(true),
+            "(save): expected the switch on while its flip is pending | received: {received:?}"
+        );
+        // Another device's flip says nothing about this one.
+        let elsewhere = HashMap::from([(tuning_switch("gpu.amd-699f.bus-4"), true)]);
+        assert_eq!(tuning_save(&elsewhere, &device, None), save(false));
+        assert_eq!(tuning_save(&HashMap::new(), &device, None), save(false));
     }
 
     #[test]
