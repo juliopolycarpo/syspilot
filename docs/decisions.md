@@ -336,8 +336,8 @@ a change, checked a few times, and then left alone until the next of those.
 **Cost.** A third helper executable (0.3 MB) and 70 KB in the service.
 Nothing holds a value in place between the checks: what another tool writes
 minutes after a logon stays until the next trigger or until the user opens
-the app. Two tools setting the same
-values fight; SysPilot gives up after three tries and says so. Devices are
+the Tuning page. Two tools setting the same values fight; SysPilot gives up
+after three tries and says so. Devices are
 recognised by PCI device ID and bus number, so a card moved to another slot is
 a new device. Protocol version 4 adds the tuning settings, status and
 requests.
