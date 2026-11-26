@@ -70,6 +70,29 @@ was found for the power limit, fan or temperature setters on GeForce under
 Windows. A backend would have to read `NVML_ERROR_NOT_SUPPORTED` as "this
 control does not exist", the way the Radeon backend reads its feature flags.
 
+The driver branch each setter first shipped in is taken from the
+[NVML change log](https://docs.nvidia.com/deploy/nvml-api/change-log.html)
+and, where the log is silent, from the first public header that has it. The
+headers come from [go-nvml](https://github.com/NVIDIA/go-nvml/commits/main/gen/nvml/nvml.h)
+and [`nvidia-ml-py`](https://pypi.org/project/nvidia-ml-py/#history). A
+header bound is an upper bound.
+
+| Call | From |
+| --- | --- |
+| `nvmlDeviceSetPowerManagementLimit` | R304 |
+| `nvmlDeviceSetPowerManagementLimit_v2` | R535 |
+| `nvmlDeviceSetGpuLockedClocks`, `nvmlDeviceResetGpuLockedClocks` | R418 at the latest |
+| `nvmlDeviceSetTemperatureThreshold` | R460 (header) |
+| `nvmlDeviceSetMemoryLockedClocks` | R465 (header) |
+| `nvmlDeviceSetGpcClkVfOffset`, `nvmlDeviceSetFanSpeed_v2`, `nvmlDeviceSetDefaultFanSpeed_v2` | R515 |
+| `nvmlDeviceSetMemClkVfOffset` | R520 |
+| `nvmlDeviceSetFanControlPolicy` | R525. The log says R520, but the R520 header lacks it. |
+| `nvmlDeviceSetClockOffsets` | R555, replacing the two `VfOffset` calls |
+
+A backend that needs the fan and both offsets would ask for R555 or later.
+No public NVAPI release from R530 to R620 adds a power, clock or fan setter.
+Its only `Set` functions for a GPU concern ECC, EDID, lighting and scanout.
+
 A clock offset for all states is a different control from the Radeon's clock
 per state. The protocol already allows it: a control without a `state`.
 
