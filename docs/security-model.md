@@ -149,9 +149,8 @@ what keeps SysPilot from putting them back.
 
 Removing SysPilot runs `syspilot-svc uninstall` as LocalSystem. Unless
 settings are kept, it puts every tuned device back to its driver's defaults.
-It deletes
-the data directory and, for each user profile, the app's preferences file. In
-a user's profile it follows no link and deletes that one file by name (and
+It deletes the data directory and, for each user profile, the app's
+preferences file. In a user's profile it follows no link and deletes that one file by name (and
 its directory only if that leaves it empty), so a junction planted there
 cannot point the deletion at anything else.
 

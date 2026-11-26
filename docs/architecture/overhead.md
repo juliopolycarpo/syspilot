@@ -23,8 +23,9 @@ all the time.
 - **No timers by default.** The event loop waits on one handle with an infinite
   timeout. A timeout exists only while something is due: a contested retry, a
   paused watch, an `interval` trigger, a look at tuned devices, or sensor
-  sampling for a connected client or the logger. The one exception is the look for a new version, once
-  every 24 hours; with updates off the timeout is infinite again.
+  sampling for a connected client or the logger. The one exception is the look
+  for a new version, once every 24 hours; with updates off the timeout is
+  infinite again.
 - **Updates in another process.** Looking for a release and installing it is
   the work of `syspilot-update.exe`, which runs for seconds a day. The service
   carries no network code and loads no network library.
