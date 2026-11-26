@@ -626,18 +626,19 @@ impl<A: AdlApi> Radeon<A> {
         Self { adl }
     }
 
-    /// The cards that speak Overdrive N, each with its key.
-    fn cards(&mut self) -> Vec<(String, AdlAdapter)> {
-        let adapters = self.adl.adapters().unwrap_or_default();
-        cards(adapters)
+    /// The cards that speak Overdrive N, each with its key. An error when the
+    /// driver could not list its outputs, which says nothing about the cards.
+    fn cards(&mut self) -> Result<Vec<(String, AdlAdapter)>, String> {
+        let adapters = self.adl.adapters().map_err(|error| error.to_string())?;
+        Ok(cards(adapters)
             .into_iter()
             .filter(|card| self.adl.overdrive_version(card.index) == Some(OVERDRIVE_N))
             .map(|card| (device_key(&card), card))
-            .collect()
+            .collect())
     }
 
     fn card(&mut self, key: &str) -> Result<AdlAdapter, String> {
-        self.cards().into_iter().find(|(known, _)| known == key).map(|(_, card)| card).ok_or_else(
+        self.cards()?.into_iter().find(|(known, _)| known == key).map(|(_, card)| card).ok_or_else(
             || {
                 format!(
                     "(tuning device): expected a Radeon card on Overdrive N | received: {key:?}"
@@ -670,8 +671,9 @@ impl<A: AdlApi> Radeon<A> {
 }
 
 impl<A: AdlApi> TuningBackend for Radeon<A> {
-    fn devices(&mut self) -> Vec<TunedDevice> {
-        self.cards()
+    fn devices(&mut self) -> Result<Vec<TunedDevice>, String> {
+        Ok(self
+            .cards()?
             .into_iter()
             .map(|(key, card)| {
                 let (controls, problem) = match CardState::read(&mut self.adl, card.index) {
@@ -688,7 +690,7 @@ impl<A: AdlApi> TuningBackend for Radeon<A> {
                     problem,
                 }
             })
-            .collect()
+            .collect())
     }
 
     fn apply(&mut self, key: &str, values: &BTreeMap<String, i32>) -> Result<(), String> {
@@ -979,7 +981,10 @@ mod tests {
     }
 
     fn only_card(radeon: &mut Radeon<FakeAdl>) -> TunedDevice {
-        let mut devices = radeon.devices();
+        let listed = radeon.devices();
+        let Ok(mut devices) = listed else {
+            panic!("(devices): expected a list | received: {listed:?}")
+        };
         assert_eq!(devices.len(), 1, "(devices): expected one card | received: {devices:?}");
         devices.remove(0)
     }
@@ -1176,12 +1181,18 @@ mod tests {
     fn cards_on_another_overdrive_generation_or_none_are_not_listed() {
         for version in [Some(8), Some(6), None] {
             let adl = FakeAdl { version, ..FakeAdl::rx550() };
-            assert_eq!(Radeon::new(adl).devices(), Vec::new(), "(overdrive {version:?})");
+            assert_eq!(Radeon::new(adl).devices(), Ok(Vec::new()), "(overdrive {version:?})");
         }
+    }
+
+    #[test]
+    fn outputs_that_cannot_be_listed_are_an_error_not_an_empty_machine() {
         let mut broken = FakeAdl::rx550();
         broken.failing.insert("ADL2_Adapter_AdapterInfo_Get", -1);
-        // Swallowed for now: #30.
-        assert_eq!(Radeon::new(broken).devices(), Vec::new(), "(failed adapter query)");
+        let mut radeon = Radeon::new(broken);
+        let expected = "(ADL2_Adapter_AdapterInfo_Get): expected ADL_OK (0) | received: -1";
+        assert_eq!(radeon.devices(), Err(expected.to_owned()), "(devices)");
+        assert_eq!(radeon.apply(CARD, &BTreeMap::new()), Err(expected.to_owned()), "(apply)");
     }
 
     #[test]

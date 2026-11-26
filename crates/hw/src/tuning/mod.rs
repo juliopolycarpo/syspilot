@@ -22,8 +22,9 @@ use syspilot_proto::tuning::{TuneJob, TuneReport, TunedDevice};
 /// One vendor interface for tuning.
 pub trait TuningBackend {
     /// Every device this interface reaches, with its controls and the
-    /// values in effect now.
-    fn devices(&mut self) -> Vec<TunedDevice>;
+    /// values in effect now. An error when the interface could not list its
+    /// devices at all, which is not the same as having none.
+    fn devices(&mut self) -> Result<Vec<TunedDevice>, String>;
 
     /// Puts `values` in effect on the device with `key`, and the default on
     /// every control `values` does not list. Nothing is written when a value
@@ -40,7 +41,7 @@ pub trait TuningBackend {
 /// A borrowed backend is a backend, so one that somebody else keeps can be
 /// handed to [`run`].
 impl<T: TuningBackend + ?Sized> TuningBackend for &mut T {
-    fn devices(&mut self) -> Vec<TunedDevice> {
+    fn devices(&mut self) -> Result<Vec<TunedDevice>, String> {
         (**self).devices()
     }
 
@@ -69,14 +70,27 @@ pub fn system_backends() -> Vec<Box<dyn TuningBackend>> {
 /// Resets come first, so a device that is both reset and given a setting
 /// ends with the setting. A setting or a reset for a device nobody has is
 /// skipped: the report then lacks the device, which is how the caller learns
-/// it is not there. A setting that is not enabled is skipped too.
+/// it is not there. A setting that is not enabled is skipped too. An
+/// interface that cannot list its devices is the report's problem: its
+/// devices are skipped, without being taken for gone.
 pub fn run(job: &TuneJob, backends: &mut [Box<dyn TuningBackend + '_>]) -> TuneReport {
     let mut problems: BTreeMap<String, String> = BTreeMap::new();
+    let mut unlisted: Vec<String> = Vec::new();
+    let mut note = |problem: String| {
+        if !unlisted.contains(&problem) {
+            unlisted.push(problem);
+        }
+    };
     // A look only reads, so it skips the reading this needs to find devices.
     if !job.is_look() {
         for backend in backends.iter_mut() {
-            let known: Vec<String> =
-                backend.devices().into_iter().map(|device| device.key).collect();
+            let known: Vec<String> = match backend.devices() {
+                Ok(devices) => devices.into_iter().map(|device| device.key).collect(),
+                Err(problem) => {
+                    note(problem);
+                    continue;
+                }
+            };
             for key in job.reset.iter().filter(|key| known.contains(key)) {
                 if let Err(problem) = backend.reset(key) {
                     problems.insert(key.clone(), problem);
@@ -91,15 +105,21 @@ pub fn run(job: &TuneJob, backends: &mut [Box<dyn TuningBackend + '_>]) -> TuneR
             }
         }
     }
-    let mut devices: Vec<TunedDevice> =
-        backends.iter_mut().flat_map(|backend| backend.devices()).collect();
+    let mut devices: Vec<TunedDevice> = Vec::new();
+    for backend in backends.iter_mut() {
+        match backend.devices() {
+            Ok(found) => devices.extend(found),
+            Err(problem) => note(problem),
+        }
+    }
     for device in &mut devices {
         // What the job did outranks what reading the device back says.
         if let Some(problem) = problems.remove(&device.key) {
             device.problem = Some(problem);
         }
     }
-    TuneReport { devices }
+    let problem = (!unlisted.is_empty()).then(|| unlisted.join("; "));
+    TuneReport { devices, problem }
 }
 
 /// A scripted backend: devices held in memory, with every call recorded.
@@ -109,6 +129,8 @@ pub struct FakeTuningBackend {
     pub devices: Vec<TunedDevice>,
     /// Keys of devices whose apply and reset fail, with the reason.
     pub failing: BTreeMap<String, String>,
+    /// Why listing the devices fails, when it is to fail.
+    pub unlisted: Option<String>,
     /// Every apply, in order, with the device key and the values. A reset is
     /// an apply with no values.
     pub calls: Vec<(String, BTreeMap<String, i32>)>,
@@ -127,8 +149,11 @@ impl FakeTuningBackend {
 }
 
 impl TuningBackend for FakeTuningBackend {
-    fn devices(&mut self) -> Vec<TunedDevice> {
-        self.devices.clone()
+    fn devices(&mut self) -> Result<Vec<TunedDevice>, String> {
+        match &self.unlisted {
+            Some(problem) => Err(problem.clone()),
+            None => Ok(self.devices.clone()),
+        }
     }
 
     fn apply(&mut self, key: &str, values: &BTreeMap<String, i32>) -> Result<(), String> {
@@ -266,6 +291,32 @@ mod tests {
     }
 
     #[test]
+    fn an_interface_that_cannot_list_its_devices_is_the_reports_problem() {
+        const UNLISTED: &str = "(ADL2_Adapter_AdapterInfo_Get): expected ADL_OK (0) | received: -1";
+        let mut backends: Vec<Box<dyn TuningBackend>> = vec![
+            Box::new(FakeTuningBackend {
+                devices: vec![card(CARD, 0)],
+                unlisted: Some(UNLISTED.into()),
+                ..FakeTuningBackend::default()
+            }),
+            Box::new(FakeTuningBackend {
+                devices: vec![card(OTHER, 0)],
+                ..FakeTuningBackend::default()
+            }),
+        ];
+        let job = TuneJob { apply: vec![setting(CARD, -20), setting(OTHER, -20)], reset: vec![] };
+        let report = run(&job, &mut backends);
+        assert_eq!(
+            report.problem.as_deref(),
+            Some(UNLISTED),
+            "(report problem): expected the listing failure once, for the apply and the reading back"
+        );
+        let keys: Vec<&str> = report.devices.iter().map(|device| device.key.as_str()).collect();
+        assert_eq!(keys, [OTHER], "(devices): expected the other interface's only");
+        assert_eq!(limit_of(&report, OTHER), -20, "the other interface still did its part");
+    }
+
+    #[test]
     fn a_machine_without_tuning_interfaces_reports_no_device() {
         assert_eq!(run(&TuneJob::default(), &mut []), TuneReport::default());
     }
@@ -301,8 +352,8 @@ mod tests {
     }
 
     impl TuningBackend for OwnResetBackend {
-        fn devices(&mut self) -> Vec<TunedDevice> {
-            vec![card(CARD, 0)]
+        fn devices(&mut self) -> Result<Vec<TunedDevice>, String> {
+            Ok(vec![card(CARD, 0)])
         }
 
         fn apply(&mut self, key: &str, _values: &BTreeMap<String, i32>) -> Result<(), String> {

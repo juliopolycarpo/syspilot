@@ -151,8 +151,9 @@ that sent it should expect its connection to end. A copy in the state
 
 `Status` carries `tuning`, a `TuningStatus`: the devices whose driver lets
 values be set, as the tuner last saw them, and `problem`, the reason when the
-last look failed. The first `Status` after the service starts waits for that
-look. Each device is a `TuningDevice`:
+last look failed or an interface could not list its devices. A setting for a
+device that was not listed is then `Failed` with that reason, not `Missing`.
+The first `Status` after the service starts waits for that look. Each device is a `TuningDevice`:
 
 | Field       | Content                                                                    |
 | ----------- | -------------------------------------------------------------------------- |
@@ -264,7 +265,7 @@ same build. The tuner takes no arguments.
 | Direction         | Content                                                        |
 | ----------------- | -------------------------------------------------------------- |
 | Service to tuner  | One `TuneJob`: the settings to apply and the keys of the devices to put back to their defaults. Both empty means "only look". |
-| Tuner to service  | One `TuneReport`: every device it found with its controls as they are after the job, and per device the problem the job ran into, if any. |
+| Tuner to service  | One `TuneReport`: every device it found with its controls as they are after the job, per device the problem the job ran into, if any, and `problem`, why an interface could not list its devices, if one could not. |
 
 The tuner does resets first, then the settings, and writes only what differs
 from what the device already has. A setting with one bad value changes

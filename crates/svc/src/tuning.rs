@@ -216,8 +216,12 @@ pub fn run_and_wait(job: &TuneJob) -> Result<(), String> {
     first_problem(run_tuner_process(job)?)
 }
 
-/// The first problem a device in `report` names, with the device's name.
+/// The report's own problem, or else the first problem a device in `report`
+/// names, with the device's name.
 fn first_problem(report: TuneReport) -> Result<(), String> {
+    if let Some(problem) = report.problem {
+        return Err(problem);
+    }
     match report.devices.into_iter().find_map(|device| Some((device.name, device.problem?))) {
         Some((name, problem)) => Err(format!("{name}: {problem}")),
         None => Ok(()),
@@ -501,7 +505,9 @@ impl Tuning {
                 return;
             }
         };
-        self.problem = None;
+        // A report can carry a problem of its own: an interface that could
+        // not list its devices.
+        self.problem.clone_from(&report.problem);
         if job.is_look() {
             self.after_look(&report);
         } else {
@@ -514,11 +520,17 @@ impl Tuning {
     /// `current` is whether the job began in the round that is now running;
     /// only then is a device's problem held against it.
     fn after_change(&mut self, job: &TuneJob, report: &TuneReport, current: bool, now: Instant) {
+        // A device's own problem, or else the report's: an interface that
+        // could not list its devices skipped every change to them, so what
+        // the job was to do there did not happen. Only one interface exists
+        // today, so the report's problem is taken to concern every device.
         let problem_of = |key: &str| {
-            report.devices.iter().find(|device| device.key == key).and_then(|d| d.problem.clone())
+            let device = report.devices.iter().find(|device| device.key == key);
+            device.and_then(|device| device.problem.clone()).or_else(|| report.problem.clone())
         };
         for key in &job.reset {
-            // A reset that failed is tried again by the next look.
+            // A reset that failed, or never ran, is tried again by the next
+            // look.
             if problem_of(key).is_none() {
                 self.managed.remove(key);
             }
@@ -640,12 +652,21 @@ impl Tuning {
                 TuningDevice::reported(device, setting_of(&device.key), state)
             })
             .collect();
-        // A setting for a device that is not there has to show somewhere.
+        // A setting for a device that is not there has to show somewhere. When
+        // an interface could not list its devices, the device may well be
+        // there: that is a failure to say so, not a missing card. With one
+        // interface only, the problem is taken to concern every device.
         let absent = self
             .settings
             .iter()
             .filter(|setting| report.devices.iter().all(|device| device.key != setting.device));
-        devices.extend(absent.map(TuningDevice::missing));
+        devices.extend(absent.map(|setting| match &report.problem {
+            Some(reason) => TuningDevice {
+                state: TuningState::Failed { reason: reason.clone() },
+                ..TuningDevice::missing(setting)
+            },
+            None => TuningDevice::missing(setting),
+        }));
         TuningStatus { devices, problem: self.problem.clone() }
     }
 }
@@ -1399,8 +1420,94 @@ mod tests {
     fn the_first_device_problem_of_a_report_is_the_outcome() {
         assert_eq!(first_problem(TuneReport::default()), Ok(()));
         let broken = TunedDevice { problem: Some("the driver refused".into()), ..card() };
-        let report = TuneReport { devices: vec![card(), broken] };
-        assert_eq!(first_problem(report), Err("Radeon RX 550 Series: the driver refused".into()));
+        let report = TuneReport { devices: vec![card(), broken], problem: None };
+        assert_eq!(
+            first_problem(report.clone()),
+            Err("Radeon RX 550 Series: the driver refused".into())
+        );
+        let unlisted = TuneReport { problem: Some("(adapters): expected a list".into()), ..report };
+        assert_eq!(first_problem(unlisted), Err("(adapters): expected a list".into()));
+    }
+
+    #[test]
+    fn devices_that_could_not_be_listed_are_failed_not_missing() {
+        const UNLISTED: &str = "(ADL2_Adapter_AdapterInfo_Get): expected ADL_OK (0) | received: -1";
+        let mut fixture = Fixture::new(vec![setting(&[("power-limit", -20)])]);
+        fixture.tuner.state().backend.unlisted = Some(UNLISTED.into());
+        fixture.pass(0);
+        let status = fixture.tuning.status();
+        assert_eq!(status.problem.as_deref(), Some(UNLISTED), "(status problem)");
+        let states: Vec<_> = status.devices.iter().map(|device| &device.state).collect();
+        assert_eq!(
+            states,
+            [&TuningState::Failed { reason: UNLISTED.into() }],
+            "(device states): expected the setting's device failed, not missing | received: {states:?}"
+        );
+        let jobs = fixture.kinds_of_jobs();
+        assert_eq!(jobs, ["look"], "(jobs): expected no apply to a device nobody listed");
+
+        // Listed again: the setting is applied.
+        fixture.tuner.state().backend.unlisted = None;
+        fixture.tuning.apply_again(fixture.now);
+        fixture.pass(0);
+        fixture.assert_state(&TuningState::Applied, "once the devices are listed again");
+    }
+
+    /// Lets the job under way end, with the fake's devices as they are now.
+    fn end_running_job(fixture: &mut Fixture) {
+        let outcome = fixture.tuner.outcome_of_last();
+        fixture.tuning.finished(outcome, fixture.now);
+    }
+
+    #[test]
+    fn a_reset_skipped_because_the_devices_could_not_be_listed_is_tried_again() {
+        let mut fixture = Fixture::new(vec![setting(&[("power-limit", -20)])]);
+        fixture.pass(0);
+        assert_eq!(fixture.current("power-limit"), -20);
+
+        let off = TuningSetting { enabled: false, ..setting(&[("power-limit", -20)]) };
+        fixture.tuning.set_settings(vec![off], fixture.now);
+        fixture.tuning.run_due(fixture.now);
+        end_running_job(&mut fixture);
+        assert_eq!(fixture.kinds_of_jobs().last(), Some(&"reset"), "the look starts a reset");
+        // The reset finds no device to reset.
+        fixture.tuner.state().backend.unlisted = Some("(adapters): expected a list".into());
+        end_running_job(&mut fixture);
+        fixture.assert_managed("after a reset that never ran");
+
+        fixture.tuner.state().backend.unlisted = None;
+        fixture.pass(45);
+        let current = fixture.tuner.state().backend.devices[0].controls[0].current;
+        assert_eq!(
+            current, 0,
+            "(power-limit after the next look): expected 0 | received: {current}"
+        );
+    }
+
+    #[test]
+    fn an_apply_skipped_because_the_devices_could_not_be_listed_fails() {
+        let mut fixture = Fixture::new(vec![setting(&[("power-limit", -20)])]);
+        fixture.tuning.run_due(fixture.now);
+        end_running_job(&mut fixture);
+        assert_eq!(fixture.kinds_of_jobs().last(), Some(&"apply"), "the look starts an apply");
+        // Listed for the report, not for the apply: the fake cannot tell the
+        // two apart, so the device is left out of both.
+        fixture.tuner.state().backend.unlisted = Some("(adapters): expected a list".into());
+        end_running_job(&mut fixture);
+        // The next look lists the device again and finds the value missing:
+        // the apply failed, so it is not tried again before a trigger, and
+        // does not count towards giving up on a contested device.
+        fixture.tuner.state().backend.unlisted = None;
+        fixture.pass(45);
+        fixture.assert_state(
+            &TuningState::Failed { reason: "(adapters): expected a list".into() },
+            "at the next look after an apply that never ran",
+        );
+        let current = fixture.current("power-limit");
+        assert_eq!(
+            current, 0,
+            "(power-limit): expected the default, not applied | received: {current}"
+        );
     }
 
     #[test]
