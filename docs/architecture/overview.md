@@ -29,10 +29,11 @@ exists today, and the seams the app plugs into.
 | `proto`  | —                  | Data contract and the client. No behaviour beyond validation.     |
 | `engine` | `proto`            | The enforcement state machine and its Win32 backends.             |
 | `pawnio` | —                  | The PawnIO device interface.                                      |
-| `hw`     | `proto`, `pawnio`  | Sensor providers and the hub that samples them.                   |
+| `hw`     | `proto`, `pawnio`  | Sensor providers and the hub that samples them; the tuning backends. |
 | `sensors`| `proto`, `hw`, `pawnio` | The sensor worker: reads hardware on the service's behalf and, with the `fan-control` feature, follows fan curves. |
 | `svc`    | `proto`, `engine`, `hw`, `pawnio` | Event loop, pipe server, installer, command line. Uses `hw` only for the hub, `pawnio` only to see whether the driver is installed. |
 | `update` | `proto`            | The updater: finds a new release, verifies its signature and hands it to Windows Installer, on the service's behalf. |
+| `tune`   | `proto`, `hw`      | The tuner: reads and sets tuning values through a vendor's driver (`hw::tuning`), on the service's behalf. |
 | `ui`     | `proto`            | The desktop app. It links none of the privileged code.            |
 
 `proto` is the only crate both sides link. If a change does not touch `proto`,
@@ -76,9 +77,11 @@ sensor providers when someone needs values and tells subscribers what changed.
 
 ```
 %ProgramData%\SysPilot\
-  profile.toml          what is enabled, custom actions, logging settings
+  profile.toml          what is enabled, custom actions, logging and tuning settings
   state\applied.toml    snapshots of every value before it was changed
   state\history.toml    recent enforcement events
+  state\tuning-applying present from before tuning values are set until the
+                        machine has run with them for a minute
   logs\                 sensor logs (CSV), readable by users
   updates\              a downloaded release and the log of installing it
 ```
@@ -152,6 +155,18 @@ for the newest release, and to install it downloads the package into
 starts Windows Installer, which stops the service, replaces the files and
 starts it again. The reasoning is in decisions 19 and 20 and what a release
 must get past is in the [security model](../security-model.md#updates).
+
+### Tuning
+
+The service decides when the tunable devices are looked at and when a
+profile's setting is applied (`svc/src/tuning.rs`, a state machine driven by
+the settings, service start, wake, logon and "apply again"). The work is done
+by `syspilot-tune.exe` (crate `tune`), started for one job: it loads the
+vendor's library, reports every device with its controls and, when the job
+says so, sets values or puts the driver's defaults back
+(`hw::tuning`, one backend per vendor interface behind the `TuningBackend`
+trait). With no setting in effect and no app connected, no tuner runs. The
+reasoning is in decision 21, the rules in [tuning](../tuning.md).
 
 ## Instances
 

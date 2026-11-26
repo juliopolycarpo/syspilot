@@ -87,3 +87,5 @@ built top to bottom.
 | 2026-11-23 | Tweak pages again after the fix | None | |
 | 2026-11-23 | Code review for contrast themes; light captures after the change | Fixed state colours overrode a contrast theme's colours | Yes: the palette defers to the system |
 | 2026-11-23 | Night sky contrast theme, installed product, Sensors and Security at the Advanced level | None: system colours throughout, badges outlined, sparklines in the text colour | |
+| 2026-11-25 | Tuning: dark and light, the held-back, standard-user and nothing-to-tune scenarios, and a real Radeon RX 550 through a test instance | State tables left an empty line under every value and centred the boxes in their column; a table with no voltages showed a column of dashes; a device that is not found repeated its key as a caption | Yes |
+| 2026-11-25 | Tuning driven through UI Automation on the real card: enter a power limit, Save, turn tuning off | None: every box and the switch are named, the entry showed as not saved, the card took the value and went back to its default | |

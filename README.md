@@ -121,6 +121,14 @@ waits for a board to be validated (see [fan curves](docs/fan-curves.md)).
 
 ![The Fans page with curves, from the demo of a validated board](docs/images/fans.png)
 
+And a Tuning page, for devices whose own driver lets their power limit,
+clocks and voltages be set: today AMD Radeon RX 400 and RX 500 cards. SysPilot
+sets your values again after a restart or sleep, asks before a clock or a
+voltage takes effect, and does not set them again by itself after Windows
+stopped (see [tuning](docs/tuning.md)).
+
+![The Tuning page with a graphics card's values, from the demo](docs/images/tuning.png)
+
 `syspilot --demo` runs the app on made-up data without a service, to look
 around without changing anything.
 
@@ -180,15 +188,27 @@ points = [[40, 30], [60, 50], [80, 100]]
 The fields, the rules and what happens when a sensor fails are in
 [fan curves](docs/fan-curves.md).
 
+And the values to hold on a device that can be tuned, described in
+[tuning](docs/tuning.md):
+
+```toml
+[[tuning]]
+device = "gpu.amd-699f.bus-3"
+
+[tuning.values]
+power-limit = -10
+```
+
 ## How it is built
 
-Four programs with a strict split of privilege:
+Five programs with a strict split of privilege:
 
 | Part               | Runs as                       | Does                                                  |
 | ------------------ | ----------------------------- | ----------------------------------------------------- |
 | `syspilot-svc`     | LocalSystem service           | Applies and restores settings. Always running, about 2 MB. |
 | `syspilot-sensors` | Started by the service, only while values are wanted | Reads the hardware. Writes to it only in a build with the `fan-control` feature, which releases do not have. |
 | `syspilot-update`  | Started by the service, for seconds a day | Finds a new release, verifies its signature and hands it to Windows Installer. |
+| `syspilot-tune`    | Started by the service, for a moment when tuning values are looked at or set | Reads and sets a device's tuning values through its vendor's driver. |
 | `syspilot` (app)   | The signed-in user            | Shows state and sends requests. Holds no rights.      |
 
 They talk over a local named pipe. Anyone signed in can read the catalog,
@@ -200,11 +220,12 @@ client claims.
 | ------------------ | ------------------------------------------------------------- |
 | `crates/proto`     | The contract: actions, catalog, profile, messages, client.    |
 | `crates/engine`    | Apply, snapshot, revert, drift and contested handling.        |
-| `crates/hw`        | Sensor providers and the sampling hub.                        |
+| `crates/hw`        | Sensor providers, the sampling hub and the tuning backends.   |
 | `crates/pawnio`    | Thin wrapper over the PawnIO driver interface.                |
 | `crates/sensors`   | The sensor worker.                                            |
 | `crates/svc`       | The service, its registration and the command line.           |
 | `crates/update`    | The updater.                                                  |
+| `crates/tune`      | The tuner.                                                    |
 | `installer`        | The Windows Installer package and the release keys.           |
 | `crates/ui`        | The desktop app.                                              |
 | `catalog/tweaks`   | The built-in tweaks, as data.                                 |
@@ -259,13 +280,18 @@ everything they create. See [CONTRIBUTING.md](CONTRIBUTING.md).
 - [x] Fan curves in the service and the app (a Fans page, curves read from the profile), behind the same feature and replay-tested only
 - [ ] Fan control validated on a real board, then enabled for that board only
 - [ ] A curve editor in the app
+- [x] Tuning through the vendor's driver: power limit, clocks and voltages of Radeon RX 400 and RX 500 cards, with a Tuning page
+- [ ] Tuning for newer Radeon cards, NVIDIA cards and processors that allow it
 
 ## Safety
 
 SysPilot changes system settings. The catalog is conservative and sourced, and
 every change is reversible, but you are the one deciding what to enable. Read
 the description and the side effects of a tweak before turning it on,
-especially in the Advanced level. Vulnerabilities: see
+especially in the Advanced level. Tuning is a different kind of change: a
+clock or a voltage the driver accepts can still be one your device does not
+hold, so start from the defaults and move in small steps
+([tuning](docs/tuning.md#if-windows-stops)). Vulnerabilities: see
 [SECURITY.md](SECURITY.md).
 
 ## License

@@ -114,11 +114,43 @@ What this does not defend against: the release key itself being stolen, and
 a maintainer signing a bad build. The first is why a second, offline key
 should be listed before it is needed; the second is what review is for.
 
+### Tuning
+
+Tuning lets the service change how a device runs, so what can reach it
+matters:
+
+- **Only an elevated administrator can change a setting or ask for it to be
+  applied again.** Anyone may read the status, which shows the values.
+- **Values go through the vendor's driver, never to the hardware.** The
+  tuner calls the interface the vendor publishes for its own tuning tool. The
+  driver states the range of each value; the tuner checks every value of a
+  setting against it before the first write. The service also checks a
+  setting against the ranges of its last look before it stores the setting;
+  before the first look, only the tuner's check applies.
+- **The service loads no vendor library.** It starts `syspilot-tune.exe` by
+  its full path next to its own executable, with no arguments, hands it one
+  job on its standard input and reads one report, decoded with the same
+  bounded decoder as the pipe. The vendor's library is loaded by name from
+  the system directory only.
+- **A tuner that hangs is terminated** after 15 seconds. It cannot stall
+  enforcement.
+- **Values that stop Windows are not set again unasked.** A mark is written
+  to `state\` before values are set and removed once the machine has run
+  with them for a minute, or the service stops normally. A service that
+  finds the mark at start sets nothing until an administrator changes the
+  setting or asks for it again.
+
+What this does not defend against: a value inside the driver's range that
+this device cannot hold, set by an administrator who was asked first. The
+values do not survive a restart of the machine by themselves, and the mark is
+what keeps SysPilot from putting them back.
+
 ### Removal
 
-Removing SysPilot runs `syspilot-svc uninstall` as LocalSystem. It deletes
-the data directory and, for each user profile, the app's preferences file. In
-a user's profile it follows no link and deletes that one file by name (and
+Removing SysPilot runs `syspilot-svc uninstall` as LocalSystem. Unless
+settings are kept, it puts every tuned device back to its driver's defaults.
+It deletes the data directory and, for each user profile, the app's
+preferences file. In a user's profile it follows no link and deletes that one file by name (and
 its directory only if that leaves it empty), so a junction planted there
 cannot point the deletion at anything else.
 
