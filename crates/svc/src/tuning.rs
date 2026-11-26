@@ -224,6 +224,14 @@ fn refusal(report: &TuneReport, settings: &[TuningSetting]) -> Option<String> {
     })
 }
 
+/// A job under way and the round it started in.
+#[derive(Default)]
+struct Running {
+    job: TuneJob,
+    /// [`Tuning::round`] when the job started.
+    round: u64,
+}
+
 /// When and whether tuning settings are applied.
 pub struct Tuning {
     tuner: Box<dyn Tuner>,
@@ -235,7 +243,11 @@ pub struct Tuning {
     /// Why the last job failed, if it did.
     problem: Option<String>,
     /// The job under way. One at a time.
-    running: Option<TuneJob>,
+    running: Option<Running>,
+    /// Counts the triggers. A trigger clears `failed` so that devices are
+    /// tried again, so a job that began before it must not put its failure
+    /// back: that would skip the settings sent to recover from it.
+    round: u64,
     /// When the devices are looked at next, soonest first.
     looks: BTreeSet<Instant>,
     /// Applies per device since the last trigger.
@@ -274,6 +286,7 @@ impl Tuning {
             report: None,
             problem: None,
             running: None,
+            round: 0,
             looks: BTreeSet::new(),
             applies: BTreeMap::new(),
             contested: BTreeSet::new(),
@@ -313,6 +326,7 @@ impl Tuning {
 
     /// Starts a new round: the devices are looked at now and twice more.
     fn trigger(&mut self, now: Instant) {
+        self.round += 1;
         self.applies.clear();
         self.contested.clear();
         self.failed.clear();
@@ -378,7 +392,7 @@ impl Tuning {
     pub fn stopping(&mut self) {
         // An apply under way may still be writing once the service is gone:
         // the machine has yet to survive its values.
-        let applying = self.running.as_ref().is_some_and(|job| !job.apply.is_empty());
+        let applying = self.running.as_ref().is_some_and(|running| !running.job.apply.is_empty());
         if !self.held && !applying {
             self.mark.clear();
         }
@@ -407,7 +421,9 @@ impl Tuning {
     }
 
     fn start(&mut self, job: TuneJob) {
-        self.running = Some(job.clone());
+        // Stamped as the job goes out: an apply decided by a look that ended
+        // after a trigger belongs to the round that trigger began.
+        self.running = Some(Running { job: job.clone(), round: self.round });
         self.tuner.start(job);
     }
 
@@ -429,14 +445,19 @@ impl Tuning {
 
     /// A job ended.
     pub fn finished(&mut self, outcome: Outcome, now: Instant) {
-        let job = self.running.take().unwrap_or_default();
+        let Running { job, round } = self.running.take().unwrap_or_default();
+        // A job from before the latest trigger still says what it did to the
+        // devices, but its failure is not held against the round after it.
+        let current = round == self.round;
         let report = match outcome {
             Ok(report) => report,
             Err(reason) => {
                 // What an apply did is unknown; it is not tried again by
                 // itself, and the next look says where the devices stand.
                 for setting in &job.apply {
-                    self.failed.insert(setting.device.clone(), reason.clone());
+                    if current {
+                        self.failed.insert(setting.device.clone(), reason.clone());
+                    }
                     // Values may have been written: turning the setting off
                     // must still put the defaults back.
                     self.managed.insert(setting.device.clone());
@@ -455,13 +476,15 @@ impl Tuning {
         if job.is_look() {
             self.after_look(&report, now);
         } else {
-            self.after_change(&job, &report, now);
+            self.after_change(&job, &report, current, now);
         }
         self.report = Some((report, now));
     }
 
     /// Records what an apply or a reset did and has the result looked at.
-    fn after_change(&mut self, job: &TuneJob, report: &TuneReport, now: Instant) {
+    /// `current` is whether the job began in the round that is now running;
+    /// only then is a device's problem held against it.
+    fn after_change(&mut self, job: &TuneJob, report: &TuneReport, current: bool, now: Instant) {
         let problem_of = |key: &str| {
             report.devices.iter().find(|device| device.key == key).and_then(|d| d.problem.clone())
         };
@@ -473,7 +496,8 @@ impl Tuning {
         }
         for setting in &job.apply {
             match problem_of(&setting.device) {
-                Some(problem) => _ = self.failed.insert(setting.device.clone(), problem),
+                Some(problem) if current => _ = self.failed.insert(setting.device.clone(), problem),
+                Some(_) => {}
                 None => _ = self.managed.insert(setting.device.clone()),
             }
         }
@@ -786,6 +810,21 @@ mod tests {
             assert_mark_is(&self.mark, expected, when);
         }
 
+        #[track_caller]
+        fn assert_state(&self, expected: &TuningState, when: &str) {
+            let state = self.device().state;
+            assert!(
+                state == *expected,
+                "(state {when}): expected {expected:?} | received: {state:?}"
+            );
+        }
+
+        /// Whether the service counts the device as one it applied a setting
+        /// to, which is what turning the setting off later resets.
+        fn manages_device(&self) -> bool {
+            self.tuning.managed.contains(CARD)
+        }
+
         fn current(&self, key: &str) -> i32 {
             let device = self.device();
             let found = device.controls.iter().find(|control| control.key == key);
@@ -1043,6 +1082,65 @@ mod tests {
         fixture.tuning.set_settings(vec![off], fixture.now);
         fixture.pass(0);
         assert_eq!(fixture.current("power-limit"), 0, "(after turning off): expected the default");
+    }
+
+    /// Plays a look and leaves the apply it leads to under way, unanswered.
+    fn fixture_with_an_apply_under_way(settings: Vec<TuningSetting>) -> Fixture {
+        let mut fixture = Fixture::new(settings);
+        fixture.tuning.run_due(fixture.now);
+        let look = fixture.tuner.outcome_of_last();
+        fixture.tuning.finished(look, fixture.now);
+        assert_eq!(fixture.kinds_of_jobs(), ["look", "apply"], "the apply is under way");
+        fixture
+    }
+
+    #[test]
+    fn a_tuner_failure_from_before_a_trigger_does_not_block_the_round_it_started() {
+        let mut fixture = fixture_with_an_apply_under_way(vec![setting(&[("power-limit", -20)])]);
+        // The user asks again while the apply runs, and then the tuner hangs
+        // and is ended. That failure belongs to the round before the trigger.
+        fixture.tuning.apply_again(fixture.now);
+        fixture.tuning.finished(Err("(tuner): hung".into()), fixture.now);
+        fixture.assert_state(&TuningState::Different, "after the failure of an earlier round");
+        // What the failed apply wrote is unknown all the same.
+        assert!(fixture.manages_device(), "(managed): expected {CARD} | received: nothing");
+        fixture.assert_mark(true, "after the failure of an earlier round");
+
+        fixture.pass(0);
+        assert_eq!(fixture.kinds_of_jobs(), ["look", "apply", "look", "apply"]);
+        assert_eq!(fixture.current("power-limit"), -20);
+        fixture.assert_state(&TuningState::Applied, "after the new round");
+    }
+
+    #[test]
+    fn a_device_problem_from_before_a_trigger_does_not_block_the_round_it_started() {
+        // 90 is outside -75..=75: applying it ends in a problem on the device.
+        let mut fixture = fixture_with_an_apply_under_way(vec![setting(&[("power-limit", 90)])]);
+        // The user saves a value that fits while that apply runs.
+        fixture.tuning.set_settings(vec![setting(&[("power-limit", -20)])], fixture.now);
+        let refused = fixture.tuner.outcome_of_last();
+        fixture.tuning.finished(refused, fixture.now);
+        fixture.assert_state(&TuningState::Different, "after the problem of an earlier round");
+        fixture.assert_mark(true, "after the problem of an earlier round");
+
+        fixture.pass(0);
+        assert_eq!(fixture.current("power-limit"), -20);
+        fixture.assert_state(&TuningState::Applied, "after the new round");
+    }
+
+    #[test]
+    fn an_apply_decided_after_a_trigger_belongs_to_the_round_of_that_trigger() {
+        let mut fixture = Fixture::new(vec![setting(&[("power-limit", -20)])]);
+        fixture.tuning.run_due(fixture.now);
+        // The look is under way when the user asks again; its end decides
+        // the apply, and that apply is the new round's.
+        fixture.tuning.apply_again(fixture.now);
+        let look = fixture.tuner.outcome_of_last();
+        fixture.tuning.finished(look, fixture.now);
+        assert_eq!(fixture.kinds_of_jobs(), ["look", "apply"], "the apply is under way");
+        fixture.tuning.finished(Err("(tuner): hung".into()), fixture.now);
+        let failed = TuningState::Failed { reason: "(tuner): hung".into() };
+        fixture.assert_state(&failed, "after the failure of the round's own apply");
     }
 
     #[test]
