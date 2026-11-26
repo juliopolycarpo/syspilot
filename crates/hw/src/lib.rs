@@ -22,5 +22,6 @@ pub mod hub;
 pub mod os;
 pub mod pch;
 pub mod sysinfo;
+pub mod tuning;
 
 pub use hub::{FakeProvider, Hub, Provider, SensorSpec};
