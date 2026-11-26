@@ -216,8 +216,12 @@ pub fn run_and_wait(job: &TuneJob) -> Result<(), String> {
     first_problem(run_tuner_process(job)?)
 }
 
-/// The first problem a device in `report` names, with the device's name.
+/// The report's own problem, or else the first problem a device in `report`
+/// names, with the device's name.
 fn first_problem(report: TuneReport) -> Result<(), String> {
+    if let Some(problem) = report.problem {
+        return Err(problem);
+    }
     match report.devices.into_iter().find_map(|device| Some((device.name, device.problem?))) {
         Some((name, problem)) => Err(format!("{name}: {problem}")),
         None => Ok(()),
@@ -501,7 +505,9 @@ impl Tuning {
                 return;
             }
         };
-        self.problem = None;
+        // A report can carry a problem of its own: an interface that could
+        // not list its devices.
+        self.problem.clone_from(&report.problem);
         if job.is_look() {
             self.after_look(&report);
         } else {
@@ -640,12 +646,20 @@ impl Tuning {
                 TuningDevice::reported(device, setting_of(&device.key), state)
             })
             .collect();
-        // A setting for a device that is not there has to show somewhere.
+        // A setting for a device that is not there has to show somewhere. When
+        // an interface could not list its devices, the device may well be
+        // there: that is a failure to say so, not a missing card.
         let absent = self
             .settings
             .iter()
             .filter(|setting| report.devices.iter().all(|device| device.key != setting.device));
-        devices.extend(absent.map(TuningDevice::missing));
+        devices.extend(absent.map(|setting| match &report.problem {
+            Some(reason) => TuningDevice {
+                state: TuningState::Failed { reason: reason.clone() },
+                ..TuningDevice::missing(setting)
+            },
+            None => TuningDevice::missing(setting),
+        }));
         TuningStatus { devices, problem: self.problem.clone() }
     }
 }
@@ -1399,8 +1413,37 @@ mod tests {
     fn the_first_device_problem_of_a_report_is_the_outcome() {
         assert_eq!(first_problem(TuneReport::default()), Ok(()));
         let broken = TunedDevice { problem: Some("the driver refused".into()), ..card() };
-        let report = TuneReport { devices: vec![card(), broken] };
-        assert_eq!(first_problem(report), Err("Radeon RX 550 Series: the driver refused".into()));
+        let report = TuneReport { devices: vec![card(), broken], problem: None };
+        assert_eq!(
+            first_problem(report.clone()),
+            Err("Radeon RX 550 Series: the driver refused".into())
+        );
+        let unlisted = TuneReport { problem: Some("(adapters): expected a list".into()), ..report };
+        assert_eq!(first_problem(unlisted), Err("(adapters): expected a list".into()));
+    }
+
+    #[test]
+    fn devices_that_could_not_be_listed_are_failed_not_missing() {
+        const UNLISTED: &str = "(ADL2_Adapter_AdapterInfo_Get): expected ADL_OK (0) | received: -1";
+        let mut fixture = Fixture::new(vec![setting(&[("power-limit", -20)])]);
+        fixture.tuner.state().backend.unlisted = Some(UNLISTED.into());
+        fixture.pass(0);
+        let status = fixture.tuning.status();
+        assert_eq!(status.problem.as_deref(), Some(UNLISTED), "(status problem)");
+        let states: Vec<_> = status.devices.iter().map(|device| &device.state).collect();
+        assert_eq!(
+            states,
+            [&TuningState::Failed { reason: UNLISTED.into() }],
+            "(device states): expected the setting's device failed, not missing | received: {states:?}"
+        );
+        let jobs = fixture.kinds_of_jobs();
+        assert_eq!(jobs, ["look"], "(jobs): expected no apply to a device nobody listed");
+
+        // Listed again: the setting is applied.
+        fixture.tuner.state().backend.unlisted = None;
+        fixture.tuning.apply_again(fixture.now);
+        fixture.pass(0);
+        fixture.assert_state(&TuningState::Applied, "once the devices are listed again");
     }
 
     #[test]

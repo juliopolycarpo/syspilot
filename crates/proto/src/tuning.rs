@@ -353,6 +353,9 @@ pub struct TunedDevice {
 pub struct TuneReport {
     /// Every device with a tuning interface.
     pub devices: Vec<TunedDevice>,
+    /// Why an interface could not list its devices, when one could not.
+    /// Its devices are then absent from `devices` without being gone.
+    pub problem: Option<String>,
 }
 
 #[cfg(test)]
@@ -517,6 +520,9 @@ mod tests {
                 }],
                 problem: Some("(power-limit): expected the driver to take it".into()),
             }],
+            problem: Some(
+                "(ADL2_Adapter_AdapterInfo_Get): expected ADL_OK (0) | received: -1".into(),
+            ),
         };
         let mut wire = Vec::new();
         write_frame(&mut wire, &job).unwrap();

@@ -9,6 +9,9 @@ use syspilot_proto::tuning::TuneJob;
 fn main() {
     let mut backends = system_backends();
     let report = run(&TuneJob::default(), &mut backends);
+    if let Some(problem) = &report.problem {
+        println!("An interface could not list its devices: {problem}");
+    }
     if report.devices.is_empty() {
         println!("No device with a tuning interface.");
     }
