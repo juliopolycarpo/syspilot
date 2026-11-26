@@ -92,6 +92,10 @@ rules.
 
 The subject of each commit on `main` becomes a line of
 [CHANGELOG.md](CHANGELOG.md), so write it for a reader of the changelog.
+A squash merge takes the subject from the PR title, which CI checks: a
+subject that is not a Conventional Commit would stop every later release.
+To revert a PR, title the revert `revert: …` rather than keeping GitHub's
+`Revert "…"`.
 
 ## Releases
 
