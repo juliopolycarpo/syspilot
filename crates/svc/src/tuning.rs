@@ -17,9 +17,9 @@
 //!
 //! Values that make the machine stop must not be applied again at the next
 //! start. A mark is therefore kept on disk from just before an apply until
-//! the machine is seen alive a minute later, or the service stops in an
-//! orderly way. A service that finds the mark at start holds every setting
-//! back until the user changes it or asks for it again.
+//! the service has run a minute with the values, or stops in an orderly way.
+//! A service that finds the mark at start holds every setting back until the
+//! user changes it or asks for it again.
 //!
 //! [`Tuning`] is the state machine, free of processes and files so that it
 //! runs against [`FakeTuner`] and [`FakeApplyMark`] in tests. [`ProcessTuner`]
@@ -49,8 +49,9 @@ use crate::worker::spawn_sibling;
 /// later looks catch a vendor tool that writes its own values after logon.
 const LOOKS_AFTER_TRIGGER: [Duration; 3] =
     [Duration::ZERO, Duration::from_secs(45), Duration::from_secs(180)];
-/// How long after an apply the devices are looked at again. A machine that
-/// is still there then has survived the values.
+/// How long after an apply the devices are looked at again. A service that
+/// is still running then, and so the machine, has survived the values: the
+/// look only has to end, whatever it reads.
 const SURVIVAL_PERIOD: Duration = Duration::from_secs(60);
 /// Applies in one round before a device counts as contested.
 const MAX_APPLIES: u8 = 3;
@@ -279,8 +280,8 @@ pub struct Tuning {
     /// The mark was found at start; nothing is applied until the user
     /// changes the settings or asks for them again.
     held: bool,
-    /// When values were last applied, until the machine is seen alive
-    /// [`SURVIVAL_PERIOD`] later.
+    /// When values were last applied, until a look ends [`SURVIVAL_PERIOD`]
+    /// or more later.
     applied_at: Option<Instant>,
     /// Devices a setting was applied to since the service started. One of
     /// them whose setting is no longer in effect is put back to its defaults.
@@ -470,6 +471,11 @@ impl Tuning {
         // A job from before the latest trigger still says what it did to the
         // devices, but its failure is not held against the round after it.
         let current = round == self.round;
+        if job.is_look() {
+            // Before the outcome is acted on: it may start an apply, which
+            // sets the mark again, and that one must not be cleared here.
+            self.clear_mark_if_survived(now);
+        }
         let report = match outcome {
             Ok(report) => report,
             Err(reason) => {
@@ -495,7 +501,7 @@ impl Tuning {
         };
         self.problem = None;
         if job.is_look() {
-            self.after_look(&report, now);
+            self.after_look(&report);
         } else {
             self.after_change(&job, &report, current, now);
         }
@@ -532,12 +538,19 @@ impl Tuning {
         }
     }
 
-    /// Compares the devices with the settings and starts what is needed.
-    fn after_look(&mut self, report: &TuneReport, now: Instant) {
+    /// Takes the mark away once the service has been up [`SURVIVAL_PERIOD`]
+    /// since the last apply. That is elapsed time, so a look that ended in
+    /// failure counts as much as one that read the devices; an apply that
+    /// ends is never the moment, since what it wrote has yet to be survived.
+    fn clear_mark_if_survived(&mut self, now: Instant) {
         if self.applied_at.is_some_and(|at| now.duration_since(at) >= SURVIVAL_PERIOD) {
             self.applied_at = None;
             self.mark.clear();
         }
+    }
+
+    /// Compares the devices with the settings and starts what is needed.
+    fn after_look(&mut self, report: &TuneReport) {
         let present = |key: &str| report.devices.iter().find(|device| device.key == key);
         let reset: Vec<String> = self
             .managed
@@ -1072,6 +1085,54 @@ mod tests {
         assert_eq!(fixture.device().state, TuningState::Failed { reason: hung.into() });
         fixture.pass(120);
         assert_eq!(fixture.kinds_of_jobs().iter().filter(|kind| **kind == "apply").count(), 1);
+    }
+
+    #[test]
+    fn a_look_that_fails_a_minute_after_an_apply_still_clears_the_mark() {
+        let mut fixture = Fixture::new(vec![setting(&[("power-limit", -20)])]);
+        fixture.pass(0);
+        fixture.assert_mark(true, "right after the apply");
+        // The service has run a minute with the values; that the look which
+        // finds out cannot read the devices does not change it.
+        fixture.tuner.state().failure = Some("The tuner could not be started: not found".into());
+        fixture.pass(60);
+        assert_eq!(fixture.kinds_of_jobs(), ["look", "apply", "look"]);
+        assert_ne!(fixture.tuning.status().problem, None, "the look is meant to have failed");
+        fixture.assert_mark(false, "after a look that failed 60 s after the apply");
+        // No look is made up for the failed one, or a tuner that cannot be
+        // started would be tried over and over. Only the round's last is left.
+        assert_eq!(fixture.tuning.next_wake(fixture.now), Some(Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn an_apply_that_ends_a_minute_after_the_last_one_leaves_the_mark() {
+        let mut fixture = Fixture::new(vec![setting(&[("power-limit", -20)])]);
+        fixture.pass(0);
+        fixture.overwrite("power-limit", 5);
+        // The look at 45 s finds another tool's value and starts a second
+        // apply. It ends at 70 s, over a minute after the first, and what it
+        // wrote is as yet unsurvived: only a look ends the wait.
+        fixture.now += Duration::from_secs(45);
+        fixture.tuning.run_due(fixture.now);
+        let look = fixture.tuner.outcome_of_last();
+        fixture.tuning.finished(look, fixture.now);
+        assert_eq!(fixture.kinds_of_jobs(), ["look", "apply", "look", "apply"]);
+        fixture.now += Duration::from_secs(25);
+        let applied = fixture.tuner.outcome_of_last();
+        fixture.tuning.finished(applied, fixture.now);
+        fixture.assert_mark(true, "when an apply ends 70 s after the one before it");
+    }
+
+    #[test]
+    fn a_look_that_ends_the_wait_and_applies_again_leaves_the_mark_of_that_apply() {
+        let mut fixture = Fixture::new(vec![setting(&[("power-limit", -20)])]);
+        fixture.pass(0);
+        // Another tool's value is found by the look 60 s on: the first
+        // apply is survived, and the second has yet to be.
+        fixture.overwrite("power-limit", 5);
+        fixture.pass(60);
+        assert_eq!(fixture.kinds_of_jobs(), ["look", "apply", "look", "apply"]);
+        fixture.assert_mark(true, "after the apply a look 60 s on decided");
     }
 
     #[test]
