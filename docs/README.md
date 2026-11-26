@@ -17,6 +17,7 @@
 | [Research: UI toolkits](research/ui-toolkits.md)      | Why the app is built with windows-reactor (WinUI 3).          |
 | [Research: fan control](research/fan-control.md)      | The fan registers behind the `fan-control` feature and what a human must validate first. |
 | [Research: Radeon tuning](research/radeon-tuning.md)  | The driver interface behind tuning, what it offers on the development machine and what was verified. |
+| [Research: GeForce tuning](research/geforce-tuning.md) | What NVAPI and NVML let a program set on GeForce cards, what decision 21 allows, and what needs a card to find out. |
 | [Research: per-program priority](research/perf-options.md) | What is documented, and what is not, about the Image File Execution Options `PerfOptions` values. |
 | [Research: reference machine](research/reference-machine.md) | What the hardware providers found on the development machine, and what they did not. |
 
