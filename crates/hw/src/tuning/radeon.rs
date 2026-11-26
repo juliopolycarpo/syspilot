@@ -399,22 +399,9 @@ impl CardState {
         let mut controls = Vec::new();
         let mut single =
             |key: &str, kind, unit, range: OdnRange, default: i32, current: i32, slot: Slot| {
-                if let Some((min, max, step)) = usable(range, 1) {
-                    controls.push((
-                        TuningControl {
-                            key: key.to_owned(),
-                            kind,
-                            state: None,
-                            unit,
-                            min,
-                            max,
-                            step,
-                            default,
-                            current,
-                            wanted: None,
-                        },
-                        slot,
-                    ));
+                if let Some(range) = usable(range, 1) {
+                    let made = control(key.to_owned(), kind, None, unit, range, default, current);
+                    controls.push((made, slot));
                 }
             };
         if self.has(feature::POWER_LIMIT) {
@@ -516,22 +503,9 @@ impl CardState {
                 continue;
             }
             let state = u8::try_from(index).ok();
-            let mut push = |suffix: &str, kind, unit, (min, max, step), default, current, slot| {
-                controls.push((
-                    TuningControl {
-                        key: format!("{prefix}-p{index}-{suffix}"),
-                        kind,
-                        state,
-                        unit,
-                        min,
-                        max,
-                        step,
-                        default,
-                        current,
-                        wanted: None,
-                    },
-                    slot,
-                ));
+            let mut push = |suffix: &str, kind, unit, range, default, current, slot| {
+                let key = format!("{prefix}-p{index}-{suffix}");
+                controls.push((control(key, kind, state, unit, range, default, current), slot));
             };
             if let Some((min, max, step)) =
                 clock_range.filter(|_| level.control & editable::CLOCK != 0)
@@ -564,6 +538,19 @@ impl CardState {
             }
         }
     }
+}
+
+/// A control as read from the card; `range` is `(min, max, step)`.
+fn control(
+    key: String,
+    kind: TuningKind,
+    state: Option<u8>,
+    unit: TuningUnit,
+    (min, max, step): (i32, i32, i32),
+    default: i32,
+    current: i32,
+) -> TuningControl {
+    TuningControl { key, kind, state, unit, min, max, step, default, current, wanted: None }
 }
 
 /// The states a levels structure should hold: the defaults with `values`
@@ -716,7 +703,7 @@ impl<A: AdlApi> TuningBackend for Radeon<A> {
 
         let value_of = |slot: Slot| {
             let control = controls.iter().find(|(_, own)| *own == slot).map(|(control, _)| control);
-            control.map(|control| values.get(&control.key).copied().unwrap_or(control.default))
+            control.map(|control| control.value_in(values))
         };
         let set_in = |group: Group| {
             controls
@@ -768,11 +755,6 @@ impl<A: AdlApi> TuningBackend for Radeon<A> {
             Ok(())
         })();
         written.map_err(|error: AdlError| error.to_string())
-    }
-
-    fn reset(&mut self, key: &str) -> Result<(), String> {
-        // Every control at its default is a setting with no values.
-        self.apply(key, &BTreeMap::new())
     }
 }
 

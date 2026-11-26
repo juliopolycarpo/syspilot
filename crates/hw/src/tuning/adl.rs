@@ -12,6 +12,8 @@
 use std::ffi::{CStr, c_char, c_void};
 use std::ptr;
 
+use syspilot_proto::win::wide;
+
 use windows_sys::Win32::Foundation::{FreeLibrary, HMODULE};
 use windows_sys::Win32::System::LibraryLoader::{
     GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
@@ -21,6 +23,7 @@ use windows_sys::Win32::System::Memory::{GetProcessHeap, HeapAlloc};
 use super::radeon::{
     AdlAdapter, AdlApi, AdlError, OdnCapabilities, OdnFan, OdnLevel, OdnLevels, OdnPower,
 };
+use crate::os::text::clean_text;
 
 /// The library's file name. No path: the loader is told to look in the
 /// system directory only.
@@ -90,11 +93,11 @@ unsafe extern "system" fn allocate(size: i32) -> *mut c_void {
     unsafe { HeapAlloc(GetProcessHeap(), 0, size) }
 }
 
-/// The text of a fixed-size C string field, without what follows its end.
+/// The text of a fixed-size C string field, cleaned like every other device
+/// string (see [`clean_text`], which also drops what follows the NUL).
 fn text(field: &[c_char]) -> String {
-    let bytes: Vec<u8> =
-        field.iter().take_while(|&&byte| byte != 0).map(|&byte| byte as u8).collect();
-    String::from_utf8_lossy(&bytes).trim().to_owned()
+    let bytes: Vec<u8> = field.iter().map(|&byte| byte as u8).collect();
+    clean_text(&String::from_utf8_lossy(&bytes))
 }
 
 /// A levels structure as the library takes it: the header, then `count`
@@ -196,7 +199,7 @@ impl AdlLibrary {
     /// Loads the driver's library from the system directory and opens a
     /// context for the cards that are present.
     pub fn load() -> Result<Self, AdlError> {
-        let name: Vec<u16> = LIBRARY.encode_utf16().chain([0]).collect();
+        let name = wide(LIBRARY);
         // SAFETY: `name` is a NUL-terminated UTF-16 string that outlives the
         // call; the flag restricts the search to the system directory.
         let module =
@@ -441,6 +444,11 @@ mod tests {
         }
         assert_eq!(text(&field), "RX 550");
         assert_eq!(text(&[0 as c_char; 4]), "");
+        let mut padded = [0 as c_char; 16];
+        for (slot, byte) in padded.iter_mut().zip(b"Radeon  RX\t550") {
+            *slot = *byte as c_char;
+        }
+        assert_eq!(text(&padded), "Radeon RX 550", "runs of whitespace collapse");
     }
 
     #[test]

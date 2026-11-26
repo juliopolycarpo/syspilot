@@ -30,8 +30,11 @@ pub trait TuningBackend {
     /// does not fit.
     fn apply(&mut self, key: &str, values: &BTreeMap<String, i32>) -> Result<(), String>;
 
-    /// Puts every control of the device with `key` back to its default.
-    fn reset(&mut self, key: &str) -> Result<(), String>;
+    /// Puts every control of the device with `key` back to its default:
+    /// a setting with no values.
+    fn reset(&mut self, key: &str) -> Result<(), String> {
+        self.apply(key, &BTreeMap::new())
+    }
 }
 
 /// A borrowed backend is a backend, so one that somebody else keeps can be
@@ -43,10 +46,6 @@ impl<T: TuningBackend + ?Sized> TuningBackend for &mut T {
 
     fn apply(&mut self, key: &str, values: &BTreeMap<String, i32>) -> Result<(), String> {
         (**self).apply(key, values)
-    }
-
-    fn reset(&mut self, key: &str) -> Result<(), String> {
-        (**self).reset(key)
     }
 }
 
@@ -68,21 +67,22 @@ pub fn system_backends() -> Vec<Box<dyn TuningBackend>> {
 /// it is not there. A setting that is not enabled is skipped too.
 pub fn run(job: &TuneJob, backends: &mut [Box<dyn TuningBackend + '_>]) -> TuneReport {
     let mut problems: BTreeMap<String, String> = BTreeMap::new();
-    for backend in backends.iter_mut() {
-        if job.is_look() {
-            break;
-        }
-        let known: Vec<String> = backend.devices().into_iter().map(|device| device.key).collect();
-        for key in job.reset.iter().filter(|key| known.contains(key)) {
-            if let Err(problem) = backend.reset(key) {
-                problems.insert(key.clone(), problem);
+    // A look only reads, so it skips the reading this needs to find devices.
+    if !job.is_look() {
+        for backend in backends.iter_mut() {
+            let known: Vec<String> =
+                backend.devices().into_iter().map(|device| device.key).collect();
+            for key in job.reset.iter().filter(|key| known.contains(key)) {
+                if let Err(problem) = backend.reset(key) {
+                    problems.insert(key.clone(), problem);
+                }
             }
-        }
-        let wanted = job.apply.iter().filter(|setting| setting.enabled);
-        for setting in wanted.filter(|setting| known.contains(&setting.device)) {
-            match backend.apply(&setting.device, &setting.values) {
-                Ok(()) => _ = problems.remove(&setting.device),
-                Err(problem) => _ = problems.insert(setting.device.clone(), problem),
+            let wanted = job.apply.iter().filter(|setting| setting.enabled);
+            for setting in wanted.filter(|setting| known.contains(&setting.device)) {
+                match backend.apply(&setting.device, &setting.values) {
+                    Ok(()) => _ = problems.remove(&setting.device),
+                    Err(problem) => _ = problems.insert(setting.device.clone(), problem),
+                }
             }
         }
     }
@@ -104,9 +104,9 @@ pub struct FakeTuningBackend {
     pub devices: Vec<TunedDevice>,
     /// Keys of devices whose apply and reset fail, with the reason.
     pub failing: BTreeMap<String, String>,
-    /// Every apply and reset, in order: the device key and the values
-    /// (`None` for a reset).
-    pub calls: Vec<(String, Option<BTreeMap<String, i32>>)>,
+    /// Every apply, in order, with the device key and the values. A reset is
+    /// an apply with no values.
+    pub calls: Vec<(String, BTreeMap<String, i32>)>,
 }
 
 impl FakeTuningBackend {
@@ -127,21 +127,12 @@ impl TuningBackend for FakeTuningBackend {
     }
 
     fn apply(&mut self, key: &str, values: &BTreeMap<String, i32>) -> Result<(), String> {
-        self.calls.push((key.to_owned(), Some(values.clone())));
+        self.calls.push((key.to_owned(), values.clone()));
         let device = self.device(key)?;
         syspilot_proto::tuning::check_values(&device.controls, values)
             .map_err(|problem| problem.to_string())?;
         for control in &mut device.controls {
-            control.current = values.get(&control.key).copied().unwrap_or(control.default);
-        }
-        Ok(())
-    }
-
-    fn reset(&mut self, key: &str) -> Result<(), String> {
-        self.calls.push((key.to_owned(), None));
-        let device = self.device(key)?;
-        for control in &mut device.controls {
-            control.current = control.default;
+            control.current = control.value_in(values);
         }
         Ok(())
     }
@@ -279,8 +270,8 @@ mod tests {
         backend.apply(CARD, &[("power-limit".to_owned(), 3)].into()).unwrap();
         assert!(backend.apply("gpu.none", &BTreeMap::new()).is_err());
         let keys: Vec<_> =
-            backend.calls.iter().map(|(key, values)| (key.as_str(), values.is_some())).collect();
-        assert_eq!(keys, [(CARD, false), (CARD, true), ("gpu.none", true)]);
+            backend.calls.iter().map(|(key, values)| (key.as_str(), values.len())).collect();
+        assert_eq!(keys, [(CARD, 0), (CARD, 1), ("gpu.none", 0)]);
     }
 
     #[test]
