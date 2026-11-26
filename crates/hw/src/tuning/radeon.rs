@@ -571,8 +571,12 @@ fn wanted_levels(
         match *slot {
             Slot::Clock { memory: of_memory, index } if of_memory == memory => {
                 // Whole megahertz only: the fraction of a default is given up
-                // when the user sets the clock.
-                wanted.levels[index].clock = value * CLOCK_UNITS_PER_MHZ;
+                // when the user sets another clock. The default itself, shown
+                // rounded down, is written as the driver has it, so that a
+                // floor at the default never lets a value below it through.
+                if value != control.default {
+                    wanted.levels[index].clock = value * CLOCK_UNITS_PER_MHZ;
+                }
             }
             Slot::Voltage { memory: of_memory, index } if of_memory == memory => {
                 wanted.levels[index].vddc = value;
@@ -721,9 +725,12 @@ impl<A: AdlApi> TuningBackend for Radeon<A> {
             value_of(Slot::QuietClockFloor).unwrap_or(fan.min_performance_clock);
         fan.mode = if set_in(Group::Fan) { mode::MANUAL } else { mode::AUTO };
         // One range covers both speeds, so each can pass it and the pair
-        // still be upside down.
-        let both_speeds = value_of(Slot::FanMinSpeed).zip(value_of(Slot::FanMaxSpeed));
-        if let Some((lowest, highest)) = both_speeds.filter(|(lowest, highest)| lowest > highest) {
+        // still be upside down. The pair as it will be written is compared:
+        // a card may offer the lowest speed without the highest, which then
+        // stays as read.
+        let speeds = value_of(Slot::FanMinSpeed).or(value_of(Slot::FanMaxSpeed));
+        let (lowest, highest) = (fan.min_fan_limit, fan.target_fan_speed);
+        if speeds.is_some() && lowest > highest {
             return Err(format!(
                 "(tuning.values.fan-min-speed): expected at most the {highest} RPM of \
                  fan-max-speed | received: {lowest} RPM"
@@ -778,8 +785,9 @@ pub struct FakeAdl {
     pub power: OdnPower,
     /// Names of the functions that fail, with the code they return.
     pub failing: BTreeMap<&'static str, i32>,
-    /// Every write, by function name, in order.
-    pub writes: Vec<&'static str>,
+    /// Every write, by function name with the mode it was written in, in
+    /// order.
+    pub writes: Vec<(&'static str, i32)>,
 }
 
 impl FakeAdl {
@@ -831,7 +839,7 @@ impl AdlApi for FakeAdl {
     }
 
     fn set_system_clocks(&mut self, _adapter: i32, levels: &OdnLevels) -> Result<(), AdlError> {
-        self.writes.push("ADL2_OverdriveN_SystemClocksX2_Set");
+        self.writes.push(("ADL2_OverdriveN_SystemClocksX2_Set", levels.mode));
         self.check("ADL2_OverdriveN_SystemClocksX2_Set")?;
         Self::store(&mut self.core, levels);
         Ok(())
@@ -848,7 +856,7 @@ impl AdlApi for FakeAdl {
     }
 
     fn set_memory_clocks(&mut self, _adapter: i32, levels: &OdnLevels) -> Result<(), AdlError> {
-        self.writes.push("ADL2_OverdriveN_MemoryClocksX2_Set");
+        self.writes.push(("ADL2_OverdriveN_MemoryClocksX2_Set", levels.mode));
         self.check("ADL2_OverdriveN_MemoryClocksX2_Set")?;
         Self::store(&mut self.memory, levels);
         Ok(())
@@ -860,7 +868,7 @@ impl AdlApi for FakeAdl {
     }
 
     fn set_fan(&mut self, _adapter: i32, fan: &OdnFan) -> Result<(), AdlError> {
-        self.writes.push("ADL2_OverdriveN_FanControl_Set");
+        self.writes.push(("ADL2_OverdriveN_FanControl_Set", fan.mode));
         self.check("ADL2_OverdriveN_FanControl_Set")?;
         // The driver does not report the mode of a write back.
         self.fan = OdnFan { mode: mode::CURRENT, ..*fan };
@@ -873,7 +881,7 @@ impl AdlApi for FakeAdl {
     }
 
     fn set_power(&mut self, _adapter: i32, power: &OdnPower) -> Result<(), AdlError> {
-        self.writes.push("ADL2_OverdriveN_PowerLimit_Set");
+        self.writes.push(("ADL2_OverdriveN_PowerLimit_Set", power.mode));
         self.check("ADL2_OverdriveN_PowerLimit_Set")?;
         self.power = OdnPower { mode: mode::CURRENT, ..*power };
         Ok(())
@@ -1068,8 +1076,33 @@ mod tests {
             refused,
             "(tuning.values.memory-p2-clock): expected 1500..=2000 | received: 1400"
         );
-        assert!(radeon.adl.writes.is_empty(), "{:?}", radeon.adl.writes);
+        assert!(
+            radeon.adl.writes.is_empty(),
+            "(writes): expected none | received: {:?}",
+            radeon.adl.writes
+        );
         radeon.apply(CARD, &values(&[("memory-p2-clock", 1600)])).unwrap();
+    }
+
+    #[test]
+    fn a_default_with_a_fraction_of_a_megahertz_is_written_back_whole() {
+        let mut adl = FakeAdl::rx550();
+        adl.capabilities.flags &= !feature::MCLK_UNDERCLOCK;
+        adl.memory.0.levels[2].clock = 150_050;
+        adl.memory.1.levels[2].clock = 150_050;
+        let mut radeon = Radeon::new(adl);
+        let memory = control(&only_card(&mut radeon), "memory-p2-clock").clone();
+        assert_eq!((memory.min, memory.default), (1500, 1500), "shown rounded down");
+
+        radeon.apply(CARD, &values(&[("memory-p2-clock", 1600)])).unwrap();
+        // The default as shown: the driver's own value goes back, not
+        // 150_000, which would be under the floor.
+        radeon.apply(CARD, &values(&[("memory-p2-clock", 1500)])).unwrap();
+        let clock = radeon.adl.memory.0.levels[2].clock;
+        assert_eq!(
+            clock, 150_050,
+            "(memory-p2 clock): expected the default 150_050 | received: {clock}"
+        );
     }
 
     #[test]
@@ -1084,10 +1117,44 @@ mod tests {
              received: 6000 RPM"
         );
         // Against the default of the other speed too: 4600 RPM.
-        assert!(radeon.apply(CARD, &values(&[("fan-min-speed", 5000)])).is_err());
-        assert!(radeon.adl.writes.is_empty(), "{:?}", radeon.adl.writes);
+        assert_eq!(
+            radeon.apply(CARD, &values(&[("fan-min-speed", 5000)])),
+            Err("(tuning.values.fan-min-speed): expected at most the 4600 RPM of fan-max-speed | \
+                 received: 5000 RPM"
+                .to_owned())
+        );
+        assert!(
+            radeon.adl.writes.is_empty(),
+            "(writes): expected none | received: {:?}",
+            radeon.adl.writes
+        );
         radeon.apply(CARD, &values(&[("fan-min-speed", 3000)])).unwrap();
         assert_eq!(radeon.adl.fan.min_fan_limit, 3000);
+    }
+
+    #[test]
+    fn a_lowest_fan_speed_is_checked_against_the_highest_also_without_its_control() {
+        let mut adl = FakeAdl::rx550();
+        adl.capabilities.flags |= feature::FAN_SPEED_MIN;
+        let mut radeon = Radeon::new(adl);
+        let card = only_card(&mut radeon);
+        assert!(
+            card.controls.iter().all(|control| control.key != "fan-max-speed"),
+            "(controls): expected no fan-max-speed without its flag | received: {:?}",
+            card.controls
+        );
+        // The highest speed stays as read, 4600 RPM.
+        assert_eq!(
+            radeon.apply(CARD, &values(&[("fan-min-speed", 6000)])),
+            Err("(tuning.values.fan-min-speed): expected at most the 4600 RPM of fan-max-speed | \
+                 received: 6000 RPM"
+                .to_owned())
+        );
+        assert!(
+            radeon.adl.writes.is_empty(),
+            "(writes): expected none | received: {:?}",
+            radeon.adl.writes
+        );
     }
 
     #[test]
@@ -1095,7 +1162,11 @@ mod tests {
         let mut adl = FakeAdl::rx550();
         adl.capabilities.power = OdnRange::default();
         let card = only_card(&mut Radeon::new(adl));
-        assert!(card.controls.iter().all(|control| control.key != "power-limit"));
+        assert!(
+            card.controls.iter().all(|control| control.key != "power-limit"),
+            "(controls): expected no power-limit for an empty range | received: {:?}",
+            card.controls
+        );
         assert_eq!(usable(OdnRange { min: 21_450, max: 21_499, ..OdnRange::default() }, 100), None);
         let inwards = OdnRange { min: 21_450, max: 180_050, step: 500, ..OdnRange::default() };
         assert_eq!(usable(inwards, 100), Some((215, 1800, 5)), "bounds are rounded inwards");
@@ -1109,7 +1180,8 @@ mod tests {
         }
         let mut broken = FakeAdl::rx550();
         broken.failing.insert("ADL2_Adapter_AdapterInfo_Get", -1);
-        assert_eq!(Radeon::new(broken).devices(), Vec::new());
+        // Swallowed for now: #30.
+        assert_eq!(Radeon::new(broken).devices(), Vec::new(), "(failed adapter query)");
     }
 
     #[test]
@@ -1117,7 +1189,11 @@ mod tests {
         let mut adl = FakeAdl::rx550();
         adl.failing.insert("ADL2_OverdriveN_FanControl_Get", -8);
         let card = only_card(&mut Radeon::new(adl));
-        assert!(card.controls.is_empty());
+        assert!(
+            card.controls.is_empty(),
+            "(controls): expected none for an unreadable card | received: {:?}",
+            card.controls
+        );
         assert_eq!(
             card.problem.as_deref(),
             Some("(ADL2_OverdriveN_FanControl_Get): expected ADL_OK (0) | received: -8")
@@ -1128,21 +1204,26 @@ mod tests {
     fn a_power_limit_writes_the_power_structure_only_and_reads_back() {
         let mut radeon = Radeon::new(FakeAdl::rx550());
         radeon.apply(CARD, &values(&[("power-limit", -20)])).unwrap();
-        assert_eq!(radeon.adl.writes, ["ADL2_OverdriveN_PowerLimit_Set"]);
+        assert_eq!(radeon.adl.writes, [("ADL2_OverdriveN_PowerLimit_Set", mode::MANUAL)]);
         assert_eq!(radeon.adl.power.tdp_limit, -20);
         assert_eq!(radeon.adl.power.max_operating_temperature, 93, "left as read");
         assert_eq!(control(&only_card(&mut radeon), "power-limit").current, -20);
 
         // The same setting again finds it in place and writes nothing.
         radeon.apply(CARD, &values(&[("power-limit", -20)])).unwrap();
-        assert_eq!(radeon.adl.writes.len(), 1, "{:?}", radeon.adl.writes);
+        assert_eq!(
+            radeon.adl.writes.len(),
+            1,
+            "(writes): expected one | received: {:?}",
+            radeon.adl.writes
+        );
     }
 
     #[test]
     fn state_values_are_laid_over_the_defaults_and_written_in_manual_mode() {
         let mut radeon = Radeon::new(FakeAdl::rx550());
         radeon.apply(CARD, &values(&[("core-p7-clock", 1150), ("core-p7-voltage", 1000)])).unwrap();
-        assert_eq!(radeon.adl.writes, ["ADL2_OverdriveN_SystemClocksX2_Set"]);
+        assert_eq!(radeon.adl.writes, [("ADL2_OverdriveN_SystemClocksX2_Set", mode::MANUAL)]);
         let written = &radeon.adl.core.0;
         assert_eq!((written.levels[7].clock, written.levels[7].vddc), (115_000, 1000));
         assert_eq!((written.levels[6].clock, written.levels[6].vddc), (112_400, 1000));
@@ -1168,7 +1249,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             radeon.adl.writes,
-            ["ADL2_OverdriveN_MemoryClocksX2_Set", "ADL2_OverdriveN_FanControl_Set"]
+            [
+                ("ADL2_OverdriveN_MemoryClocksX2_Set", mode::MANUAL),
+                ("ADL2_OverdriveN_FanControl_Set", mode::MANUAL)
+            ]
         );
         assert_eq!(radeon.adl.memory.0.levels[2].clock, 160_000);
         let fan = radeon.adl.fan;
@@ -1184,14 +1268,31 @@ mod tests {
     fn a_reset_puts_back_the_defaults_and_writes_only_what_was_changed() {
         let mut radeon = Radeon::new(FakeAdl::rx550());
         radeon.reset(CARD).unwrap();
-        assert_eq!(radeon.adl.writes, Vec::<&str>::new(), "nothing differs from the defaults");
+        assert_eq!(radeon.adl.writes, [], "nothing differs from the defaults");
 
-        radeon.apply(CARD, &values(&[("power-limit", 10), ("core-p7-clock", 1200)])).unwrap();
+        radeon
+            .apply(
+                CARD,
+                &values(&[
+                    ("power-limit", 10),
+                    ("core-p7-clock", 1200),
+                    ("memory-p2-clock", 1600),
+                    ("quiet-clock-floor", 700),
+                ]),
+            )
+            .unwrap();
         radeon.adl.writes.clear();
         radeon.reset(CARD).unwrap();
+        // The driver's own way back: the states' defaults in default mode,
+        // the fan and the power limit handed back to the driver.
         assert_eq!(
             radeon.adl.writes,
-            ["ADL2_OverdriveN_SystemClocksX2_Set", "ADL2_OverdriveN_PowerLimit_Set"]
+            [
+                ("ADL2_OverdriveN_SystemClocksX2_Set", mode::DEFAULT),
+                ("ADL2_OverdriveN_MemoryClocksX2_Set", mode::DEFAULT),
+                ("ADL2_OverdriveN_FanControl_Set", mode::AUTO),
+                ("ADL2_OverdriveN_PowerLimit_Set", mode::AUTO)
+            ]
         );
         let card = only_card(&mut radeon);
         assert!(
@@ -1213,7 +1314,7 @@ mod tests {
             let problem = radeon.apply(CARD, &values(&[(key, 800)])).unwrap_err();
             assert!(problem.contains("expected a control of the device"), "{key}: {problem}");
         }
-        assert_eq!(radeon.adl.writes, Vec::<&str>::new());
+        assert_eq!(radeon.adl.writes, []);
     }
 
     #[test]
@@ -1226,7 +1327,7 @@ mod tests {
             problem,
             "(core-p7-clock): expected at least the 1124 MHz of state 6 | received: 1000 MHz"
         );
-        assert_eq!(radeon.adl.writes, Vec::<&str>::new(), "not even the power limit");
+        assert_eq!(radeon.adl.writes, [], "not even the power limit");
     }
 
     #[test]
@@ -1254,13 +1355,20 @@ mod tests {
         other_mode.mode = mode::MANUAL;
         other_mode.levels[0].enabled = 1;
         assert!(same_states(&levels(&[100, 200]), &other_mode), "mode and enabled do not count");
-        assert!(!same_states(&levels(&[100, 200]), &levels(&[100, 300])));
-        assert!(!same_states(&levels(&[100]), &levels(&[100, 0])));
+        assert!(
+            !same_states(&levels(&[100, 200]), &levels(&[100, 300])),
+            "(100, 200 against 100, 300): expected different states"
+        );
+        assert!(
+            !same_states(&levels(&[100]), &levels(&[100, 0])),
+            "(one state against two): expected different states"
+        );
 
         // Equal clocks are fine, and the zeroed states of a short list do
         // not count as a fall.
         assert_eq!(check_rising(&levels(&[100, 100, 300, 0, 0]), "memory"), Ok(()));
-        assert!(check_rising(&levels(&[300, 0, 200]), "memory").is_err());
+        let fall = check_rising(&levels(&[300, 0, 200]), "memory");
+        assert!(fall.is_err(), "(300, 0, 200): expected a fall | received: {fall:?}");
     }
 
     #[test]

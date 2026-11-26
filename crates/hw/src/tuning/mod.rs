@@ -47,6 +47,11 @@ impl<T: TuningBackend + ?Sized> TuningBackend for &mut T {
     fn apply(&mut self, key: &str, values: &BTreeMap<String, i32>) -> Result<(), String> {
         (**self).apply(key, values)
     }
+
+    // Forwarded too: the default would bypass a backend's own reset.
+    fn reset(&mut self, key: &str) -> Result<(), String> {
+        (**self).reset(key)
+    }
 }
 
 /// The tuning interfaces of this machine. A machine without the vendor's
@@ -206,7 +211,10 @@ mod tests {
         let report = run(&job, &mut backends);
         assert_eq!(limit_of(&report, CARD), -20);
         assert_eq!(limit_of(&report, OTHER), 0, "the other card went back to its default");
-        assert!(report.devices.iter().all(|device| device.problem.is_none()), "{report:?}");
+        assert!(
+            report.devices.iter().all(|device| device.problem.is_none()),
+            "(problems): expected none | received: {report:?}"
+        );
     }
 
     #[test]
@@ -268,7 +276,8 @@ mod tests {
             FakeTuningBackend { devices: vec![card(CARD, 0)], ..FakeTuningBackend::default() };
         backend.reset(CARD).unwrap();
         backend.apply(CARD, &[("power-limit".to_owned(), 3)].into()).unwrap();
-        assert!(backend.apply("gpu.none", &BTreeMap::new()).is_err());
+        let unknown = backend.apply("gpu.none", &BTreeMap::new());
+        assert!(unknown.is_err(), "(gpu.none): expected an error | received: {unknown:?}");
         let keys: Vec<_> =
             backend.calls.iter().map(|(key, values)| (key.as_str(), values.len())).collect();
         assert_eq!(keys, [(CARD, 0), (CARD, 1), ("gpu.none", 0)]);
@@ -283,5 +292,35 @@ mod tests {
         assert_eq!(limit_of(&report, CARD), -20);
         assert_eq!(kept.devices[0].controls[0].current, -20);
         assert_eq!(kept.calls.len(), 1);
+    }
+
+    /// A backend with a reset of its own, which a borrow must not bypass.
+    #[derive(Default)]
+    struct OwnResetBackend {
+        resets: Vec<String>,
+    }
+
+    impl TuningBackend for OwnResetBackend {
+        fn devices(&mut self) -> Vec<TunedDevice> {
+            vec![card(CARD, 0)]
+        }
+
+        fn apply(&mut self, key: &str, _values: &BTreeMap<String, i32>) -> Result<(), String> {
+            Err(format!("(apply): expected no call for a reset | received: one for {key}"))
+        }
+
+        fn reset(&mut self, key: &str) -> Result<(), String> {
+            self.resets.push(key.to_owned());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_borrowed_backend_resets_with_its_own_reset() {
+        let mut own = OwnResetBackend::default();
+        let report =
+            run(&TuneJob { apply: vec![], reset: vec![CARD.into()] }, &mut [Box::new(&mut own)]);
+        assert_eq!(own.resets, [CARD], "(resets): expected the backend's own reset");
+        assert_eq!(report.devices[0].problem, None, "(problem): expected none");
     }
 }
