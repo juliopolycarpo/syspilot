@@ -2216,7 +2216,10 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
         assert!(same.is_empty(), "(drafts): expected none left | received: {same:?}");
         // A device without a draft stays without one.
         tuning_drafts_after_save(&mut same, "gpu.card", &sent);
-        assert!(same.is_empty());
+        assert!(
+            same.is_empty(),
+            "(drafts): expected none for a device without one | received: {same:?}"
+        );
     }
 
     #[test]
@@ -2355,16 +2358,21 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
         // Held back since an abnormal stop: its voltage is saved, the device
         // still holds the default. Any request lifts the hold.
         let held = card_at("gpu.held", "RX 550", TuningState::Held, Some(1000), 1050);
-        let other = card_at("gpu.other", "RX 580", TuningState::Unmanaged, None, 1050);
+        let other = card_at("gpu.other", "RX 580", TuningState::Applied, None, 1050);
         let devices = [other, held];
-        let saved = [saved_voltage("gpu.held", 1000)];
+        // The other card has a setting of its own, so that removing it is a
+        // real removal and not a no-op.
+        let saved =
+            [saved_voltage("gpu.held", 1000), setting("gpu.other", true, &[("power-limit", -10)])];
         let limit_only = draft(&[("power-limit", -20)]);
 
-        let actions = [
-            TuningAction::Remove { device: "gpu.other".into() },
-            saving("gpu.other", true, limit_only),
-            TuningAction::ApplyAgain,
-        ];
+        let remove = TuningAction::Remove { device: "gpu.other".into() };
+        assert_eq!(
+            tuning_settings_after(&remove, &devices, &saved),
+            [saved[0].clone()],
+            "(settings): expected only the held card's setting left"
+        );
+        let actions = [remove, saving("gpu.other", true, limit_only), TuningAction::ApplyAgain];
         for action in actions {
             let asked = question(&action, &devices, &saved);
             assert_eq!(
