@@ -159,6 +159,13 @@ if (-not $wix) {
         if (-not (Test-Path $dotnet)) {
             throw '(wix): expected the WiX toolset or the .NET SDK to install it with | received: neither'
         }
+        # A tool directory without wix.exe is a broken install: an interrupted
+        # one, or one restored from the CI cache, which strips the top-level
+        # files of every directory under target\. dotnet refuses to install
+        # over what is left, so it goes first.
+        if (Test-Path $tools) {
+            Remove-Item -Recurse -Force $tools
+        }
         & $dotnet tool install wix --version $wixVersion --tool-path $tools
         if ($LASTEXITCODE -ne 0) {
             throw "(wix): expected dotnet to install WiX $wixVersion | received: exit code $LASTEXITCODE"
