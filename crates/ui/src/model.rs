@@ -1283,6 +1283,9 @@ pub enum TuningAction {
         enabled: bool,
         /// The values to keep; every control not listed gets its default.
         values: BTreeMap<String, i32>,
+        /// The device's draft as it was when the user asked: what is
+        /// forgotten once the service has these values, and no more.
+        draft: BTreeMap<String, i32>,
     },
     /// "Remove" on a device that is not there: its setting goes.
     Remove {
@@ -1293,11 +1296,28 @@ pub enum TuningAction {
     ApplyAgain,
 }
 
+impl TuningAction {
+    /// "Save" on `device`, with its switch at `enabled`: the values the page
+    /// shows, which are the saved ones with the user's `draft` over them.
+    pub fn save(
+        device: &TuningDevice,
+        draft: Option<&BTreeMap<String, i32>>,
+        enabled: bool,
+    ) -> Self {
+        Self::Save {
+            device: device.key.clone(),
+            enabled,
+            values: tuning_values(device, draft),
+            draft: draft.cloned().unwrap_or_default(),
+        }
+    }
+}
+
 /// The settings in effect once `action` is done, on top of the profile's
 /// `saved` ones.
 pub fn tuning_settings_after(action: &TuningAction, saved: &[TuningSetting]) -> Vec<TuningSetting> {
     match action {
-        TuningAction::Save { device, enabled, values } => {
+        TuningAction::Save { device, enabled, values, .. } => {
             tuning_settings_with(saved, device, *enabled, values.clone())
         }
         TuningAction::Remove { device } => {
@@ -1329,6 +1349,22 @@ pub fn tuning_request(action: &TuningAction, saved: &[TuningSetting]) -> Request
         TuningAction::Save { .. } | TuningAction::Remove { .. } => {
             Request::SetTuning(tuning_settings_after(action, saved))
         }
+    }
+}
+
+/// Forgets what the service now has from the draft of `device`: the entries
+/// that still equal what was `sent`. An entry the user changed or added while
+/// the request was under way stays a draft, and a device left with none has
+/// no draft at all.
+pub fn tuning_drafts_after_save(
+    drafts: &mut TuningDrafts,
+    device: &str,
+    sent: &BTreeMap<String, i32>,
+) {
+    let Some(draft) = drafts.get_mut(device) else { return };
+    draft.retain(|key, value| sent.get(key) != Some(value));
+    if draft.is_empty() {
+        drafts.remove(device);
     }
 }
 
@@ -2095,13 +2131,71 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
         TuningSetting { device: device.into(), enabled, values: draft(values) }
     }
 
+    /// A save of `values` that leaves no draft behind.
+    fn saving(device: &str, enabled: bool, values: BTreeMap<String, i32>) -> TuningAction {
+        TuningAction::Save { device: device.into(), enabled, values, draft: BTreeMap::new() }
+    }
+
+    #[test]
+    fn a_save_keeps_the_shown_values_and_a_copy_of_the_draft_they_came_from() {
+        let mut card = tuning_card();
+        card.controls[0].wanted = Some(-20);
+        let entered = draft(&[("power-limit", -30), ("core-p7-voltage", 1000)]);
+        let action = TuningAction::save(&card, Some(&entered), true);
+        assert_eq!(
+            action,
+            TuningAction::Save {
+                device: "gpu.amd-699f.bus-3".into(),
+                enabled: true,
+                values: entered.clone(),
+                draft: entered,
+            }
+        );
+        let untouched = TuningAction::save(&card, None, false);
+        assert_eq!(
+            untouched,
+            TuningAction::Save {
+                device: "gpu.amd-699f.bus-3".into(),
+                enabled: false,
+                values: draft(&[("power-limit", -20)]),
+                draft: draft(&[]),
+            },
+            "(save): expected the saved values and an empty draft"
+        );
+    }
+
+    #[test]
+    fn a_save_forgets_only_the_entries_it_sent() {
+        let sent = draft(&[("power-limit", -30), ("core-p7-voltage", 1000)]);
+        // While the request was under way the voltage was changed and a
+        // clock was entered.
+        let mut drafts: TuningDrafts = HashMap::from([
+            (
+                "gpu.card".to_owned(),
+                draft(&[("power-limit", -30), ("core-p7-voltage", 990), ("core-p7-clock", 1300)]),
+            ),
+            ("gpu.other".to_owned(), draft(&[("power-limit", -30)])),
+        ]);
+        tuning_drafts_after_save(&mut drafts, "gpu.card", &sent);
+        assert_eq!(
+            drafts["gpu.card"],
+            draft(&[("core-p7-voltage", 990), ("core-p7-clock", 1300)]),
+            "(draft): expected only the entries made after the send | received: {drafts:?}"
+        );
+        assert_eq!(drafts["gpu.other"], draft(&[("power-limit", -30)]), "another device's draft");
+
+        // Nothing was entered since: the device has no draft left.
+        let mut same: TuningDrafts = HashMap::from([("gpu.card".to_owned(), sent.clone())]);
+        tuning_drafts_after_save(&mut same, "gpu.card", &sent);
+        assert!(same.is_empty(), "(drafts): expected none left | received: {same:?}");
+        // A device without a draft stays without one.
+        tuning_drafts_after_save(&mut same, "gpu.card", &sent);
+        assert!(same.is_empty());
+    }
+
     #[test]
     fn a_request_is_made_from_the_profile_as_it_is_when_it_is_sent() {
-        let save = TuningAction::Save {
-            device: "gpu.card".into(),
-            enabled: true,
-            values: draft(&[("a", 2)]),
-        };
+        let save = saving("gpu.card", true, draft(&[("a", 2)]));
         // The same action, sent after another client saved other devices.
         let at_the_click =
             [setting("gpu.other", true, &[]), setting("gpu.card", false, &[("a", 1)])];
@@ -2195,7 +2289,7 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
 
         let actions = [
             TuningAction::Remove { device: "gpu.other".into() },
-            TuningAction::Save { device: "gpu.other".into(), enabled: true, values: limit_only },
+            saving("gpu.other", true, limit_only),
             TuningAction::ApplyAgain,
         ];
         for action in actions {
@@ -2214,18 +2308,14 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
         let devices = [applied];
         let saved = [saved_voltage("gpu.card", 1000)];
         // A limit edited on a card whose saved voltage is already in effect.
-        let edit = TuningAction::Save {
-            device: "gpu.card".into(),
-            enabled: true,
-            values: draft(&[("power-limit", -20), ("core-p7-voltage", 1000)]),
-        };
+        let edit =
+            saving("gpu.card", true, draft(&[("power-limit", -20), ("core-p7-voltage", 1000)]));
         let asked = question(&edit, &devices, &saved);
         assert_eq!(asked, None, "(question): expected none for a limit edit | received: {asked:?}");
         assert_eq!(question(&TuningAction::ApplyAgain, &devices, &saved), None);
 
         // Back to the driver's default is no voltage of the user's.
-        let restore =
-            TuningAction::Save { device: "gpu.card".into(), enabled: true, values: draft(&[]) };
+        let restore = saving("gpu.card", true, draft(&[]));
         let asked = question(&restore, &devices, &saved);
         assert_eq!(asked, None, "(question): expected none for the default | received: {asked:?}");
     }
@@ -2236,8 +2326,7 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
         let devices = [off];
         // Saved earlier, off since: the device holds the default.
         let saved = [setting("gpu.card", false, &[("core-p7-voltage", 1000)])];
-        let values = draft(&[("core-p7-voltage", 1000)]);
-        let on = TuningAction::Save { device: "gpu.card".into(), enabled: true, values };
+        let on = saving("gpu.card", true, draft(&[("core-p7-voltage", 1000)]));
         let asked = question(&on, &devices, &saved);
         assert_eq!(
             asked,
@@ -2245,8 +2334,7 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
             "(question): expected one naming RX 550 for {on:?} | received: {asked:?}"
         );
 
-        let values = draft(&[("core-p7-voltage", 1000)]);
-        let turn_off = TuningAction::Save { device: "gpu.card".into(), enabled: false, values };
+        let turn_off = saving("gpu.card", false, draft(&[("core-p7-voltage", 1000)]));
         assert_eq!(question(&turn_off, &devices, &saved), None);
     }
 

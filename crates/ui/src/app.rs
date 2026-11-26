@@ -1,7 +1,7 @@
 //! The app: its state, what can happen to it, and the window around the
 //! pages.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -343,6 +343,9 @@ pub struct App {
     pub details_open: HashSet<String>,
     /// Tuning values entered and not saved.
     pub tuning_drafts: TuningDrafts,
+    /// The draft of a device as its last save sent it, until the service
+    /// answers: the entries to forget once that save went through.
+    tuning_sent: HashMap<String, BTreeMap<String, i32>>,
     /// Whether the navigation pane is open, once the view has said so.
     pane_open: Option<bool>,
 }
@@ -583,8 +586,7 @@ impl App {
     /// Saves the shown values of a device with its switch at `enabled`.
     fn save_tuning(&mut self, key: &str, enabled: bool, context: &ComponentContext<Self>) {
         let Some(device) = self.tuning_device(key) else { return };
-        let values = model::tuning_values(device, self.tuning_drafts.get(key));
-        let action = TuningAction::Save { device: key.to_owned(), enabled, values };
+        let action = TuningAction::save(device, self.tuning_drafts.get(key), enabled);
         self.start_tuning(action, context);
     }
 
@@ -607,10 +609,26 @@ impl App {
         let request = model::tuning_request(&action, self.saved_tuning());
         // Only a save waits on the device's switch.
         let entry = match &action {
-            TuningAction::Save { device, .. } => Some(tuning_switch(device)),
+            TuningAction::Save { device, draft, .. } => {
+                // The answer comes with the entry and no more; the draft may
+                // have changed by then.
+                self.tuning_sent.insert(device.clone(), draft.clone());
+                Some(tuning_switch(device))
+            }
             TuningAction::Remove { .. } | TuningAction::ApplyAgain => None,
         };
         self.send(entry, request, context);
+    }
+
+    /// A request sent under the name `entry` was answered. When it saved a
+    /// device, what the user had entered for it is no longer a draft, except
+    /// for what was entered after the send.
+    fn tuning_answered(&mut self, entry: &str, saved: bool) {
+        let Some(device) = tuning_switch_device(entry) else { return };
+        let Some(sent) = self.tuning_sent.remove(device) else { return };
+        if saved {
+            model::tuning_drafts_after_save(&mut self.tuning_drafts, device, &sent);
+        }
     }
 
     fn enter_tuning_value(&mut self, device: &str, control: &str, entered: Option<f64>) {
@@ -635,7 +653,7 @@ impl App {
     /// discarded like any other entry.
     fn enter_tuning_defaults(&mut self, device: &str) {
         let Some(found) = self.tuning_device(device) else { return };
-        let draft: std::collections::BTreeMap<String, i32> = found
+        let draft: BTreeMap<String, i32> = found
             .controls
             .iter()
             .filter(|control| control.wanted.is_some_and(|wanted| wanted != control.default))
@@ -723,6 +741,7 @@ impl Component for App {
             unfolded: HashSet::new(),
             details_open: HashSet::new(),
             tuning_drafts: TuningDrafts::new(),
+            tuning_sent: HashMap::new(),
             pane_open: None,
         };
         app.go(Page::Home);
@@ -767,13 +786,13 @@ impl Component for App {
                 match (&result, entry) {
                     // The service has it; the next load shows the outcome.
                     (Ok(()), Some(id)) => {
-                        // What was entered for a device is now what is saved.
-                        if let Some(device) = tuning_switch_device(&id) {
-                            self.tuning_drafts.remove(device);
-                        }
+                        self.tuning_answered(&id, true);
                         self.settled.push(id);
                     }
-                    (Err(_), Some(id)) => _ = self.pending.remove(&id),
+                    (Err(_), Some(id)) => {
+                        self.tuning_answered(&id, false);
+                        _ = self.pending.remove(&id);
+                    }
                     (_, None) => {}
                 }
                 if let Err(failure) = result {
