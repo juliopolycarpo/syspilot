@@ -90,6 +90,29 @@ rules.
 - A bug or improvement you find on the way that is not part of your change
   gets its own issue and its own change.
 
+The subject of each commit on `main` becomes a line of
+[CHANGELOG.md](CHANGELOG.md), so write it for a reader of the changelog.
+
+## Releases
+
+1. Open a `chore: release X.Y.Z` PR that sets the version in `Cargo.toml` and
+   the README's status line, runs `cargo update -w` and writes the changelog
+   with [git-cliff](https://git-cliff.org), configured in `cliff.toml`:
+
+   ```console
+   > git cliff --tag vX.Y.Z -o CHANGELOG.md
+   ```
+
+   Regenerate the file if another PR merges first.
+2. After the squash merge, tag the merge commit: `git tag -s vX.Y.Z -m
+   "SysPilot X.Y.Z"` and push the tag.
+3. The tag runs the release workflow. It stops if `CHANGELOG.md` is not what
+   git-cliff writes for the tag. Otherwise it builds and tests the package and
+   creates a draft release whose notes are the new changelog section. Edit the
+   notes for readers of the release.
+4. Sign and publish the draft: `./scripts/sign-release.ps1 -Tag vX.Y.Z
+   -Publish`.
+
 ## Licence
 
 Contributions are accepted under the licence of the crate they touch: GPL-3.0-
