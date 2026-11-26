@@ -495,10 +495,14 @@ impl Tuning {
             }
         }
         for setting in &job.apply {
-            match problem_of(&setting.device) {
-                Some(problem) if current => _ = self.failed.insert(setting.device.clone(), problem),
-                Some(_) => {}
-                None => _ = self.managed.insert(setting.device.clone()),
+            // Also when the apply failed: a Radeon's core, memory, fan and
+            // power values are written one after another, so some may be on
+            // the card. Turning the setting off must still reset it.
+            self.managed.insert(setting.device.clone());
+            if let Some(problem) = problem_of(&setting.device)
+                && current
+            {
+                self.failed.insert(setting.device.clone(), problem);
             }
         }
         if !job.apply.is_empty() {
@@ -1121,11 +1125,35 @@ mod tests {
         let refused = fixture.tuner.outcome_of_last();
         fixture.tuning.finished(refused, fixture.now);
         fixture.assert_state(&TuningState::Different, "after the problem of an earlier round");
+        assert!(fixture.manages_device(), "(managed): expected {CARD} | received: nothing");
         fixture.assert_mark(true, "after the problem of an earlier round");
 
         fixture.pass(0);
         assert_eq!(fixture.current("power-limit"), -20);
         fixture.assert_state(&TuningState::Applied, "after the new round");
+    }
+
+    #[test]
+    fn a_device_whose_apply_failed_part_way_is_put_back_when_turned_off() {
+        let mut fixture = Fixture::new(vec![setting(&[("power-limit", -20)])]);
+        let reason = "(driver): expected ADL_OK (0) | received: -1";
+        fixture.tuner.state().backend.failing.insert(CARD.into(), reason.into());
+        fixture.pass(0);
+        fixture.assert_state(&TuningState::Failed { reason: reason.into() }, "after the apply");
+        // The card took the power limit before a later write failed, as a
+        // Radeon's separate writes can leave it.
+        fixture.overwrite("power-limit", -20);
+        fixture.tuner.state().backend.failing.clear();
+
+        let off = TuningSetting { enabled: false, ..setting(&[("power-limit", -20)]) };
+        fixture.tuning.set_settings(vec![off], fixture.now);
+        fixture.pass(0);
+        assert_eq!(
+            fixture.kinds_of_jobs(),
+            ["look", "apply", "look", "reset"],
+            "(jobs after turning off): expected a reset to follow the failed apply"
+        );
+        assert_eq!(fixture.current("power-limit"), 0);
     }
 
     #[test]
