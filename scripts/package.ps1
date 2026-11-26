@@ -147,11 +147,16 @@ if ($SigningThumbprint) {
 }
 
 # The WiX toolset: the one on the PATH, or the pinned one under target\.
+# WiX 5 was built for .NET 6; it runs on whichever newer runtime is there.
+$env:DOTNET_ROLL_FORWARD = 'Major'
 $wix = (Get-Command wix -ErrorAction SilentlyContinue).Source
 if (-not $wix) {
     $tools = Join-Path $repository 'target\wix-tool'
     $wix = Join-Path $tools 'wix.exe'
-    if (-not (Test-Path $wix)) {
+    # The tool directory is kept only if it holds the pinned version. One
+    # with another version was installed before $wixVersion changed.
+    $installed = if (Test-Path $wix) { "$(& $wix --version)".Split('+')[0] }
+    if ($installed -ne $wixVersion) {
         $dotnet = (Get-Command dotnet -ErrorAction SilentlyContinue).Source
         if (-not $dotnet) {
             $dotnet = Join-Path $env:ProgramFiles 'dotnet\dotnet.exe'
@@ -159,14 +164,19 @@ if (-not $wix) {
         if (-not (Test-Path $dotnet)) {
             throw '(wix): expected the WiX toolset or the .NET SDK to install it with | received: neither'
         }
+        # A tool directory without wix.exe is a broken install: an interrupted
+        # one, or one restored from the CI cache, which strips the top-level
+        # files of every directory under target\. dotnet refuses to install
+        # over what is left, so it goes first, as does another version.
+        if (Test-Path $tools) {
+            Remove-Item -Recurse -Force $tools
+        }
         & $dotnet tool install wix --version $wixVersion --tool-path $tools
         if ($LASTEXITCODE -ne 0) {
             throw "(wix): expected dotnet to install WiX $wixVersion | received: exit code $LASTEXITCODE"
         }
     }
 }
-# WiX 5 was built for .NET 6; it runs on whichever newer runtime is there.
-$env:DOTNET_ROLL_FORWARD = 'Major'
 $found = (& $wix --version).Split('+')[0]
 if ($found -ne $wixVersion) {
     throw "(wix): expected version $wixVersion | received: $found from $wix"
