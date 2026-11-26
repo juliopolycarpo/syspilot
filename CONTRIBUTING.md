@@ -111,7 +111,8 @@ To revert a PR, title the revert `revert: …` rather than keeping GitHub's
    commit: git-cliff lists any other commit on the branch, and the squash
    merge removes it again, so the tag's check would fail.
 2. After the squash merge, tag the merge commit: `git tag -s vX.Y.Z -m
-   "SysPilot X.Y.Z"` and push the tag.
+   "SysPilot X.Y.Z"` and push the tag. Only `vX.Y.Z` tags start a release;
+   there are no pre-releases.
 3. The tag runs the release workflow. It stops if `CHANGELOG.md` is not what
    git-cliff writes for the tag. Otherwise it builds and tests the package and
    creates a draft release whose notes are the new changelog section. Edit the

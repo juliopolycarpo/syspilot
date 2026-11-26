@@ -4,9 +4,13 @@ name: Release
 # release. The draft is not offered to anyone: a maintainer signs the package
 # with the release key, which is not in this repository or its secrets, and
 # publishes it (scripts/sign-release.ps1 -Tag v0.2.0 -Publish).
+#
+# Only vX.Y.Z tags: SysPilot has no pre-releases, and cliff.toml's tag_pattern
+# would not see a tag such as v0.4.0-rc.1, so its changelog check could never
+# pass. Widen both together if that changes.
 on:
   push:
-    tags: ['v*']
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
 
 permissions:
   contents: write

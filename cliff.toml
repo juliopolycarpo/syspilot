@@ -66,6 +66,7 @@ commit_parsers = [
     # Keeps every commit in play, so that require_conventional sees it.
     { message = ".*", group = "<!-- 9 -->Other" },
 ]
+# Matches the tags that start the release workflow (release.yml).
 tag_pattern = "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
 topo_order = false
 topo_order_commits = true
