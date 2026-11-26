@@ -1583,6 +1583,7 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
             fan_control: true,
             fans: FanStatus { availability, board: "Fake board".into(), channels: Vec::new() },
             update: UpdateStatus::default(),
+            tuning: Default::default(),
             problems: Vec::new(),
         }
     }

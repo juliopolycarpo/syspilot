@@ -186,8 +186,6 @@ macro_rules! typed_requests {
 }
 
 typed_requests! {
-    /// Service health and capabilities.
-    status() => Request::Status, Status -> crate::message::ServiceStatus;
     /// The tweak catalog.
     catalog() => Request::Catalog, Catalog -> crate::catalog::Catalog;
     /// State of every tweak and custom action.
@@ -203,6 +201,15 @@ typed_requests! {
 }
 
 impl<S: Read + Write> Client<S> {
+    /// Service health and capabilities.
+    pub fn status(&mut self) -> Result<crate::message::ServiceStatus, ClientError> {
+        // Not one of the generated helpers: this response comes boxed.
+        match self.request(&Request::Status)? {
+            Response::Status(status) => Ok(*status),
+            _ => Err(ClientError::UnexpectedResponse { expected: "Status" }),
+        }
+    }
+
     /// Sends a request whose only successful answer is [`Response::Ok`].
     pub fn command(&mut self, request: &Request) -> Result<(), ClientError> {
         match self.request(request)? {

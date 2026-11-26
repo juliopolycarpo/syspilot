@@ -321,7 +321,7 @@ impl<S: StateStore + Clone + 'static> Host<S> {
         let response = match request {
             Request::CheckForUpdate => self.update_on_request(false),
             Request::InstallUpdate => self.update_on_request(true),
-            Request::Status => Response::Status(self.status()),
+            Request::Status => Response::Status(Box::new(self.status())),
             Request::Sensors => Response::Sensors(self.sensor_list()),
             Request::SystemInfo => Response::SystemInfo(self.parts.hardware.system_info()),
             Request::Hello { .. } | Request::Subscribe { .. } => {
@@ -386,6 +386,7 @@ impl<S: StateStore + Clone + 'static> Host<S> {
             fan_control: self.core.fan_control(),
             fans,
             update: self.updates.status(),
+            tuning: Default::default(),
             problems,
         }
     }

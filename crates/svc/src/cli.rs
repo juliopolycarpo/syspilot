@@ -766,6 +766,7 @@ mod tests {
             fan_control: false,
             fans: Default::default(),
             update: UpdateStatus::default(),
+            tuning: Default::default(),
             problems: vec!["Settings could not be saved to disk: disk full".into()],
         }
     }

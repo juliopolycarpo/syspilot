@@ -11,6 +11,7 @@
 //! - [`win`]: the Win32 plumbing underneath.
 //! - [`worker`]: what the service and its sensor worker exchange.
 //! - [`update`]: what the service and its updater exchange.
+//! - [`tuning`]: hardware tuning, and what the service and its tuner exchange.
 //!
 //! The wire format is described in `docs/protocol.md`.
 
@@ -24,6 +25,7 @@ pub mod message;
 pub mod product;
 pub mod profile;
 pub mod sensor;
+pub mod tuning;
 pub mod update;
 pub mod win;
 pub mod worker;
