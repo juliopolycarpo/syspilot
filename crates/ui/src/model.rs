@@ -1226,12 +1226,28 @@ pub fn tuning_values(
         .collect()
 }
 
-/// Whether `values` move a clock or a voltage of `device` off its default.
-pub fn tuning_values_are_risky(device: &TuningDevice, values: &BTreeMap<String, i32>) -> bool {
-    device
-        .controls
-        .iter()
-        .any(|control| tuning_kind_is_risky(control.kind) && values.contains_key(&control.key))
+/// The first device where `settings`, once in effect, put a clock or a
+/// voltage of the user's into effect that the device does not hold now.
+///
+/// That is the one case the app asks about. A value the device already
+/// holds asks nothing: it was agreed to when it was saved. Nor does the
+/// driver's own default, which is no value of the user's. Limits never ask.
+pub fn tuning_risky_device<'a>(
+    devices: &'a [TuningDevice],
+    settings: &[TuningSetting],
+) -> Option<&'a TuningDevice> {
+    devices.iter().find(|device| {
+        let Some(setting) = settings.iter().find(|setting| setting.device == device.key) else {
+            return false;
+        };
+        setting.enabled
+            && device.controls.iter().any(|control| {
+                let value = control.value_in(&setting.values);
+                tuning_kind_is_risky(control.kind)
+                    && value != control.current
+                    && value != control.default
+            })
+    })
 }
 
 /// The settings to send when `device` gets `values` and is turned on or
@@ -1289,6 +1305,19 @@ pub fn tuning_settings_after(action: &TuningAction, saved: &[TuningSetting]) -> 
         }
         TuningAction::ApplyAgain => saved.to_vec(),
     }
+}
+
+/// The device to name in the question that comes before `action`, if there
+/// is one. The settings `action` puts into effect are judged as a whole, not
+/// only the device the user clicked: the service lifts the hold it puts on
+/// every device after an abnormal stop whenever any request arrives, so a
+/// request about one device can set the clock of another.
+pub fn tuning_question<'a>(
+    action: &TuningAction,
+    devices: &'a [TuningDevice],
+    saved: &[TuningSetting],
+) -> Option<&'a TuningDevice> {
+    tuning_risky_device(devices, &tuning_settings_after(action, saved))
 }
 
 /// The request that does `action`, made from the profile's `saved` settings
@@ -2032,19 +2061,16 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
     }
 
     #[test]
-    fn only_values_off_their_default_are_saved_and_clocks_and_voltages_are_the_risky_ones() {
+    fn only_values_off_their_default_are_saved() {
         let mut card = tuning_card();
         assert!(tuning_values(&card, None).is_empty());
         card.controls[0].wanted = Some(-20);
-        let limit_only = tuning_values(&card, None);
-        assert_eq!(limit_only, draft(&[("power-limit", -20)]));
-        assert!(!tuning_values_are_risky(&card, &limit_only));
+        assert_eq!(tuning_values(&card, None), draft(&[("power-limit", -20)]));
 
         // A draft back at the default takes the value out again.
         let entered = draft(&[("power-limit", 0), ("core-p7-voltage", 1000)]);
         let values = tuning_values(&card, Some(&entered));
         assert_eq!(values, draft(&[("core-p7-voltage", 1000)]));
-        assert!(tuning_values_are_risky(&card, &values));
     }
 
     #[test]
@@ -2120,6 +2146,127 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
             saved,
             "(settings): expected the saved ones to stay in effect"
         );
+    }
+
+    /// A card with `key` and `name` whose voltage of state 7 is saved as
+    /// `wanted` and is `now` in effect. The state is what the service would
+    /// say for that.
+    fn card_at(
+        key: &str,
+        name: &str,
+        state: TuningState,
+        wanted: Option<i32>,
+        now: i32,
+    ) -> TuningDevice {
+        let mut card = tuning_card();
+        card.key = key.into();
+        card.name = name.into();
+        card.enabled = wanted.is_some();
+        card.state = state;
+        let voltage = card.controls.iter_mut().find(|control| control.key == "core-p7-voltage");
+        let voltage = voltage.expect("the test card has a voltage in state 7");
+        (voltage.wanted, voltage.current) = (wanted, now);
+        card
+    }
+
+    /// The voltage of `card_at`'s card, saved in the profile.
+    fn saved_voltage(key: &str, mv: i32) -> TuningSetting {
+        setting(key, true, &[("core-p7-voltage", mv)])
+    }
+
+    /// The name the question about `action` is about, if it asks one.
+    fn question<'a>(
+        action: &TuningAction,
+        devices: &'a [TuningDevice],
+        saved: &[TuningSetting],
+    ) -> Option<&'a str> {
+        tuning_question(action, devices, saved).map(|device| device.name.as_str())
+    }
+
+    #[test]
+    fn a_request_asks_about_a_held_voltage_whichever_device_the_user_clicked() {
+        // Held back since an abnormal stop: its voltage is saved, the device
+        // still holds the default. Any request lifts the hold.
+        let held = card_at("gpu.held", "RX 550", TuningState::Held, Some(1000), 1050);
+        let other = card_at("gpu.other", "RX 580", TuningState::Unmanaged, None, 1050);
+        let devices = [other, held];
+        let saved = [saved_voltage("gpu.held", 1000)];
+        let limit_only = draft(&[("power-limit", -20)]);
+
+        let actions = [
+            TuningAction::Remove { device: "gpu.other".into() },
+            TuningAction::Save { device: "gpu.other".into(), enabled: true, values: limit_only },
+            TuningAction::ApplyAgain,
+        ];
+        for action in actions {
+            let asked = question(&action, &devices, &saved);
+            assert_eq!(
+                asked,
+                Some("RX 550"),
+                "(question): expected one naming the held RX 550 for {action:?} | received: {asked:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_voltage_in_effect_asks_nothing_and_neither_does_a_limit() {
+        let applied = card_at("gpu.card", "RX 550", TuningState::Applied, Some(1000), 1000);
+        let devices = [applied];
+        let saved = [saved_voltage("gpu.card", 1000)];
+        // A limit edited on a card whose saved voltage is already in effect.
+        let edit = TuningAction::Save {
+            device: "gpu.card".into(),
+            enabled: true,
+            values: draft(&[("power-limit", -20), ("core-p7-voltage", 1000)]),
+        };
+        let asked = question(&edit, &devices, &saved);
+        assert_eq!(asked, None, "(question): expected none for a limit edit | received: {asked:?}");
+        assert_eq!(question(&TuningAction::ApplyAgain, &devices, &saved), None);
+
+        // Back to the driver's default is no voltage of the user's.
+        let restore =
+            TuningAction::Save { device: "gpu.card".into(), enabled: true, values: draft(&[]) };
+        let asked = question(&restore, &devices, &saved);
+        assert_eq!(asked, None, "(question): expected none for the default | received: {asked:?}");
+    }
+
+    #[test]
+    fn turning_on_a_device_with_a_saved_voltage_asks_and_turning_it_off_does_not() {
+        let off = card_at("gpu.card", "RX 550", TuningState::Unmanaged, None, 1050);
+        let devices = [off];
+        // Saved earlier, off since: the device holds the default.
+        let saved = [setting("gpu.card", false, &[("core-p7-voltage", 1000)])];
+        let values = draft(&[("core-p7-voltage", 1000)]);
+        let on = TuningAction::Save { device: "gpu.card".into(), enabled: true, values };
+        let asked = question(&on, &devices, &saved);
+        assert_eq!(
+            asked,
+            Some("RX 550"),
+            "(question): expected one naming RX 550 for {on:?} | received: {asked:?}"
+        );
+
+        let values = draft(&[("core-p7-voltage", 1000)]);
+        let turn_off = TuningAction::Save { device: "gpu.card".into(), enabled: false, values };
+        assert_eq!(question(&turn_off, &devices, &saved), None);
+    }
+
+    #[test]
+    fn the_first_risky_device_is_named_and_a_device_that_is_not_there_is_never_risky() {
+        let first = card_at("gpu.a", "RX 550", TuningState::Different, Some(1000), 1050);
+        let second = card_at("gpu.b", "RX 580", TuningState::Different, Some(900), 1050);
+        let gone = TuningDevice::missing(&saved_voltage("gpu.gone", 1000));
+        let devices = [gone, first, second];
+        let saved = [
+            saved_voltage("gpu.b", 900),
+            saved_voltage("gpu.gone", 1000),
+            saved_voltage("gpu.a", 1000),
+        ];
+        let risky = tuning_risky_device(&devices, &saved).map(|device| device.name.as_str());
+        assert_eq!(risky, Some("RX 550"), "(risky device): expected the first in the list");
+
+        let only_gone = [TuningDevice::missing(&saved_voltage("gpu.gone", 1000))];
+        assert_eq!(tuning_risky_device(&only_gone, &saved), None);
+        assert_eq!(tuning_risky_device(&devices, &[]), None, "no setting, nothing set");
     }
 
     #[test]

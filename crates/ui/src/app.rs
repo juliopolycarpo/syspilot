@@ -559,10 +559,14 @@ impl App {
         }
     }
 
+    /// The devices the service last reported.
+    fn tuning_devices(&self) -> &[TuningDevice] {
+        self.snapshot.status.as_ref().map_or(&[][..], |status| &status.tuning.devices)
+    }
+
     /// The device with this key, as the service last reported it.
     fn tuning_device(&self, key: &str) -> Option<&TuningDevice> {
-        let status = self.snapshot.status.as_ref()?;
-        status.tuning.devices.iter().find(|device| device.key == key)
+        self.tuning_devices().iter().find(|device| device.key == key)
     }
 
     /// Where a device's tuning switch should stand: the user's choice while
@@ -585,21 +589,14 @@ impl App {
     }
 
     /// Does what the user asked of the tuning: sends it, after asking when
-    /// that puts a clock or a voltage of the user's into effect.
+    /// that puts a clock or a voltage of the user's into effect on any
+    /// device, not only the one the user clicked.
     fn start_tuning(&mut self, action: TuningAction, context: &ComponentContext<Self>) {
         if !self.can_change() {
             return;
         }
-        let risky = match &action {
-            TuningAction::Save { device, enabled: true, values } => self
-                .tuning_device(device)
-                .filter(|found| model::tuning_values_are_risky(found, values))
-                .map(|found| found.name.clone()),
-            TuningAction::Save { .. } | TuningAction::Remove { .. } | TuningAction::ApplyAgain => {
-                None
-            }
-        };
-        match risky {
+        let asked = model::tuning_question(&action, self.tuning_devices(), self.saved_tuning());
+        match asked.map(|device| device.name.clone()) {
             Some(name) => self.dialog = Some(Dialog::Tuning { name, action }),
             None => self.send_tuning(action, context),
         }
