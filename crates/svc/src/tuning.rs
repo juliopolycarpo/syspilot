@@ -725,6 +725,20 @@ mod tests {
         }
     }
 
+    /// Asserts whether `mark` is there. `when` says at which point of the
+    /// test, so that a failure reads without the source at hand.
+    #[track_caller]
+    fn assert_mark_is(mark: &dyn ApplyMark, expected: bool, when: &str) {
+        let word = |set: bool| if set { "set" } else { "cleared" };
+        let received = mark.is_set();
+        assert!(
+            received == expected,
+            "(mark {when}): expected {} | received: {}",
+            word(expected),
+            word(received)
+        );
+    }
+
     struct Fixture {
         tuner: FakeTuner,
         mark: FakeApplyMark,
@@ -767,17 +781,34 @@ mod tests {
             })
         }
 
+        #[track_caller]
+        fn assert_mark(&self, expected: bool, when: &str) {
+            assert_mark_is(&self.mark, expected, when);
+        }
+
         fn current(&self, key: &str) -> i32 {
             let device = self.device();
-            device.controls.iter().find(|control| control.key == key).unwrap().current
+            let found = device.controls.iter().find(|control| control.key == key);
+            match found {
+                Some(control) => control.current,
+                None => {
+                    let keys: Vec<_> = device.controls.iter().map(|c| c.key.as_str()).collect();
+                    panic!("(tuning status): expected a control {key} | received: {keys:?}")
+                }
+            }
         }
 
         /// What another tool does: writes its own value behind our back.
         fn overwrite(&self, key: &str, value: i32) {
             let mut state = self.tuner.state();
-            let control =
-                state.backend.devices[0].controls.iter_mut().find(|control| control.key == key);
-            control.unwrap().current = value;
+            let controls = &mut state.backend.devices[0].controls;
+            match controls.iter_mut().find(|control| control.key == key) {
+                Some(control) => control.current = value,
+                None => {
+                    let keys: Vec<_> = controls.iter().map(|c| c.key.as_str()).collect();
+                    panic!("(fake device): expected a control {key} | received: {keys:?}")
+                }
+            }
         }
 
         fn kinds_of_jobs(&self) -> Vec<&'static str> {
@@ -818,12 +849,13 @@ mod tests {
         assert_eq!(fixture.current("power-limit"), -20);
         // The report of the apply already shows the values in place.
         assert_eq!(fixture.device().state, TuningState::Applied);
-        assert!(fixture.mark.is_set(), "the mark stays until the machine is seen alive");
+        // It stays until the machine is seen alive.
+        fixture.assert_mark(true, "right after the apply");
 
         fixture.pass(45);
-        assert!(fixture.mark.is_set(), "45 s is not yet the survival period");
+        fixture.assert_mark(true, "45 s after the apply, short of the survival period");
         fixture.pass(15);
-        assert!(!fixture.mark.is_set(), "alive a minute after the apply");
+        fixture.assert_mark(false, "60 s after the apply");
         fixture.pass(120);
         assert_eq!(fixture.kinds_of_jobs(), ["look", "apply", "look", "look", "look"]);
         assert_eq!(fixture.tuning.next_wake(fixture.now), None, "the round is over");
@@ -884,7 +916,8 @@ mod tests {
         assert_eq!(fixture.device().state, TuningState::Held);
         assert_eq!(fixture.current("core-p7-voltage"), 1050);
         fixture.tuning.stopping();
-        assert!(fixture.mark.is_set(), "stopping does not forget what the last start found");
+        // Stopping does not forget what the last start found.
+        fixture.assert_mark(true, "after a stop that follows a held start");
 
         fixture.tuning.apply_again(fixture.now);
         fixture.pass(0);
@@ -903,16 +936,17 @@ mod tests {
         assert_eq!(fixture.current("core-p7-voltage"), 1000);
 
         let idle = Fixture::with_mark(Vec::new(), FakeApplyMark::left_behind());
-        assert!(!idle.mark.is_set());
+        idle.assert_mark(false, "found at a start with no settings");
         let off = TuningSetting { enabled: false, ..setting(&[("power-limit", -20)]) };
-        assert!(!Fixture::with_mark(vec![off], FakeApplyMark::left_behind()).mark.is_set());
+        let switched_off = Fixture::with_mark(vec![off], FakeApplyMark::left_behind());
+        switched_off.assert_mark(false, "found at a start with every setting off");
     }
 
     #[test]
     fn asking_again_or_saving_keeps_the_mark_of_values_not_yet_survived() {
         let mut fixture = Fixture::new(vec![setting(&[("core-p7-voltage", 800)])]);
         fixture.pass(0);
-        assert!(fixture.mark.is_set());
+        fixture.assert_mark(true, "right after the apply");
         // Ten seconds in, the user asks again and saves the same values:
         // nothing is applied, and the machine has still not survived them.
         fixture.pass(10);
@@ -921,12 +955,9 @@ mod tests {
         fixture.tuning.set_settings(vec![setting(&[("core-p7-voltage", 800)])], fixture.now);
         fixture.pass(0);
         assert_eq!(fixture.kinds_of_jobs().iter().filter(|kind| **kind == "apply").count(), 1);
-        assert!(
-            fixture.mark.is_set(),
-            "(mark 10 s after an apply): expected it kept | received: it cleared"
-        );
+        fixture.assert_mark(true, "10 s after an apply, with a trigger and a save since");
         fixture.pass(50);
-        assert!(!fixture.mark.is_set(), "alive a minute after the apply");
+        fixture.assert_mark(false, "60 s after the apply");
     }
 
     #[test]
@@ -939,11 +970,11 @@ mod tests {
         // The tuner hangs in the apply and is ended: what it wrote is unknown.
         let hung = "(tuner): expected its report within 15 s | received: nothing";
         fixture.tuning.finished(Err(hung.into()), fixture.now);
-        assert!(fixture.mark.is_set());
+        fixture.assert_mark(true, "right after the apply that failed");
         assert_eq!(fixture.tuning.status().problem.as_deref(), Some(hung));
 
         fixture.pass(60);
-        assert!(!fixture.mark.is_set(), "(mark after a later look): expected it cleared");
+        fixture.assert_mark(false, "at a look 60 s after the apply that failed");
         assert_eq!(fixture.device().state, TuningState::Failed { reason: hung.into() });
         fixture.pass(120);
         assert_eq!(fixture.kinds_of_jobs().iter().filter(|kind| **kind == "apply").count(), 1);
@@ -953,9 +984,9 @@ mod tests {
     fn an_orderly_stop_takes_the_mark_away() {
         let mut fixture = Fixture::new(vec![setting(&[("power-limit", -20)])]);
         fixture.pass(0);
-        assert!(fixture.mark.is_set());
+        fixture.assert_mark(true, "right after the apply");
         fixture.tuning.stopping();
-        assert!(!fixture.mark.is_set());
+        fixture.assert_mark(false, "after an orderly stop");
     }
 
     #[test]
@@ -1035,7 +1066,10 @@ mod tests {
         fixture.tuning.refresh_if_stale(fixture.now, 1);
         fixture.pass(0);
         let status = fixture.tuning.status();
-        let second = status.devices.iter().find(|device| device.key == OTHER).unwrap();
+        let second =
+            status.devices.iter().find(|device| device.key == OTHER).unwrap_or_else(|| {
+                panic!("(tuning status): expected the device {OTHER} | received: none")
+            });
         assert_eq!(
             (second.controls[0].current, &second.state),
             (10, &TuningState::Applied),
@@ -1051,10 +1085,7 @@ mod tests {
         fixture.tuning.finished(look, fixture.now);
         assert_eq!(fixture.kinds_of_jobs(), ["look", "apply"], "the apply is under way");
         fixture.tuning.stopping();
-        assert!(
-            fixture.mark.is_set(),
-            "(mark at a stop during an apply): expected it kept | received: it cleared"
-        );
+        fixture.assert_mark(true, "after a stop during an apply");
     }
 
     #[test]
@@ -1187,13 +1218,16 @@ mod tests {
             std::env::temp_dir().join(format!("SysPilot-Test-tuning-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
         let mut mark = FileApplyMark::in_directory(directory.clone());
-        assert!(!mark.is_set());
+        assert_mark_is(&mark, false, "in a directory that has none");
         mark.set();
-        assert!(mark.is_set() && directory.join(APPLY_MARK_FILE).is_file());
-        assert!(FileApplyMark::in_directory(directory.clone()).is_set(), "it outlives its maker");
+        assert_mark_is(&mark, true, "after being set");
+        let file = directory.join(APPLY_MARK_FILE);
+        assert!(file.is_file(), "(mark file): expected {file:?} to exist | received: nothing");
+        let reader = FileApplyMark::in_directory(directory.clone());
+        assert_mark_is(&reader, true, "seen by another handle, as after a restart");
         mark.clear();
         mark.clear();
-        assert!(!mark.is_set());
+        assert_mark_is(&mark, false, "after being cleared twice");
         std::fs::remove_dir_all(&directory).unwrap();
     }
 

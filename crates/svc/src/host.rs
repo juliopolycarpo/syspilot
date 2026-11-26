@@ -831,6 +831,21 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
         panic!("expected the event {wanted:?} | received: 50 other events");
     }
 
+    /// Reads a value every 20 ms, for two seconds at most, until `reached`
+    /// accepts it. Returns the last value read, so that a test can name it
+    /// when it was never reached.
+    fn settled<T>(mut read: impl FnMut() -> T, reached: impl Fn(&T) -> bool) -> T {
+        let mut value = read();
+        for _ in 0..100 {
+            if reached(&value) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            value = read();
+        }
+        value
+    }
+
     fn enable_scratch(client: &mut Client) {
         client.command(&Request::SetTweak { id: "other.scratch".into(), enabled: true }).unwrap();
     }
@@ -1005,11 +1020,15 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
         client.command(&Request::SetTuning(vec![power_limit(-20)])).unwrap();
         wait_for(&mut events, ClientEvent::ProfileChanged);
         // The look and the apply each end in an event of their own.
-        let applied = (0..100).any(|_| {
-            std::thread::sleep(Duration::from_millis(20));
-            client.status().unwrap().tuning.devices[0].state == TuningState::Applied
-        });
-        assert!(applied, "(tuning): expected the setting applied | received: something else");
+        let state = settled(
+            || client.status().unwrap().tuning.devices[0].state.clone(),
+            |state| *state == TuningState::Applied,
+        );
+        assert_eq!(
+            state,
+            TuningState::Applied,
+            "(tuning state within 2 s): expected Applied | received: {state:?}"
+        );
         wait_for(&mut events, ClientEvent::StatusChanged);
         let status = client.status().unwrap();
         let control = &status.tuning.devices[0].controls[0];
@@ -1019,11 +1038,14 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
         // Turned off: the driver's default comes back.
         let off = TuningSetting { enabled: false, ..power_limit(-20) };
         client.command(&Request::SetTuning(vec![off])).unwrap();
-        let reset = (0..100).any(|_| {
-            std::thread::sleep(Duration::from_millis(20));
-            client.status().unwrap().tuning.devices[0].controls[0].current == 0
-        });
-        assert!(reset, "(tuning): expected the default back | received: the setting still there");
+        let current = settled(
+            || client.status().unwrap().tuning.devices[0].controls[0].current,
+            |current| *current == 0,
+        );
+        assert_eq!(
+            current, 0,
+            "(power-limit within 2 s of turning off): expected 0 | received: {current}"
+        );
     }
 
     #[test]
@@ -1060,11 +1082,14 @@ registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Host', name = "Val
         // Something else writes its own value; the user asks for theirs.
         host.tuner.state().backend.devices[0].controls[0].current = 5;
         client.command(&Request::ApplyTuning).unwrap();
-        let back = (0..100).any(|_| {
-            std::thread::sleep(Duration::from_millis(20));
-            host.tuner.state().backend.devices[0].controls[0].current == -20
-        });
-        assert!(back, "(tuning): expected -20 % applied again | received: the other value kept");
+        let current = settled(
+            || host.tuner.state().backend.devices[0].controls[0].current,
+            |current| *current == -20,
+        );
+        assert_eq!(
+            current, -20,
+            "(power-limit within 2 s of asking again): expected -20 | received: {current}"
+        );
     }
 
     #[test]
