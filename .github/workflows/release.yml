@@ -57,7 +57,8 @@ jobs:
           $newestDate = [regex] '(?m)^(## \[.+\]\(.+\)) - \d{4}-\d{2}-\d{2}$'
           $expected = $newestDate.Replace((Get-Content -Raw $env:RUNNER_TEMP/CHANGELOG.md), '$1', 1)
           $committed = $newestDate.Replace((Get-Content -Raw CHANGELOG.md), '$1', 1)
-          if ($committed -ne $expected) {
+          # -cne: PowerShell's -ne ignores case, which would pass a stale file.
+          if ($committed -cne $expected) {
             git diff --no-index CHANGELOG.md $env:RUNNER_TEMP/CHANGELOG.md
             throw "(CHANGELOG.md): expected the output of git cliff at $env:GITHUB_REF_NAME | received: a different file. Delete the tag, regenerate the file in a release PR (git cliff --tag $env:GITHUB_REF_NAME -o CHANGELOG.md) and tag again."
           }
