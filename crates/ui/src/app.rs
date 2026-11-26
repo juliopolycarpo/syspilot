@@ -226,6 +226,9 @@ pub enum Message {
     Reapply(String),
     /// A request finished. The ID is the entry whose switch was waiting.
     Sent(Option<String>, Result<(), Failure>),
+    /// A request for a device's tuning finished: the name of its switch, the
+    /// draft the request was made from, and the outcome.
+    TuningSent(String, BTreeMap<String, i32>, Result<(), Failure>),
     /// The open dialog was answered.
     Answered(ContentDialogResult),
     /// The message banner was closed.
@@ -343,9 +346,6 @@ pub struct App {
     pub details_open: HashSet<String>,
     /// Tuning values entered and not saved.
     pub tuning_drafts: TuningDrafts,
-    /// The draft of a device as its last save sent it, until the service
-    /// answers: the entries to forget once that save went through.
-    tuning_sent: HashMap<String, BTreeMap<String, i32>>,
     /// Whether the navigation pane is open, once the view has said so.
     pane_open: Option<bool>,
 }
@@ -465,6 +465,41 @@ impl App {
     fn send(&mut self, entry: Option<String>, request: Request, context: &ComponentContext<Self>) {
         let backend = Arc::clone(&self.backend);
         _ = context.spawn_background(move |_| Message::Sent(entry, backend.send(&request)));
+    }
+
+    /// Like [`Self::send`] for a request under a device's switch, with the
+    /// draft it was made from. The copy travels with the answer, so that each
+    /// answer forgets what its own request saved: with two requests under
+    /// way, a shared slot would hand one answer the other's copy.
+    fn send_with_draft(
+        &mut self,
+        entry: String,
+        draft: BTreeMap<String, i32>,
+        request: Request,
+        context: &ComponentContext<Self>,
+    ) {
+        let backend = Arc::clone(&self.backend);
+        _ = context
+            .spawn_background(move |_| Message::TuningSent(entry, draft, backend.send(&request)));
+    }
+
+    /// A request finished.
+    fn request_done(
+        &mut self,
+        entry: Option<String>,
+        result: Result<(), Failure>,
+        context: &ComponentContext<Self>,
+    ) {
+        match (&result, entry) {
+            // The service has it; the next load shows the outcome.
+            (Ok(()), Some(id)) => self.settled.push(id),
+            (Err(_), Some(id)) => _ = self.pending.remove(&id),
+            (_, None) => {}
+        }
+        if let Err(failure) = result {
+            self.fail(failure);
+        }
+        self.load(context);
     }
 
     fn go(&mut self, page: Page) {
@@ -610,30 +645,18 @@ impl App {
     /// Sends `action`, made into a request from the settings as they are now.
     fn send_tuning(&mut self, action: TuningAction, context: &ComponentContext<Self>) {
         let request = model::tuning_request(&action, self.tuning_devices(), self.saved_tuning());
-        // A save and a flipped switch wait on the device's switch; the
-        // answer comes under its name, together with the draft that went
-        // with the request (the draft may have changed by then). A switch
-        // sends no draft, so it clears none.
-        let sent = match &action {
-            TuningAction::Save { device, draft, .. } => Some((device, draft.clone())),
-            TuningAction::Switch { device, .. } => Some((device, BTreeMap::new())),
-            TuningAction::Remove { .. } | TuningAction::ApplyAgain => None,
-        };
-        let entry = sent.map(|(device, draft)| {
-            self.tuning_sent.insert(device.clone(), draft);
-            tuning_switch(device)
-        });
-        self.send(entry, request, context);
-    }
-
-    /// A request sent under the name `entry` was answered. When it saved a
-    /// device, what the user had entered for it is no longer a draft, except
-    /// for what was entered after the send.
-    fn tuning_answered(&mut self, entry: &str, saved: bool) {
-        let Some(device) = tuning_switch_device(entry) else { return };
-        let Some(sent) = self.tuning_sent.remove(device) else { return };
-        if saved {
-            model::tuning_drafts_after_save(&mut self.tuning_drafts, device, &sent);
+        // A save and a flipped switch wait on the device's switch. A switch
+        // sends no draft, so its answer forgets none.
+        match action {
+            TuningAction::Save { device, draft, .. } => {
+                self.send_with_draft(tuning_switch(&device), draft, request, context);
+            }
+            TuningAction::Switch { device, .. } => {
+                self.send_with_draft(tuning_switch(&device), BTreeMap::new(), request, context);
+            }
+            TuningAction::Remove { .. } | TuningAction::ApplyAgain => {
+                self.send(None, request, context);
+            }
         }
     }
 
@@ -747,7 +770,6 @@ impl Component for App {
             unfolded: HashSet::new(),
             details_open: HashSet::new(),
             tuning_drafts: TuningDrafts::new(),
-            tuning_sent: HashMap::new(),
             pane_open: None,
         };
         app.go(Page::Home);
@@ -788,23 +810,14 @@ impl Component for App {
             Message::Toggle(id, on) => self.toggle_tweak(id, on, context),
             Message::ToggleCustom(id, on) => self.toggle_custom(id, on, context),
             Message::Reapply(id) => self.send(None, Request::Reapply { id }, context),
-            Message::Sent(entry, result) => {
-                match (&result, entry) {
-                    // The service has it; the next load shows the outcome.
-                    (Ok(()), Some(id)) => {
-                        self.tuning_answered(&id, true);
-                        self.settled.push(id);
-                    }
-                    (Err(_), Some(id)) => {
-                        self.tuning_answered(&id, false);
-                        _ = self.pending.remove(&id);
-                    }
-                    (_, None) => {}
+            Message::Sent(entry, result) => self.request_done(entry, result, context),
+            Message::TuningSent(entry, sent, result) => {
+                // What the service now has is no longer a draft. What was
+                // entered after the request went out still is.
+                if let (Ok(()), Some(device)) = (&result, tuning_switch_device(&entry)) {
+                    model::tuning_drafts_after_save(&mut self.tuning_drafts, device, &sent);
                 }
-                if let Err(failure) = result {
-                    self.fail(failure);
-                }
-                self.load(context);
+                self.request_done(Some(entry), result, context);
             }
             Message::Answered(result) => self.answer(result, context),
             Message::DismissNotice => self.notice = None,
