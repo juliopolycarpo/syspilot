@@ -20,7 +20,11 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
+      # The whole history and its tags: git-cliff reads them to write the
+      # changelog.
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - name: Install the toolchain
         run: rustup show active-toolchain
@@ -35,6 +39,36 @@ jobs:
           if ("v$version" -ne $env:GITHUB_REF_NAME) {
             throw "(tag): expected v$version, the version in Cargo.toml | received: $env:GITHUB_REF_NAME"
           }
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff@2.14.2
+
+      # The release PR writes CHANGELOG.md with `git cliff --tag`, which dates
+      # the new release on the day it ran. Here the release is dated by its
+      # squash commit, which may be a later day, so the newest release's date
+      # is left out of the comparison. Anything else that differs means the
+      # file is stale.
+      - name: Check that CHANGELOG.md is up to date
+        shell: pwsh
+        run: |
+          git cliff --output $env:RUNNER_TEMP/CHANGELOG.md
+          if ($LASTEXITCODE -ne 0) { throw "(git cliff): expected exit code 0 | received: $LASTEXITCODE" }
+          $newestDate = [regex] '(?m)^(## \[.+\]\(.+\)) - \d{4}-\d{2}-\d{2}$'
+          $expected = $newestDate.Replace((Get-Content -Raw $env:RUNNER_TEMP/CHANGELOG.md), '$1', 1)
+          $committed = $newestDate.Replace((Get-Content -Raw CHANGELOG.md), '$1', 1)
+          if ($committed -ne $expected) {
+            git diff --no-index CHANGELOG.md $env:RUNNER_TEMP/CHANGELOG.md
+            throw "(CHANGELOG.md): expected the output of git cliff at $env:GITHUB_REF_NAME | received: a different file. Delete the tag, regenerate the file in a release PR (git cliff --tag $env:GITHUB_REF_NAME -o CHANGELOG.md) and tag again."
+          }
+
+      # The newest release of the changelog, as the draft's notes for the
+      # maintainer to edit before publishing.
+      - name: Write the release notes
+        shell: pwsh
+        run: |
+          git cliff --latest --strip all --output $env:RUNNER_TEMP/release-notes.md
+          if ($LASTEXITCODE -ne 0) { throw "(git cliff): expected exit code 0 | received: $LASTEXITCODE" }
 
       - name: Test
         run: cargo test --workspace --locked
@@ -72,4 +106,4 @@ jobs:
               throw "(release files): expected $file | received: no such file"
             }
           }
-          gh release create $env:GITHUB_REF_NAME @files --draft --verify-tag --generate-notes --title "SysPilot $($env:GITHUB_REF_NAME.TrimStart('v'))"
+          gh release create $env:GITHUB_REF_NAME @files --draft --verify-tag --notes-file $env:RUNNER_TEMP/release-notes.md --title "SysPilot $($env:GITHUB_REF_NAME.TrimStart('v'))"
