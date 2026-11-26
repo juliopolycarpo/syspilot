@@ -26,9 +26,10 @@
 //! and [`FileApplyMark`] are the real things.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
+use std::io::{self, Write};
 use std::os::windows::io::AsRawHandle;
 use std::path::PathBuf;
+use std::process::{Child, ChildStdin, ChildStdout};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -126,8 +127,28 @@ impl ProcessTuner {
 /// Runs one job in the tuner process and waits for its report, at most
 /// [`JOB_TIMEOUT_MS`].
 fn run_tuner_process(job: &TuneJob) -> Outcome {
-    let (mut process, mut input, mut output) = spawn_sibling(TUNER_EXECUTABLE)
-        .map_err(|error| format!("The tuner could not be started: {error}"))?;
+    run_tuner(job, || spawn_sibling(TUNER_EXECUTABLE), JOB_TIMEOUT_MS)
+}
+
+/// What a job that did not end in time reports, with the time it had in
+/// seconds: "15 s" for the real timeout.
+fn timeout_message(timeout_ms: u32) -> String {
+    let seconds = f64::from(timeout_ms) / 1000.0;
+    format!("(tuner): expected its report within {seconds} s | received: nothing")
+}
+
+/// A started child with the ends of its standard input and output.
+type Spawned = (Child, ChildStdin, ChildStdout);
+
+/// [`run_tuner_process`] with the child and the time it gets given, so that
+/// a test can run it against a child that never reports.
+fn run_tuner(
+    job: &TuneJob,
+    spawn: impl FnOnce() -> io::Result<Spawned>,
+    timeout_ms: u32,
+) -> Outcome {
+    let (mut process, mut input, mut output) =
+        spawn().map_err(|error| format!("The tuner could not be started: {error}"))?;
     // Written from a thread of its own, so that a tuner that never takes a
     // job larger than the pipe's buffer still ends at the timeout: ending it
     // fails the write. Dropping the input after the job is what tells the
@@ -143,28 +164,28 @@ fn run_tuner_process(job: &TuneJob) -> Outcome {
     // its output, which ending the tuner does.
     let reader = std::thread::spawn(move || read_frame::<_, TuneReport>(&mut output));
     // SAFETY: the handle is the child's, valid until `process` is dropped.
-    let waited = unsafe { WaitForSingleObject(process.as_raw_handle(), JOB_TIMEOUT_MS) };
-    let in_time = waited == WAIT_OBJECT_0;
-    if !in_time {
-        // A tuner that is still there may be stuck in a driver call.
+    let waited = unsafe { WaitForSingleObject(process.as_raw_handle(), timeout_ms) };
+    if waited != WAIT_OBJECT_0 {
+        // A tuner that is still there may be stuck in a driver call, where
+        // the kill may not take, or not at once. Nothing is waited for
+        // after it: the event loop must hear of the timeout, whatever the
+        // tuner does. The threads end when its pipes close, whenever that
+        // is, and are left alone until then. The timeout comes before what
+        // the writer found: a tuner ended in the middle of a write fails it.
         let _ = process.kill();
+        return Err(timeout_message(timeout_ms));
     }
+    // It has ended: this only collects its exit status, and the threads end
+    // now that the pipes are closed.
     let _ = process.wait();
     let sent = writer.join().unwrap_or_else(|_| Err("the writing thread panicked".to_owned()));
-    let report = reader.join();
-    match (sent, in_time, report) {
-        (Err(error), ..) => Err(format!("(tuner): expected to take its job | received: {error}")),
-        (Ok(()), false, _) => Err(format!(
-            "(tuner): expected its report within {} s | received: nothing",
-            JOB_TIMEOUT_MS / 1000
-        )),
-        (Ok(()), true, Ok(Ok(report))) => Ok(report),
-        (Ok(()), true, Ok(Err(error))) => {
+    match (sent, reader.join()) {
+        (Err(error), _) => Err(format!("(tuner): expected to take its job | received: {error}")),
+        (Ok(()), Ok(Ok(report))) => Ok(report),
+        (Ok(()), Ok(Err(error))) => {
             Err(format!("(tuner): expected its report | received: {error}"))
         }
-        (Ok(()), true, Err(_)) => {
-            Err("(tuner): expected its report | received: nothing".to_owned())
-        }
+        (Ok(()), Err(_)) => Err("(tuner): expected its report | received: nothing".to_owned()),
     }
 }
 
@@ -1169,6 +1190,65 @@ mod tests {
         fixture.tuning.finished(Err("(tuner): hung".into()), fixture.now);
         let failed = TuningState::Failed { reason: "(tuner): hung".into() };
         fixture.assert_state(&failed, "after the failure of the round's own apply");
+    }
+
+    /// A child that neither reads its input nor reports, as a tuner stuck in
+    /// a driver call. `cmd` starts `ping` and ends with the kill, but `ping`
+    /// lives on with the pipes it inherited, so anything that waits for the
+    /// pipes to close waits as long as `ping` runs: about seven seconds.
+    fn spawn_stuck_child() -> io::Result<Spawned> {
+        use std::os::windows::process::CommandExt;
+        use std::process::{Command, Stdio};
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+        let mut process = Command::new("cmd")
+            .args(["/c", "ping", "-n", "8", "127.0.0.1", ">nul"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()?;
+        let streams = process.stdin.take().zip(process.stdout.take());
+        streams
+            .map(|(input, output)| (process, input, output))
+            .ok_or_else(|| io::Error::other("the child has no standard streams"))
+    }
+
+    #[test]
+    fn a_tuner_that_never_reports_is_given_up_on_at_the_timeout_without_waiting_for_it() {
+        // The second job is larger than a pipe's buffer, so that its write is
+        // still under way when the timeout ends the tuner.
+        let large = TuneJob {
+            apply: (0..2000)
+                .map(|n| TuningSetting {
+                    device: format!("gpu.fake-{n}.{}", "x".repeat(40)),
+                    enabled: true,
+                    values: BTreeMap::new(),
+                })
+                .collect(),
+            reset: Vec::new(),
+        };
+        for job in [TuneJob::default(), large] {
+            let started = Instant::now();
+            let outcome = run_tuner(&job, spawn_stuck_child, 300);
+            let took = started.elapsed();
+            assert_eq!(
+                outcome,
+                Err("(tuner): expected its report within 0.3 s | received: nothing".to_owned()),
+                "(outcome for a tuner that never reports)"
+            );
+            assert!(
+                took < Duration::from_secs(3),
+                "(time to give up on a tuner): expected about 0.3 s | received: {took:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_timeout_the_service_runs_with_is_named_in_whole_seconds() {
+        assert_eq!(
+            timeout_message(JOB_TIMEOUT_MS),
+            "(tuner): expected its report within 15 s | received: nothing"
+        );
     }
 
     #[test]
