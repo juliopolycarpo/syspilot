@@ -1117,10 +1117,7 @@ pub fn tuning_value_text(value: i32, unit: TuningUnit) -> String {
 /// The value the page shows for a control: what the user entered, else what
 /// is saved, else the driver's default.
 pub fn tuning_shown_value(control: &TuningControl, draft: Option<&BTreeMap<String, i32>>) -> i32 {
-    draft
-        .and_then(|draft| draft.get(&control.key).copied())
-        .or(control.wanted)
-        .unwrap_or(control.default)
+    draft.and_then(|draft| draft.get(&control.key).copied()).unwrap_or_else(|| control.expected())
 }
 
 /// The line under a control: its range and default, and what the device has
@@ -1271,8 +1268,7 @@ pub fn tuning_draft_after(
     if value == tuning_shown_value(control, draft) {
         return None;
     }
-    let saved = control.wanted.unwrap_or(control.default);
-    Some((value != saved).then_some(value))
+    Some((value != control.expected()).then_some(value))
 }
 
 #[cfg(test)]

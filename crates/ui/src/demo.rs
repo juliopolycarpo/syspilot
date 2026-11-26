@@ -18,8 +18,8 @@ use syspilot_proto::message::{
 use syspilot_proto::profile::{CurvePoint, CustomAction, Profile, UpdateMode};
 use syspilot_proto::sensor::{DeviceClass, DeviceInfo, Sample, SensorInfo, SensorKind, SensorList};
 use syspilot_proto::tuning::{
-    TuningControl, TuningDevice, TuningKind, TuningSetting, TuningState, TuningStatus, TuningUnit,
-    check_values,
+    TunedDevice, TuningControl, TuningDevice, TuningKind, TuningSetting, TuningState, TuningStatus,
+    TuningUnit, check_values,
 };
 
 use crate::backend::{Backend, Change, Failure, Listener};
@@ -582,34 +582,26 @@ fn tuning(scenario: Scenario, settings: &[TuningSetting], held: bool) -> TuningS
     }
     let setting = settings.iter().find(|setting| setting.device == DEMO_CARD);
     let enabled = setting.is_some_and(|setting| setting.enabled);
-    let mut controls = tuning_controls();
-    for control in &mut controls {
-        control.wanted = setting.and_then(|setting| setting.values.get(&control.key).copied());
-        if enabled && !held {
-            control.current = control.wanted.unwrap_or(control.default);
-        }
-    }
-    let mut devices = vec![TuningDevice {
+    let card = TunedDevice {
         key: DEMO_CARD.into(),
         name: "Example Graphics 4070".into(),
         interface: "Example graphics driver".into(),
-        controls,
-        enabled,
-        state: match (enabled, held) {
-            (false, _) => TuningState::Unmanaged,
-            (true, true) => TuningState::Held,
-            (true, false) => TuningState::Applied,
-        },
-    }];
+        controls: tuning_controls(),
+        problem: None,
+    };
+    let state = match (enabled, held) {
+        (false, _) => TuningState::Unmanaged,
+        (true, true) => TuningState::Held,
+        (true, false) => TuningState::Applied,
+    };
+    let mut card = TuningDevice::reported(&card, setting, state);
+    if enabled && !held {
+        for control in &mut card.controls {
+            control.current = control.expected();
+        }
+    }
     let absent = settings.iter().filter(|setting| setting.device != DEMO_CARD);
-    devices.extend(absent.map(|setting| TuningDevice {
-        key: setting.device.clone(),
-        name: setting.device.clone(),
-        interface: String::new(),
-        controls: Vec::new(),
-        enabled: setting.enabled,
-        state: TuningState::Missing,
-    }));
+    let devices = std::iter::once(card).chain(absent.map(TuningDevice::missing)).collect();
     TuningStatus { devices, problem: None }
 }
 

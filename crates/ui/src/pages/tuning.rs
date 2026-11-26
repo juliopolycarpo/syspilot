@@ -21,15 +21,16 @@ const VALUE_BOX: f64 = 150.0;
 /// Width of the column that names a state in a table.
 const STATE_COLUMN: f64 = 72.0;
 
-/// The box one value is entered in. `name` is what a screen reader calls it.
+/// The box one value is entered in, showing `shown`. `name` is what a screen
+/// reader calls it.
 fn value_box(
     app: &App,
     device: &TuningDevice,
     control: &TuningControl,
+    shown: i32,
     name: String,
     context: &ViewContext<App>,
 ) -> NumberBox {
-    let shown = model::tuning_shown_value(control, app.tuning_drafts.get(&device.key));
     let (device_key, control_key) = (device.key.clone(), control.key.clone());
     NumberBox::new()
         .minimum(f64::from(control.min))
@@ -66,6 +67,7 @@ fn limit(
                 app,
                 device,
                 control,
+                shown,
                 format!("{name}, {unit}"),
                 context,
             )),
@@ -88,7 +90,7 @@ fn cell(
         return holder.keyed_children([KeyedView::new("none", widgets::dim("—"))]);
     };
     let shown = model::tuning_shown_value(control, app.tuning_drafts.get(&device.key));
-    let entry = value_box(app, device, control, name, context)
+    let entry = value_box(app, device, control, shown, name, context)
         .horizontal_alignment(HorizontalAlignment::Left);
     let mut parts = vec![KeyedView::new("box", entry)];
     // No line at all when there is nothing to say, so that a table at its

@@ -191,8 +191,16 @@ pub enum Dialog {
 /// The name under which a device's tuning switch waits for the service, in
 /// [`App::pending`].
 pub fn tuning_switch(device: &str) -> String {
-    format!("tuning:{device}")
+    format!("{TUNING_SWITCH_PREFIX}{device}")
 }
+
+/// The device whose tuning switch is named `name`, the inverse of
+/// [`tuning_switch`]; `None` for every other pending name.
+fn tuning_switch_device(name: &str) -> Option<&str> {
+    name.strip_prefix(TUNING_SWITCH_PREFIX)
+}
+
+const TUNING_SWITCH_PREFIX: &str = "tuning:";
 
 /// Everything that can happen to the app.
 #[derive(Clone)]
@@ -735,7 +743,7 @@ impl Component for App {
                     // The service has it; the next load shows the outcome.
                     (Ok(()), Some(id)) => {
                         // What was entered for a device is now what is saved.
-                        if let Some(device) = id.strip_prefix("tuning:") {
+                        if let Some(device) = tuning_switch_device(&id) {
                             self.tuning_drafts.remove(device);
                         }
                         self.settled.push(id);
@@ -1094,10 +1102,11 @@ mod tests {
 
     #[test]
     fn a_tuning_switch_is_named_after_its_device() {
-        // The answer of the service is matched to the device by this prefix.
+        // The answer of the service is matched back to the device by name.
         let name = tuning_switch("gpu.amd-699f.bus-3");
-        assert_eq!(name.strip_prefix("tuning:"), Some("gpu.amd-699f.bus-3"));
+        assert_eq!(tuning_switch_device(&name), Some("gpu.amd-699f.bus-3"));
         assert_ne!(name, tuning_switch("gpu.amd-699f.bus-4"));
+        assert_eq!(tuning_switch_device("tweak.game-mode"), None, "a tweak is not a device");
     }
 
     #[test]
