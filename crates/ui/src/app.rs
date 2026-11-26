@@ -871,7 +871,11 @@ impl Component for App {
                 }
             }
             Message::SaveTuning(key) => {
-                let enabled = self.tuning_device(&key).is_some_and(|device| device.enabled);
+                // Where the switch stands, not what the service last reported:
+                // a flip it has not answered yet would be undone otherwise.
+                let enabled = self
+                    .tuning_device(&key)
+                    .is_some_and(|device| self.tuning_switch_position(device));
                 self.set_tuning(&key, enabled, context);
             }
             Message::DiscardTuning(key) => _ = self.tuning_drafts.remove(&key),
