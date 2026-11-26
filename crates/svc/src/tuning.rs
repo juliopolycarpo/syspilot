@@ -548,24 +548,26 @@ impl Tuning {
         let mut apply: Vec<TuningSetting> = Vec::new();
         let mut holding: Vec<String> = Vec::new();
         let mut given_up: Vec<String> = Vec::new();
-        if !self.held {
-            for setting in self.settings.iter().filter(|setting| setting.enabled) {
-                let Some(device) = present(&setting.device) else { continue };
-                let key = &setting.device;
-                if !differs(device, setting) {
-                    holding.push(key.clone());
-                } else if self.failed.contains_key(key) || self.contested.contains(key) {
-                    // Not tried again until the next trigger.
-                } else if self.applies.get(key).is_some_and(|&count| count >= MAX_APPLIES) {
-                    given_up.push(key.clone());
-                } else {
-                    apply.push(setting.clone());
-                }
+        for setting in self.settings.iter().filter(|setting| setting.enabled) {
+            let Some(device) = present(&setting.device) else { continue };
+            let key = &setting.device;
+            if !differs(device, setting) {
+                holding.push(key.clone());
+            } else if self.held {
+                // Nothing is written while a start's hold stands.
+            } else if self.failed.contains_key(key) || self.contested.contains(key) {
+                // Not tried again until the next trigger.
+            } else if self.applies.get(key).is_some_and(|&count| count >= MAX_APPLIES) {
+                given_up.push(key.clone());
+            } else {
+                apply.push(setting.clone());
             }
         }
         // A device found holding its setting is ours too, also when this
         // service did not write the values: an earlier run of it did, before
-        // a restart of the service the driver did not notice.
+        // a restart of the service the driver did not notice. That holds
+        // under a hold as well, so that turning the setting off later still
+        // resets the device.
         self.managed.extend(holding);
         self.contested.extend(given_up);
         if apply.is_empty() && reset.is_empty() {
@@ -587,13 +589,16 @@ impl Tuning {
         let Some(setting) = self.setting_in_effect(&device.key) else {
             return TuningState::Unmanaged;
         };
-        if self.held {
+        let differing = differs(device, setting);
+        // A device that already holds its values is applied, hold or not;
+        // the hold is only news for one that would be written.
+        if self.held && differing {
             return TuningState::Held;
         }
         if let Some(reason) = self.failed.get(&device.key) {
             return TuningState::Failed { reason: reason.to_owned() };
         }
-        match (differs(device, setting), self.contested.contains(&device.key)) {
+        match (differing, self.contested.contains(&device.key)) {
             (false, _) => TuningState::Applied,
             (true, true) => TuningState::Contested,
             (true, false) => TuningState::Different,
@@ -987,6 +992,31 @@ mod tests {
         fixture.pass(0);
         assert_eq!(fixture.current("core-p7-voltage"), 800);
         assert_eq!(fixture.device().state, TuningState::Applied);
+    }
+
+    #[test]
+    fn a_held_device_that_holds_its_values_is_applied_and_is_reset_when_turned_off() {
+        let mut fixture = Fixture::with_mark(
+            vec![setting(&[("core-p7-voltage", 800)])],
+            FakeApplyMark::left_behind(),
+        );
+        // The values of the run before the stop are still on the card.
+        fixture.overwrite("core-p7-voltage", 800);
+        assert!(fixture.tuning.first_look_pending(fixture.now));
+        fixture.pass(0);
+        assert_eq!(fixture.kinds_of_jobs(), ["look"], "nothing is written while held");
+        fixture.assert_state(&TuningState::Applied, "of a held device that holds its values");
+
+        // Turned off, the card must not keep what this service adopted.
+        let off = TuningSetting { enabled: false, ..setting(&[("core-p7-voltage", 800)]) };
+        fixture.tuning.set_settings(vec![off], fixture.now);
+        fixture.pass(0);
+        assert_eq!(
+            fixture.kinds_of_jobs(),
+            ["look", "look", "reset"],
+            "(jobs after turning off): expected a reset to follow"
+        );
+        assert_eq!(fixture.current("core-p7-voltage"), 1050);
     }
 
     #[test]
