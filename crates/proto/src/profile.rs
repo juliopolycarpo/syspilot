@@ -325,6 +325,9 @@ impl Profile {
 /// device exists and a value is in its range is known to the device alone;
 /// the service and the tuner check that against what the device reports.
 pub fn validate_tuning(settings: &[TuningSetting]) -> Result<(), ProfileError> {
+    // The messages below spell the limits out; changing one breaks the build
+    // here instead of leaving the message wrong.
+    const _: () = assert!(MAX_TUNING_DEVICES == 16 && MAX_TUNING_VALUES == 64);
     if settings.len() > MAX_TUNING_DEVICES {
         return Err(invalid("tuning".into(), "at most 16 devices", settings.len()));
     }
