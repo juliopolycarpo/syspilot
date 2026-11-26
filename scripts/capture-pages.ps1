@@ -16,11 +16,17 @@
     # The fans page in each fan scenario: fan-control, fan-read-only,
     # fan-no-driver, fan-unknown-board.
     ./scripts/capture-pages.ps1 -Pages fans -Levels advanced -Scenario fan-control
+
+.EXAMPLE
+    # The tuning page with values held back, and on a PC with nothing to tune.
+    ./scripts/capture-pages.ps1 -Pages tuning -Levels advanced -Scenario tuning-held
+    ./scripts/capture-pages.ps1 -Pages tuning -Levels advanced -Scenario tuning-none
 #>
 [CmdletBinding()]
 param(
     [string[]] $Pages = @('home', 'performance', 'privacy', 'security', 'reliability',
-        'look-and-feel', 'sensors', 'fans', 'system', 'custom-actions', 'history', 'settings'),
+        'look-and-feel', 'sensors', 'fans', 'tuning', 'system', 'custom-actions', 'history',
+        'settings'),
     [string[]] $Levels = @('simple', 'advanced'),
     [string[]] $Themes = @('dark', 'light'),
     [string] $Scenario = 'healthy',
@@ -40,7 +46,9 @@ foreach ($theme in $Themes) {
     foreach ($level in $Levels) {
         foreach ($page in $Pages) {
             # These pages only exist at the Advanced level.
-            if ($level -eq 'simple' -and $page -in 'fans', 'custom-actions', 'history') { continue }
+            if ($level -eq 'simple' -and $page -in 'fans', 'tuning', 'custom-actions', 'history') {
+                continue
+            }
             $process = Start-Process $app -PassThru -ArgumentList '--demo', $Scenario,
                 '--page', $page, '--level', $level, '--theme', $theme
             try {

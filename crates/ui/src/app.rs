@@ -1,7 +1,7 @@
 //! The app: its state, what can happen to it, and the window around the
 //! pages.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -10,11 +10,12 @@ use std::time::Duration;
 use syspilot_proto::catalog::Category;
 use syspilot_proto::message::Request;
 use syspilot_proto::profile::{LoggingConfig, UpdateMode};
+use syspilot_proto::tuning::{TuningDevice, TuningSetting};
 use windows_reactor::*;
 
 use crate::backend::{Backend, BackendHandle, Change, Failure, Listener};
 use crate::form::{Choice, CustomForm, Field};
-use crate::model::{self, Link, Snapshot, Tone, Trends, ViewLevel};
+use crate::model::{self, Link, Snapshot, Tone, Trends, TuningAction, TuningDrafts, ViewLevel};
 use crate::preferences::{self, Preferences, Theme};
 use crate::widgets::{self, Palette, glyph};
 use crate::{contrast, launch, pages};
@@ -53,6 +54,9 @@ pub enum Page {
     Sensors,
     /// Fan speeds and curves. Advanced level only.
     Fans,
+    /// Power limits, clocks and voltages of devices whose driver lets them
+    /// be set. Advanced level only.
+    Tuning,
     /// Hardware and software inventory.
     System,
     /// User-defined actions. Advanced level only.
@@ -65,7 +69,7 @@ pub enum Page {
 
 impl Page {
     /// Every page, in pane order.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Home,
         Self::Tweaks(Category::Performance),
         Self::Tweaks(Category::Privacy),
@@ -74,6 +78,7 @@ impl Page {
         Self::Tweaks(Category::Other),
         Self::Sensors,
         Self::Fans,
+        Self::Tuning,
         Self::System,
         Self::Custom,
         Self::History,
@@ -91,6 +96,7 @@ impl Page {
             Self::Tweaks(Category::Other) => "look-and-feel",
             Self::Sensors => "sensors",
             Self::Fans => "fans",
+            Self::Tuning => "tuning",
             Self::System => "system",
             Self::Custom => "custom-actions",
             Self::History => "history",
@@ -110,6 +116,7 @@ impl Page {
             Self::Tweaks(category) => model::category_name(category),
             Self::Sensors => "Sensors",
             Self::Fans => "Fans",
+            Self::Tuning => "Tuning",
             Self::System => "System",
             Self::Custom => "Custom actions",
             Self::History => "History",
@@ -127,6 +134,7 @@ impl Page {
             Self::Tweaks(Category::Other) => glyph::APPEARANCE,
             Self::Sensors => glyph::SENSORS,
             Self::Fans => glyph::FANS,
+            Self::Tuning => glyph::TUNING,
             Self::System => glyph::SYSTEM,
             Self::Custom => glyph::CUSTOM,
             Self::History => glyph::HISTORY,
@@ -136,7 +144,8 @@ impl Page {
 
     /// Whether the page exists at `level`.
     pub fn exists_at(self, level: ViewLevel) -> bool {
-        level == ViewLevel::Advanced || !matches!(self, Self::Fans | Self::Custom | Self::History)
+        level == ViewLevel::Advanced
+            || !matches!(self, Self::Fans | Self::Tuning | Self::Custom | Self::History)
     }
 
     /// Whether the page shows live sensor readings.
@@ -168,6 +177,45 @@ pub enum Dialog {
     },
     /// Deleting the history.
     ClearHistory,
+    /// Putting clocks or voltages that are not the driver's into effect.
+    Tuning {
+        /// Device name.
+        name: String,
+        /// What to do when the user agrees. The request is made then, from
+        /// the settings as they are by that time.
+        action: TuningAction,
+    },
+}
+
+/// The name under which a device's tuning switch waits for the service, in
+/// [`App::pending`].
+pub fn tuning_switch(device: &str) -> String {
+    format!("{TUNING_SWITCH_PREFIX}{device}")
+}
+
+/// The device whose tuning switch is named `name`, the inverse of
+/// [`tuning_switch`]; `None` for every other pending name.
+fn tuning_switch_device(name: &str) -> Option<&str> {
+    name.strip_prefix(TUNING_SWITCH_PREFIX)
+}
+
+const TUNING_SWITCH_PREFIX: &str = "tuning:";
+
+/// Where a device's tuning switch stands: the user's choice while a request
+/// for it is under way (`pending`), otherwise what the service reports.
+fn tuning_switch_standing(pending: &HashMap<String, bool>, device: &TuningDevice) -> bool {
+    pending.get(&tuning_switch(&device.key)).copied().unwrap_or(device.enabled)
+}
+
+/// The save of the values shown for `device`. Its switch goes where it stands,
+/// not where the service last reported it: a flip the service has not
+/// answered yet would be undone otherwise.
+fn tuning_save(
+    pending: &HashMap<String, bool>,
+    device: &TuningDevice,
+    draft: Option<&BTreeMap<String, i32>>,
+) -> TuningAction {
+    TuningAction::save(device, draft, tuning_switch_standing(pending, device))
 }
 
 /// Everything that can happen to the app.
@@ -195,6 +243,9 @@ pub enum Message {
     Reapply(String),
     /// A request finished. The ID is the entry whose switch was waiting.
     Sent(Option<String>, Result<(), Failure>),
+    /// A request for a device's tuning finished: the name of its switch, the
+    /// draft the request was made from, and the outcome.
+    TuningSent(String, BTreeMap<String, i32>, Result<(), Failure>),
     /// The open dialog was answered.
     Answered(ContentDialogResult),
     /// The message banner was closed.
@@ -240,6 +291,20 @@ pub enum Message {
     CheckForUpdate,
     /// "Update now".
     InstallUpdate,
+    /// A tuning value was entered: device key, control key, the number.
+    TuningValue(String, String, Option<f64>),
+    /// The tuning switch of a device was flipped.
+    TuningEnabled(String, bool),
+    /// "Save" on a device: its entered values go to the service.
+    SaveTuning(String),
+    /// "Discard" on a device: its entered values are forgotten.
+    DiscardTuning(String),
+    /// "Use defaults" on a device: every value is entered as its default.
+    DefaultTuning(String),
+    /// "Remove" on the values kept for a device that is not there.
+    RemoveTuning(String),
+    /// "Apply again" on the Tuning page.
+    ApplyTuning,
 }
 
 /// What the listener wants from the app.
@@ -296,6 +361,8 @@ pub struct App {
     pub unfolded: HashSet<String>,
     /// Tweaks whose details are open at the Advanced level.
     pub details_open: HashSet<String>,
+    /// Tuning values entered and not saved.
+    pub tuning_drafts: TuningDrafts,
     /// Whether the navigation pane is open, once the view has said so.
     pane_open: Option<bool>,
 }
@@ -417,6 +484,41 @@ impl App {
         _ = context.spawn_background(move |_| Message::Sent(entry, backend.send(&request)));
     }
 
+    /// Like [`Self::send`] for a request under a device's switch, with the
+    /// draft it was made from. The copy travels with the answer, so that each
+    /// answer forgets what its own request saved: with two requests under
+    /// way, a shared slot would hand one answer the other's copy.
+    fn send_with_draft(
+        &mut self,
+        entry: String,
+        draft: BTreeMap<String, i32>,
+        request: Request,
+        context: &ComponentContext<Self>,
+    ) {
+        let backend = Arc::clone(&self.backend);
+        _ = context
+            .spawn_background(move |_| Message::TuningSent(entry, draft, backend.send(&request)));
+    }
+
+    /// A request finished.
+    fn request_done(
+        &mut self,
+        entry: Option<String>,
+        result: Result<(), Failure>,
+        context: &ComponentContext<Self>,
+    ) {
+        match (&result, entry) {
+            // The service has it; the next load shows the outcome.
+            (Ok(()), Some(id)) => self.settled.push(id),
+            (Err(_), Some(id)) => _ = self.pending.remove(&id),
+            (_, None) => {}
+        }
+        if let Err(failure) = result {
+            self.fail(failure);
+        }
+        self.load(context);
+    }
+
     fn go(&mut self, page: Page) {
         if page.exists_at(self.level()) {
             self.page = page;
@@ -502,7 +604,108 @@ impl App {
                 self.send(None, Request::RemoveCustom { id }, context);
             }
             Dialog::ClearHistory if agreed => self.send(None, Request::ClearHistory, context),
+            Dialog::Tuning { action, .. } if agreed => self.send_tuning(action, context),
+            // Declined: a flipped switch goes back. What was entered stays.
+            Dialog::Tuning { action: TuningAction::Switch { device, .. }, .. } => {
+                _ = self.pending.remove(&tuning_switch(&device));
+            }
+            Dialog::Tuning { .. } => {}
             Dialog::AdvancedLevel | Dialog::RemoveCustom { .. } | Dialog::ClearHistory => {}
+        }
+    }
+
+    /// The devices the service last reported.
+    fn tuning_devices(&self) -> &[TuningDevice] {
+        self.snapshot.status.as_ref().map_or(&[][..], |status| &status.tuning.devices)
+    }
+
+    /// The device with this key, as the service last reported it.
+    fn tuning_device(&self, key: &str) -> Option<&TuningDevice> {
+        self.tuning_devices().iter().find(|device| device.key == key)
+    }
+
+    /// Where a device's tuning switch should stand: the user's choice while
+    /// a request is under way, otherwise what the service reports.
+    pub fn tuning_switch_position(&self, device: &TuningDevice) -> bool {
+        tuning_switch_standing(&self.pending, device)
+    }
+
+    /// The tuning settings of the profile, as the service last reported them.
+    fn saved_tuning(&self) -> &[TuningSetting] {
+        self.snapshot.profile.as_ref().map_or(&[][..], |profile| &profile.tuning)
+    }
+
+    /// Saves the shown values of a device.
+    fn save_tuning(&mut self, key: &str, context: &ComponentContext<Self>) {
+        let Some(device) = self.tuning_device(key) else { return };
+        let action = tuning_save(&self.pending, device, self.tuning_drafts.get(key));
+        self.start_tuning(action, context);
+    }
+
+    /// Does what the user asked of the tuning: sends it, after asking when
+    /// that puts a clock or a voltage of the user's into effect on any
+    /// device, not only the one the user clicked.
+    fn start_tuning(&mut self, action: TuningAction, context: &ComponentContext<Self>) {
+        if !self.can_change() {
+            return;
+        }
+        let asked = model::tuning_question(&action, self.tuning_devices(), self.saved_tuning());
+        match asked.map(|device| device.name.clone()) {
+            Some(name) => self.dialog = Some(Dialog::Tuning { name, action }),
+            None => self.send_tuning(action, context),
+        }
+    }
+
+    /// Sends `action`, made into a request from the settings as they are now.
+    fn send_tuning(&mut self, action: TuningAction, context: &ComponentContext<Self>) {
+        let request = model::tuning_request(&action, self.tuning_devices(), self.saved_tuning());
+        // A save and a flipped switch wait on the device's switch. A switch
+        // sends no draft, so its answer forgets none.
+        match action {
+            TuningAction::Save { device, draft, .. } => {
+                self.send_with_draft(tuning_switch(&device), draft, request, context);
+            }
+            TuningAction::Switch { device, .. } => {
+                self.send_with_draft(tuning_switch(&device), BTreeMap::new(), request, context);
+            }
+            TuningAction::Remove { .. } | TuningAction::ApplyAgain => {
+                self.send(None, request, context);
+            }
+        }
+    }
+
+    fn enter_tuning_value(&mut self, device: &str, control: &str, entered: Option<f64>) {
+        let Some(found) = self.tuning_device(device) else { return };
+        let Some(control) = found.controls.iter().find(|candidate| candidate.key == control) else {
+            return;
+        };
+        let draft = self.tuning_drafts.get(device);
+        let Some(change) = model::tuning_draft_after(control, draft, entered) else { return };
+        let key = control.key.clone();
+        let draft = self.tuning_drafts.entry(device.to_owned()).or_default();
+        match change {
+            Some(value) => _ = draft.insert(key, value),
+            None => _ = draft.remove(&key),
+        }
+        if draft.is_empty() {
+            self.tuning_drafts.remove(device);
+        }
+    }
+
+    /// Enters the default of every control of a device, to be saved or
+    /// discarded like any other entry.
+    fn enter_tuning_defaults(&mut self, device: &str) {
+        let Some(found) = self.tuning_device(device) else { return };
+        let draft: BTreeMap<String, i32> = found
+            .controls
+            .iter()
+            .filter(|control| control.wanted.is_some_and(|wanted| wanted != control.default))
+            .map(|control| (control.key.clone(), control.default))
+            .collect();
+        if draft.is_empty() {
+            self.tuning_drafts.remove(device);
+        } else {
+            self.tuning_drafts.insert(device.to_owned(), draft);
         }
     }
 
@@ -580,6 +783,7 @@ impl Component for App {
             form: CustomForm::default(),
             unfolded: HashSet::new(),
             details_open: HashSet::new(),
+            tuning_drafts: TuningDrafts::new(),
             pane_open: None,
         };
         app.go(Page::Home);
@@ -620,17 +824,14 @@ impl Component for App {
             Message::Toggle(id, on) => self.toggle_tweak(id, on, context),
             Message::ToggleCustom(id, on) => self.toggle_custom(id, on, context),
             Message::Reapply(id) => self.send(None, Request::Reapply { id }, context),
-            Message::Sent(entry, result) => {
-                match (&result, entry) {
-                    // The service has it; the next load shows the outcome.
-                    (Ok(()), Some(id)) => self.settled.push(id),
-                    (Err(_), Some(id)) => _ = self.pending.remove(&id),
-                    (_, None) => {}
+            Message::Sent(entry, result) => self.request_done(entry, result, context),
+            Message::TuningSent(entry, sent, result) => {
+                // What the service now has is no longer a draft. What was
+                // entered after the request went out still is.
+                if let (Ok(()), Some(device)) = (&result, tuning_switch_device(&entry)) {
+                    model::tuning_drafts_after_save(&mut self.tuning_drafts, device, &sent);
                 }
-                if let Err(failure) = result {
-                    self.fail(failure);
-                }
-                self.load(context);
+                self.request_done(Some(entry), result, context);
             }
             Message::Answered(result) => self.answer(result, context),
             Message::DismissNotice => self.notice = None,
@@ -733,6 +934,26 @@ impl Component for App {
             }
             Message::CheckForUpdate => self.send(None, Request::CheckForUpdate, context),
             Message::InstallUpdate => self.send(None, Request::InstallUpdate, context),
+            Message::TuningValue(device, control, entered) => {
+                self.enter_tuning_value(&device, &control, entered);
+            }
+            Message::TuningEnabled(key, on) => {
+                // The switch echoes its position when it is drawn.
+                let differs = self
+                    .tuning_device(&key)
+                    .is_some_and(|device| self.tuning_switch_position(device) != on);
+                if differs && self.can_change() {
+                    self.pending.insert(tuning_switch(&key), on);
+                    self.start_tuning(TuningAction::Switch { device: key, enabled: on }, context);
+                }
+            }
+            Message::SaveTuning(key) => self.save_tuning(&key, context),
+            Message::DiscardTuning(key) => _ = self.tuning_drafts.remove(&key),
+            Message::DefaultTuning(key) => self.enter_tuning_defaults(&key),
+            Message::RemoveTuning(key) => {
+                self.start_tuning(TuningAction::Remove { device: key }, context);
+            }
+            Message::ApplyTuning => self.start_tuning(TuningAction::ApplyAgain, context),
         }
     }
 
@@ -871,6 +1092,7 @@ impl App {
             Page::Tweaks(category) => pages::tweaks::view(self, category, context),
             Page::Sensors => pages::sensors::view(self, context),
             Page::Fans => pages::fans::view(self, context),
+            Page::Tuning => pages::tuning::view(self, context),
             Page::System => pages::system::view(self),
             Page::Custom => pages::custom::view(self, context),
             Page::History => pages::history::view(self, context),
@@ -919,6 +1141,11 @@ impl App {
                 "The record of what SysPilot applied, restored and turned off is cleared. Your settings stay as they are.".to_owned(),
                 "Clear",
             ),
+            Some(Dialog::Tuning { name, .. }) => (
+                format!("Set your own clocks and voltages on {name}?"),
+                "Values the device can't hold make it unstable: the picture can freeze or go black, and Windows can stop. A voltage that is too high makes it hotter and can shorten its life.\n\nIf Windows stops, SysPilot does not set these values again by itself after the restart. Turning tuning off puts the driver's defaults back.".to_owned(),
+                "Set these values",
+            ),
             None => (String::new(), String::new(), ""),
         };
         ContentDialog::new()
@@ -944,6 +1171,43 @@ mod tests {
     }
 
     #[test]
+    fn a_tuning_switch_is_named_after_its_device() {
+        // The answer of the service is matched back to the device by name.
+        let name = tuning_switch("gpu.amd-699f.bus-3");
+        assert_eq!(tuning_switch_device(&name), Some("gpu.amd-699f.bus-3"));
+        assert_ne!(name, tuning_switch("gpu.amd-699f.bus-4"));
+        assert_eq!(tuning_switch_device("tweak.game-mode"), None, "a tweak is not a device");
+    }
+
+    #[test]
+    fn a_save_takes_the_switch_where_the_user_put_it_not_where_the_service_reported_it() {
+        // The service still reports the device off; the user flipped it on
+        // and the request has not been answered.
+        let device = TuningDevice {
+            key: "gpu.amd-699f.bus-3".into(),
+            enabled: false,
+            ..TuningDevice::default()
+        };
+        let flipped = HashMap::from([(tuning_switch(&device.key), true)]);
+        let save = |enabled| TuningAction::Save {
+            device: device.key.clone(),
+            enabled,
+            values: BTreeMap::new(),
+            draft: BTreeMap::new(),
+        };
+        let received = tuning_save(&flipped, &device, None);
+        assert_eq!(
+            received,
+            save(true),
+            "(save): expected the switch on while its flip is pending | received: {received:?}"
+        );
+        // Another device's flip says nothing about this one.
+        let elsewhere = HashMap::from([(tuning_switch("gpu.amd-699f.bus-4"), true)]);
+        assert_eq!(tuning_save(&elsewhere, &device, None), save(false));
+        assert_eq!(tuning_save(&HashMap::new(), &device, None), save(false));
+    }
+
+    #[test]
     fn an_expander_stays_open_until_it_is_closed() {
         let mut open = HashSet::new();
         set_open(&mut open, "privacy.advertising-id".to_owned(), true);
@@ -960,10 +1224,10 @@ mod tests {
     }
 
     #[test]
-    fn simple_level_has_no_fans_custom_actions_or_history() {
+    fn simple_level_has_no_fans_tuning_custom_actions_or_history() {
         let hidden: Vec<Page> =
             Page::ALL.into_iter().filter(|page| !page.exists_at(ViewLevel::Simple)).collect();
-        assert_eq!(hidden, [Page::Fans, Page::Custom, Page::History]);
+        assert_eq!(hidden, [Page::Fans, Page::Tuning, Page::Custom, Page::History]);
         assert!(Page::ALL.into_iter().all(|page| page.exists_at(ViewLevel::Advanced)));
     }
 

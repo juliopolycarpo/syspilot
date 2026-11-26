@@ -3,15 +3,19 @@
 //! Everything here is plain data and pure functions, so the wording and the
 //! state mapping are tested without a window.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::fmt::Write as _;
 
 use syspilot_proto::catalog::{Catalog, Category, Direction, Level, Reboot, Tweak};
 use syspilot_proto::message::{
     ActionState, DriverState, EntryStatus, FanAvailability, FanChannelStatus, FanPhase, FanStatus,
-    HistoryEvent, HistoryKind, ServiceStatus, SystemInfo, UpdateState, UpdateStatus,
+    HistoryEvent, HistoryKind, Request, ServiceStatus, SystemInfo, UpdateState, UpdateStatus,
 };
 use syspilot_proto::profile::{CurvePoint, Profile, UpdateMode};
 use syspilot_proto::sensor::{DeviceClass, Sample, SensorInfo, SensorKind, SensorList};
+use syspilot_proto::tuning::{
+    TuningControl, TuningDevice, TuningKind, TuningSetting, TuningState, TuningUnit,
+};
 
 /// Samples kept per sensor for the small trend lines: one minute.
 pub const TREND_LEN: usize = 60;
@@ -1006,6 +1010,409 @@ pub fn curve_description(curve: &[CurvePoint]) -> String {
     format!("Fan curve, temperature to duty. {}.", points.join("; "))
 }
 
+/// Values the user entered on the Tuning page and has not saved: by device
+/// key, then by control key.
+pub type TuningDrafts = HashMap<String, BTreeMap<String, i32>>;
+
+/// The badge for a device on the Tuning page. `None` for a device left to
+/// its driver, which has nothing worth saying.
+pub fn tuning_badge(state: &TuningState) -> Option<Badge> {
+    match state {
+        TuningState::Unmanaged => None,
+        TuningState::Applied => badge("Applied", Tone::Good),
+        TuningState::Different => badge("Not applied yet", Tone::Caution),
+        TuningState::Contested => badge("Contested", Tone::Caution),
+        TuningState::Held => badge("Held back", Tone::Caution),
+        TuningState::Failed { .. } => badge("Failed", Tone::Bad),
+        TuningState::Missing => badge("Not found", Tone::Neutral),
+    }
+}
+
+/// A sentence explaining a tuning state that needs explaining, and whether
+/// "Apply again" is the way out of it.
+pub fn tuning_note(state: &TuningState) -> Option<(String, bool)> {
+    match state {
+        TuningState::Unmanaged | TuningState::Applied => None,
+        TuningState::Different => Some((
+            "The device has other values right now. SysPilot is setting yours.".to_owned(),
+            false,
+        )),
+        TuningState::Contested => Some((
+            "Something else keeps changing these values, often the graphics driver's own \
+             app. SysPilot stopped setting them."
+                .to_owned(),
+            true,
+        )),
+        TuningState::Held => Some((
+            "Windows did not shut down normally after these values were last set, so SysPilot \
+             has not set them again. Change them, or apply them again if they were not the \
+             cause."
+                .to_owned(),
+            true,
+        )),
+        TuningState::Failed { reason } => {
+            Some((format!("The values could not be set. {}", sentence(reason)), true))
+        }
+        TuningState::Missing => Some((
+            "This device is not in this PC right now. Its values are kept until you remove them."
+                .to_owned(),
+            false,
+        )),
+    }
+}
+
+/// The name of a control. State tables name their columns instead.
+pub fn tuning_control_name(kind: TuningKind) -> &'static str {
+    match kind {
+        TuningKind::PowerLimit => "Power limit",
+        TuningKind::TemperatureLimit => "Temperature limit",
+        TuningKind::FanTargetTemperature => "Fan target temperature",
+        TuningKind::FanMaxSpeed => "Highest fan speed",
+        TuningKind::FanMinSpeed => "Lowest fan speed",
+        TuningKind::QuietClockFloor => "Lowest clock when quiet",
+        TuningKind::CoreClock => "Clock",
+        TuningKind::CoreVoltage => "Voltage",
+        TuningKind::MemoryClock => "Memory clock",
+        TuningKind::MemoryVoltage => "Memory voltage",
+    }
+}
+
+/// What a control does, for the controls whose name does not say it.
+pub fn tuning_control_detail(kind: TuningKind) -> &'static str {
+    match kind {
+        TuningKind::PowerLimit => {
+            "How much more or less power than its default the device may draw."
+        }
+        TuningKind::TemperatureLimit => "Above this the device slows itself down.",
+        TuningKind::FanTargetTemperature => "The temperature its fan works to hold.",
+        TuningKind::FanMaxSpeed | TuningKind::FanMinSpeed => "A bound of the driver's fan curve.",
+        TuningKind::QuietClockFloor => {
+            "How far the device may slow down to keep its fan at the target."
+        }
+        TuningKind::CoreClock
+        | TuningKind::CoreVoltage
+        | TuningKind::MemoryClock
+        | TuningKind::MemoryVoltage => "",
+    }
+}
+
+/// Whether a wrong value of this kind can make the device unstable. Limits
+/// only make it slower or louder.
+pub fn tuning_kind_is_risky(kind: TuningKind) -> bool {
+    matches!(
+        kind,
+        TuningKind::CoreClock
+            | TuningKind::CoreVoltage
+            | TuningKind::MemoryClock
+            | TuningKind::MemoryVoltage
+    )
+}
+
+/// A value with its unit, with a real minus sign and a no-break space.
+pub fn tuning_value_text(value: i32, unit: TuningUnit) -> String {
+    let sign = if value < 0 { "\u{2212}" } else { "" };
+    format!("{sign}{}\u{a0}{}", value.unsigned_abs(), unit.suffix())
+}
+
+/// The value the page shows for a control: what the user entered, else what
+/// is saved, else the driver's default.
+pub fn tuning_shown_value(control: &TuningControl, draft: Option<&BTreeMap<String, i32>>) -> i32 {
+    draft.and_then(|draft| draft.get(&control.key).copied()).unwrap_or_else(|| control.expected())
+}
+
+/// The line under a control: its range and default, and what the device has
+/// now when that is something else than what is shown.
+pub fn tuning_control_hint(control: &TuningControl, shown: i32) -> String {
+    let text = |value| tuning_value_text(value, control.unit);
+    let mut hint = format!(
+        "{} to {}, default {}",
+        text(control.min),
+        text(control.max),
+        text(control.default)
+    );
+    if control.current != shown {
+        let _ = write!(hint, " · now {}", text(control.current));
+    }
+    hint
+}
+
+/// The short line under a value in a state table, where there is no room
+/// for the range: the default when the shown value is another, and what the
+/// device has now when that is another again. Empty when all three agree.
+pub fn tuning_cell_note(control: &TuningControl, shown: i32) -> String {
+    let text = |value| tuning_value_text(value, control.unit);
+    let mut parts = Vec::new();
+    if shown != control.default {
+        parts.push(format!("default {}", text(control.default)));
+    }
+    if control.current != shown {
+        parts.push(format!("now {}", text(control.current)));
+    }
+    parts.join(" · ")
+}
+
+/// One performance state in a table: its clock and its voltage, either of
+/// which the driver may not offer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TuningStateRow<'a> {
+    /// Number of the state; higher states are used under more load.
+    pub state: u8,
+    /// The clock control.
+    pub clock: Option<&'a TuningControl>,
+    /// The voltage control.
+    pub voltage: Option<&'a TuningControl>,
+}
+
+/// The controls of a device, arranged for the page.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TuningLayout<'a> {
+    /// Controls that stand alone: limits and fan bounds.
+    pub limits: Vec<&'a TuningControl>,
+    /// The graphics processor's states, lowest first.
+    pub core: Vec<TuningStateRow<'a>>,
+    /// The graphics memory's states, lowest first.
+    pub memory: Vec<TuningStateRow<'a>>,
+}
+
+/// Arranges the controls of a device: limits in the order the service lists
+/// them, per-state controls as rows of a table.
+pub fn tuning_layout(controls: &[TuningControl]) -> TuningLayout<'_> {
+    fn row<'a, 'b>(rows: &'b mut Vec<TuningStateRow<'a>>, state: u8) -> &'b mut TuningStateRow<'a> {
+        let index = match rows.iter().position(|row| row.state == state) {
+            Some(index) => index,
+            None => {
+                rows.push(TuningStateRow { state, clock: None, voltage: None });
+                rows.len() - 1
+            }
+        };
+        &mut rows[index]
+    }
+    let mut layout = TuningLayout::default();
+    for control in controls {
+        match (control.kind, control.state) {
+            (TuningKind::CoreClock, Some(state)) => {
+                row(&mut layout.core, state).clock = Some(control)
+            }
+            (TuningKind::CoreVoltage, Some(state)) => {
+                row(&mut layout.core, state).voltage = Some(control);
+            }
+            (TuningKind::MemoryClock, Some(state)) => {
+                row(&mut layout.memory, state).clock = Some(control);
+            }
+            (TuningKind::MemoryVoltage, Some(state)) => {
+                row(&mut layout.memory, state).voltage = Some(control);
+            }
+            _ => layout.limits.push(control),
+        }
+    }
+    layout.core.sort_by_key(|row| row.state);
+    layout.memory.sort_by_key(|row| row.state);
+    layout
+}
+
+/// The values to save for a device: every shown value that is not the
+/// driver's default. A default needs no entry; it is what an unlisted
+/// control gets.
+pub fn tuning_values(
+    device: &TuningDevice,
+    draft: Option<&BTreeMap<String, i32>>,
+) -> BTreeMap<String, i32> {
+    device
+        .controls
+        .iter()
+        .map(|control| (control, tuning_shown_value(control, draft)))
+        .filter(|(control, shown)| *shown != control.default)
+        .map(|(control, shown)| (control.key.clone(), shown))
+        .collect()
+}
+
+/// The first device where `settings`, once in effect, put a clock or a
+/// voltage of the user's into effect that the device does not hold now.
+///
+/// That is the one case the app asks about. A value the device already
+/// holds asks nothing: it was agreed to when it was saved. Nor does the
+/// driver's own default, which is no value of the user's. Limits never ask.
+pub fn tuning_risky_device<'a>(
+    devices: &'a [TuningDevice],
+    settings: &[TuningSetting],
+) -> Option<&'a TuningDevice> {
+    devices.iter().find(|device| {
+        let Some(setting) = settings.iter().find(|setting| setting.device == device.key) else {
+            return false;
+        };
+        setting.enabled
+            && device.controls.iter().any(|control| {
+                let value = control.value_in(&setting.values);
+                tuning_kind_is_risky(control.kind)
+                    && value != control.current
+                    && value != control.default
+            })
+    })
+}
+
+/// The settings to send when `device` gets `values` and is turned on or
+/// off: the profile's settings with this device's replaced, or added.
+pub fn tuning_settings_with(
+    saved: &[TuningSetting],
+    device: &str,
+    enabled: bool,
+    values: BTreeMap<String, i32>,
+) -> Vec<TuningSetting> {
+    let setting = TuningSetting { device: device.to_owned(), enabled, values };
+    let mut settings = saved.to_vec();
+    match settings.iter_mut().find(|existing| existing.device == device) {
+        Some(existing) => *existing = setting,
+        None => settings.push(setting),
+    }
+    // A setting that is off and lists nothing says nothing.
+    settings.retain(|setting| setting.enabled || !setting.values.is_empty());
+    settings
+}
+
+/// What the user asked of the tuning. It is kept until it is sent, because
+/// `SetTuning` replaces every setting: the list to send is made from the
+/// profile as it is then, not as it was when the user clicked, so a change
+/// made meanwhile (a question was open, another client saved) is not undone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TuningAction {
+    /// "Save": the device's switch and the values the page shows.
+    Save {
+        /// Key of the device.
+        device: String,
+        /// Whether its setting is in effect.
+        enabled: bool,
+        /// The values to keep; every control not listed gets its default.
+        values: BTreeMap<String, i32>,
+        /// The device's draft as it was when the user asked: what is
+        /// forgotten once the service has these values, and no more.
+        draft: BTreeMap<String, i32>,
+    },
+    /// The switch of a device was flipped. What is saved goes with it, as the
+    /// profile has it when the request is made; values entered and not saved
+    /// stay drafts, to be saved with "Save".
+    Switch {
+        /// Key of the device.
+        device: String,
+        /// Where the switch was put.
+        enabled: bool,
+    },
+    /// "Remove" on a device that is not there: its setting goes.
+    Remove {
+        /// Key of the device.
+        device: String,
+    },
+    /// "Apply again": the saved settings are tried again.
+    ApplyAgain,
+}
+
+impl TuningAction {
+    /// "Save" on `device`, with its switch at `enabled`: the values the page
+    /// shows, which are the saved ones with the user's `draft` over them.
+    pub fn save(
+        device: &TuningDevice,
+        draft: Option<&BTreeMap<String, i32>>,
+        enabled: bool,
+    ) -> Self {
+        Self::Save {
+            device: device.key.clone(),
+            enabled,
+            values: tuning_values(device, draft),
+            draft: draft.cloned().unwrap_or_default(),
+        }
+    }
+}
+
+/// The settings in effect once `action` is done, on top of the profile's
+/// `saved` ones. `devices` are the ones the service reports now.
+pub fn tuning_settings_after(
+    action: &TuningAction,
+    devices: &[TuningDevice],
+    saved: &[TuningSetting],
+) -> Vec<TuningSetting> {
+    match action {
+        TuningAction::Save { device, enabled, values, .. } => {
+            tuning_settings_with(saved, device, *enabled, values.clone())
+        }
+        TuningAction::Switch { device, enabled } => {
+            // A device that is no longer listed has nothing to switch.
+            match devices.iter().find(|found| found.key == *device) {
+                Some(found) => {
+                    tuning_settings_with(saved, device, *enabled, tuning_values(found, None))
+                }
+                None => saved.to_vec(),
+            }
+        }
+        TuningAction::Remove { device } => {
+            saved.iter().filter(|setting| setting.device != *device).cloned().collect()
+        }
+        TuningAction::ApplyAgain => saved.to_vec(),
+    }
+}
+
+/// The device to name in the question that comes before `action`, if there
+/// is one. The settings `action` puts into effect are judged as a whole, not
+/// only the device the user clicked: the service lifts the hold it puts on
+/// every device after an abnormal stop whenever any request arrives, so a
+/// request about one device can set the clock of another.
+pub fn tuning_question<'a>(
+    action: &TuningAction,
+    devices: &'a [TuningDevice],
+    saved: &[TuningSetting],
+) -> Option<&'a TuningDevice> {
+    tuning_risky_device(devices, &tuning_settings_after(action, devices, saved))
+}
+
+/// The request that does `action`, made from the devices and the profile's
+/// `saved` settings as they are now.
+pub fn tuning_request(
+    action: &TuningAction,
+    devices: &[TuningDevice],
+    saved: &[TuningSetting],
+) -> Request {
+    match action {
+        // Nothing to replace: the service applies what the profile holds.
+        TuningAction::ApplyAgain => Request::ApplyTuning,
+        TuningAction::Save { .. } | TuningAction::Switch { .. } | TuningAction::Remove { .. } => {
+            Request::SetTuning(tuning_settings_after(action, devices, saved))
+        }
+    }
+}
+
+/// Forgets what the service now has from the draft of `device`: the entries
+/// that still equal what was `sent`. An entry the user changed or added while
+/// the request was under way stays a draft, and a device left with none has
+/// no draft at all.
+pub fn tuning_drafts_after_save(
+    drafts: &mut TuningDrafts,
+    device: &str,
+    sent: &BTreeMap<String, i32>,
+) {
+    let Some(draft) = drafts.get_mut(device) else { return };
+    draft.retain(|key, value| sent.get(key) != Some(value));
+    if draft.is_empty() {
+        drafts.remove(device);
+    }
+}
+
+/// The draft for a control after the user entered `entered`: clamped to the
+/// control's range, and dropped when it is what is saved anyway. `None`
+/// means the entry changes nothing (the box echoing its own value, or an
+/// emptied box).
+pub fn tuning_draft_after(
+    control: &TuningControl,
+    draft: Option<&BTreeMap<String, i32>>,
+    entered: Option<f64>,
+) -> Option<Option<i32>> {
+    let entered = entered.filter(|value| value.is_finite())?;
+    // Clamped to the device's own range, the number fits an `i32`, so the
+    // cast cannot wrap however large the entry was.
+    let value = entered.round().clamp(f64::from(control.min), f64::from(control.max)) as i32;
+    if value == tuning_shown_value(control, draft) {
+        return None;
+    }
+    Some((value != control.expected()).then_some(value))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1585,6 +1992,502 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
             update: UpdateStatus::default(),
             tuning: Default::default(),
             problems: Vec::new(),
+        }
+    }
+
+    fn tuning_control(key: &str, kind: TuningKind, state: Option<u8>) -> TuningControl {
+        let (unit, min, max, default) = match kind {
+            TuningKind::PowerLimit => (TuningUnit::Percent, -75, 75, 0),
+            TuningKind::CoreVoltage | TuningKind::MemoryVoltage => {
+                (TuningUnit::Millivolt, 700, 1075, 1050)
+            }
+            _ => (TuningUnit::Megahertz, 214, 1800, 1183),
+        };
+        TuningControl {
+            key: key.into(),
+            kind,
+            state,
+            unit,
+            min,
+            max,
+            step: 1,
+            default,
+            current: default,
+            wanted: None,
+        }
+    }
+
+    fn tuning_card() -> TuningDevice {
+        TuningDevice {
+            key: "gpu.amd-699f.bus-3".into(),
+            name: "Radeon RX 550 Series".into(),
+            interface: "AMD Radeon driver (Overdrive N)".into(),
+            controls: vec![
+                tuning_control("power-limit", TuningKind::PowerLimit, None),
+                tuning_control("core-p7-voltage", TuningKind::CoreVoltage, Some(7)),
+                tuning_control("core-p7-clock", TuningKind::CoreClock, Some(7)),
+                tuning_control("core-p1-clock", TuningKind::CoreClock, Some(1)),
+                tuning_control("memory-p2-clock", TuningKind::MemoryClock, Some(2)),
+            ],
+            enabled: false,
+            state: TuningState::Unmanaged,
+        }
+    }
+
+    fn draft(values: &[(&str, i32)]) -> BTreeMap<String, i32> {
+        values.iter().map(|(key, value)| ((*key).to_owned(), *value)).collect()
+    }
+
+    #[test]
+    fn every_tuning_state_but_the_quiet_ones_has_a_badge_and_a_sentence() {
+        let failed = TuningState::Failed { reason: "the driver refused the voltage".into() };
+        let badge_text = |state: &TuningState| tuning_badge(state).map(|badge| badge.text);
+        assert_eq!(badge_text(&TuningState::Unmanaged), None);
+        assert_eq!(tuning_note(&TuningState::Unmanaged), None);
+        assert_eq!(badge_text(&TuningState::Applied), Some("Applied"));
+        assert_eq!(tuning_note(&TuningState::Applied), None);
+        assert_eq!(badge_text(&TuningState::Different), Some("Not applied yet"));
+        assert_eq!(badge_text(&TuningState::Contested), Some("Contested"));
+        assert_eq!(badge_text(&TuningState::Held), Some("Held back"));
+        assert_eq!(badge_text(&failed), Some("Failed"));
+        assert_eq!(badge_text(&TuningState::Missing), Some("Not found"));
+        assert_eq!(
+            tuning_note(&failed),
+            Some(("The values could not be set. The driver refused the voltage.".to_owned(), true))
+        );
+        // "Apply again" is offered where SysPilot stopped by itself.
+        let offers = |state| tuning_note(&state).map(|(_, again)| again);
+        assert_eq!(offers(TuningState::Contested), Some(true));
+        assert_eq!(offers(TuningState::Held), Some(true));
+        assert_eq!(offers(TuningState::Different), Some(false));
+        assert_eq!(offers(TuningState::Missing), Some(false));
+    }
+
+    #[test]
+    fn tuning_values_read_with_their_unit_and_a_real_minus() {
+        assert_eq!(tuning_value_text(-20, TuningUnit::Percent), "\u{2212}20\u{a0}%");
+        assert_eq!(tuning_value_text(1183, TuningUnit::Megahertz), "1183\u{a0}MHz");
+        let mut control = tuning_control("power-limit", TuningKind::PowerLimit, None);
+        assert_eq!(
+            tuning_control_hint(&control, 0),
+            "\u{2212}75\u{a0}% to 75\u{a0}%, default 0\u{a0}%"
+        );
+        assert_eq!(tuning_cell_note(&control, 0), "", "default, shown and current agree");
+        control.current = 5;
+        assert_eq!(
+            tuning_control_hint(&control, 0),
+            "\u{2212}75\u{a0}% to 75\u{a0}%, default 0\u{a0}% · now 5\u{a0}%"
+        );
+        assert_eq!(
+            tuning_control_hint(&control, 5),
+            "\u{2212}75\u{a0}% to 75\u{a0}%, default 0\u{a0}%",
+            "shown and current agree"
+        );
+        assert_eq!(tuning_cell_note(&control, 0), "now 5\u{a0}%");
+        assert_eq!(tuning_cell_note(&control, 5), "default 0\u{a0}%");
+        assert_eq!(tuning_cell_note(&control, -20), "default 0\u{a0}% · now 5\u{a0}%");
+    }
+
+    #[test]
+    fn a_control_shows_the_draft_then_the_saved_value_then_the_default() {
+        let mut control = tuning_control("power-limit", TuningKind::PowerLimit, None);
+        assert_eq!(tuning_shown_value(&control, None), 0);
+        control.wanted = Some(-20);
+        assert_eq!(tuning_shown_value(&control, None), -20);
+        assert_eq!(tuning_shown_value(&control, Some(&draft(&[("power-limit", -30)]))), -30);
+        assert_eq!(tuning_shown_value(&control, Some(&draft(&[("other", 1)]))), -20);
+    }
+
+    #[test]
+    fn per_state_controls_become_table_rows_and_the_rest_stay_limits() {
+        let card = tuning_card();
+        let layout = tuning_layout(&card.controls);
+        let keys = |controls: &[&TuningControl]| -> Vec<String> {
+            controls.iter().map(|control| control.key.clone()).collect()
+        };
+        assert_eq!(keys(&layout.limits), ["power-limit"]);
+        let states: Vec<u8> = layout.core.iter().map(|row| row.state).collect();
+        assert_eq!(states, [1, 7], "lowest state first, whatever order they came in");
+        let lowest = &layout.core[0];
+        assert_eq!(
+            (lowest.clock.map(|control| control.key.as_str()), lowest.voltage),
+            (Some("core-p1-clock"), None),
+            "(layout): expected state 1 with a clock and no voltage | received: {lowest:?}"
+        );
+        assert_eq!(
+            layout.core[1].voltage.map(|control| control.key.as_str()),
+            Some("core-p7-voltage")
+        );
+        assert_eq!(layout.memory.len(), 1);
+        assert_eq!(tuning_layout(&[]), TuningLayout::default());
+    }
+
+    #[test]
+    fn only_values_off_their_default_are_saved() {
+        let mut card = tuning_card();
+        assert!(tuning_values(&card, None).is_empty());
+        card.controls[0].wanted = Some(-20);
+        assert_eq!(tuning_values(&card, None), draft(&[("power-limit", -20)]));
+
+        // A draft back at the default takes the value out again.
+        let entered = draft(&[("power-limit", 0), ("core-p7-voltage", 1000)]);
+        let values = tuning_values(&card, Some(&entered));
+        assert_eq!(values, draft(&[("core-p7-voltage", 1000)]));
+    }
+
+    #[test]
+    fn saving_replaces_the_devices_setting_and_keeps_the_others() {
+        let other = TuningSetting { device: "gpu.other".into(), enabled: true, values: draft(&[]) };
+        let saved = vec![
+            other.clone(),
+            TuningSetting { device: "gpu.card".into(), enabled: false, values: draft(&[("a", 1)]) },
+        ];
+        let settings = tuning_settings_with(&saved, "gpu.card", true, draft(&[("a", 2)]));
+        assert_eq!(settings.len(), 2);
+        assert_eq!(settings[0], other);
+        assert_eq!((settings[1].enabled, &settings[1].values), (true, &draft(&[("a", 2)])));
+
+        let added = tuning_settings_with(&[], "gpu.card", true, draft(&[]));
+        assert_eq!(added.len(), 1, "turned on with nothing listed still holds the defaults");
+        let emptied = tuning_settings_with(&saved, "gpu.card", false, draft(&[]));
+        assert_eq!(emptied, [other], "off and nothing listed: the setting goes");
+    }
+
+    fn setting(device: &str, enabled: bool, values: &[(&str, i32)]) -> TuningSetting {
+        TuningSetting { device: device.into(), enabled, values: draft(values) }
+    }
+
+    /// A save of `values` that leaves no draft behind.
+    fn saving(device: &str, enabled: bool, values: BTreeMap<String, i32>) -> TuningAction {
+        TuningAction::Save { device: device.into(), enabled, values, draft: BTreeMap::new() }
+    }
+
+    #[test]
+    fn a_save_keeps_the_shown_values_and_a_copy_of_the_draft_they_came_from() {
+        let mut card = tuning_card();
+        card.controls[0].wanted = Some(-20);
+        let entered = draft(&[("power-limit", -30), ("core-p7-voltage", 1000)]);
+        let action = TuningAction::save(&card, Some(&entered), true);
+        assert_eq!(
+            action,
+            TuningAction::Save {
+                device: "gpu.amd-699f.bus-3".into(),
+                enabled: true,
+                values: entered.clone(),
+                draft: entered,
+            }
+        );
+        let untouched = TuningAction::save(&card, None, false);
+        assert_eq!(
+            untouched,
+            TuningAction::Save {
+                device: "gpu.amd-699f.bus-3".into(),
+                enabled: false,
+                values: draft(&[("power-limit", -20)]),
+                draft: draft(&[]),
+            },
+            "(save): expected the saved values and an empty draft"
+        );
+    }
+
+    #[test]
+    fn a_save_forgets_only_the_entries_it_sent() {
+        let sent = draft(&[("power-limit", -30), ("core-p7-voltage", 1000)]);
+        // While the request was under way the voltage was changed and a
+        // clock was entered.
+        let mut drafts: TuningDrafts = HashMap::from([
+            (
+                "gpu.card".to_owned(),
+                draft(&[("power-limit", -30), ("core-p7-voltage", 990), ("core-p7-clock", 1300)]),
+            ),
+            ("gpu.other".to_owned(), draft(&[("power-limit", -30)])),
+        ]);
+        tuning_drafts_after_save(&mut drafts, "gpu.card", &sent);
+        assert_eq!(
+            drafts["gpu.card"],
+            draft(&[("core-p7-voltage", 990), ("core-p7-clock", 1300)]),
+            "(draft): expected only the entries made after the send | received: {drafts:?}"
+        );
+        assert_eq!(drafts["gpu.other"], draft(&[("power-limit", -30)]), "another device's draft");
+
+        // Nothing was entered since: the device has no draft left.
+        let mut same: TuningDrafts = HashMap::from([("gpu.card".to_owned(), sent.clone())]);
+        tuning_drafts_after_save(&mut same, "gpu.card", &sent);
+        assert!(same.is_empty(), "(drafts): expected none left | received: {same:?}");
+        // A device without a draft stays without one.
+        tuning_drafts_after_save(&mut same, "gpu.card", &sent);
+        assert!(
+            same.is_empty(),
+            "(drafts): expected none for a device without one | received: {same:?}"
+        );
+    }
+
+    #[test]
+    fn a_request_is_made_from_the_profile_as_it_is_when_it_is_sent() {
+        let save = saving("gpu.card", true, draft(&[("a", 2)]));
+        // The same action, sent after another client saved other devices.
+        let at_the_click =
+            [setting("gpu.other", true, &[]), setting("gpu.card", false, &[("a", 1)])];
+        let at_the_send = [
+            setting("gpu.other", true, &[("b", 5)]),
+            setting("gpu.third", true, &[("c", 7)]),
+            setting("gpu.card", false, &[("a", 1)]),
+        ];
+        let card = setting("gpu.card", true, &[("a", 2)]);
+        assert_eq!(
+            tuning_request(&save, &[], &at_the_click),
+            Request::SetTuning(vec![setting("gpu.other", true, &[]), card.clone()])
+        );
+        assert_eq!(
+            tuning_request(&save, &[], &at_the_send),
+            Request::SetTuning(vec![
+                setting("gpu.other", true, &[("b", 5)]),
+                setting("gpu.third", true, &[("c", 7)]),
+                card,
+            ]),
+            "(request): expected the other devices as saved at the send"
+        );
+    }
+
+    #[test]
+    fn removing_drops_one_device_and_applying_again_sends_no_settings() {
+        let saved = [
+            setting("gpu.other", true, &[("b", 5)]),
+            setting("gpu.gone", false, &[("a", 1)]),
+            setting("gpu.third", true, &[("c", 7)]),
+        ];
+        let remove = TuningAction::Remove { device: "gpu.gone".into() };
+        assert_eq!(
+            tuning_request(&remove, &[], &saved),
+            Request::SetTuning(vec![saved[0].clone(), saved[2].clone()])
+        );
+
+        let again = TuningAction::ApplyAgain;
+        assert_eq!(tuning_request(&again, &[], &saved), Request::ApplyTuning);
+        assert_eq!(
+            tuning_settings_after(&again, &[], &saved),
+            saved,
+            "(settings): expected the saved ones to stay in effect"
+        );
+    }
+
+    #[test]
+    fn the_switch_sends_what_is_saved_as_the_profile_has_it_when_it_is_sent() {
+        let mut card = tuning_card();
+        card.controls[0].wanted = Some(-20);
+        let on = TuningAction::Switch { device: card.key.clone(), enabled: true };
+        let off = TuningAction::Switch { device: card.key.clone(), enabled: false };
+        let saved = [setting("gpu.other", true, &[("b", 5)])];
+
+        // With -30 entered and not saved, a Save would send it. The switch
+        // sends the saved -20 and leaves the entry a draft.
+        let entered = draft(&[("power-limit", -30)]);
+        let save = TuningAction::save(&card, Some(&entered), true);
+        let saved_by_save = tuning_settings_after(&save, std::slice::from_ref(&card), &saved);
+        assert_eq!(saved_by_save[1], setting(&card.key, true, &[("power-limit", -30)]));
+        let expected = setting(&card.key, true, &[("power-limit", -20)]);
+        let sent = tuning_settings_after(&on, std::slice::from_ref(&card), &saved);
+        assert_eq!(
+            sent,
+            [saved[0].clone(), expected],
+            "(switch on): expected the other device and the saved -20, not the entered -30"
+        );
+        let sent = tuning_settings_after(&off, std::slice::from_ref(&card), &saved);
+        assert_eq!(
+            sent,
+            [saved[0].clone(), setting(&card.key, false, &[("power-limit", -20)])],
+            "(switch off): expected the saved values kept, switched off"
+        );
+
+        // The values are those the device reports when the request is made:
+        // another client saved a different limit in between.
+        card.controls[0].wanted = Some(-10);
+        let later = tuning_request(&on, std::slice::from_ref(&card), &saved);
+        assert_eq!(
+            later,
+            Request::SetTuning(vec![
+                saved[0].clone(),
+                setting(&card.key, true, &[("power-limit", -10)])
+            ])
+        );
+
+        // Nothing saved and switched off leaves no setting, and a device
+        // that is gone is not switched.
+        card.controls[0].wanted = None;
+        assert_eq!(tuning_settings_after(&off, std::slice::from_ref(&card), &saved), saved);
+        assert_eq!(tuning_settings_after(&on, &[], &saved), saved);
+    }
+
+    /// A card with `key` and `name` whose voltage of state 7 is saved as
+    /// `wanted` and is `now` in effect. The state is what the service would
+    /// say for that.
+    fn card_at(
+        key: &str,
+        name: &str,
+        state: TuningState,
+        wanted: Option<i32>,
+        now: i32,
+    ) -> TuningDevice {
+        let mut card = tuning_card();
+        card.key = key.into();
+        card.name = name.into();
+        card.enabled = wanted.is_some();
+        card.state = state;
+        let voltage = card.controls.iter_mut().find(|control| control.key == "core-p7-voltage");
+        let voltage = voltage.expect("the test card has a voltage in state 7");
+        (voltage.wanted, voltage.current) = (wanted, now);
+        card
+    }
+
+    /// The voltage of `card_at`'s card, saved in the profile.
+    fn saved_voltage(key: &str, mv: i32) -> TuningSetting {
+        setting(key, true, &[("core-p7-voltage", mv)])
+    }
+
+    /// The name the question about `action` is about, if it asks one.
+    fn question<'a>(
+        action: &TuningAction,
+        devices: &'a [TuningDevice],
+        saved: &[TuningSetting],
+    ) -> Option<&'a str> {
+        tuning_question(action, devices, saved).map(|device| device.name.as_str())
+    }
+
+    #[test]
+    fn a_request_asks_about_a_held_voltage_whichever_device_the_user_clicked() {
+        // Held back since an abnormal stop: its voltage is saved, the device
+        // still holds the default. Any request lifts the hold.
+        let held = card_at("gpu.held", "RX 550", TuningState::Held, Some(1000), 1050);
+        let other = card_at("gpu.other", "RX 580", TuningState::Applied, None, 1050);
+        let devices = [other, held];
+        // The other card has a setting of its own, so that removing it is a
+        // real removal and not a no-op.
+        let saved =
+            [saved_voltage("gpu.held", 1000), setting("gpu.other", true, &[("power-limit", -10)])];
+        let limit_only = draft(&[("power-limit", -20)]);
+
+        let remove = TuningAction::Remove { device: "gpu.other".into() };
+        assert_eq!(
+            tuning_settings_after(&remove, &devices, &saved),
+            [saved[0].clone()],
+            "(settings): expected only the held card's setting left"
+        );
+        let actions = [remove, saving("gpu.other", true, limit_only), TuningAction::ApplyAgain];
+        for action in actions {
+            let asked = question(&action, &devices, &saved);
+            assert_eq!(
+                asked,
+                Some("RX 550"),
+                "(question): expected one naming the held RX 550 for {action:?} | received: {asked:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_voltage_in_effect_asks_nothing_and_neither_does_a_limit() {
+        let applied = card_at("gpu.card", "RX 550", TuningState::Applied, Some(1000), 1000);
+        let devices = [applied];
+        let saved = [saved_voltage("gpu.card", 1000)];
+        // A limit edited on a card whose saved voltage is already in effect.
+        let edit =
+            saving("gpu.card", true, draft(&[("power-limit", -20), ("core-p7-voltage", 1000)]));
+        let asked = question(&edit, &devices, &saved);
+        assert_eq!(asked, None, "(question): expected none for a limit edit | received: {asked:?}");
+        assert_eq!(question(&TuningAction::ApplyAgain, &devices, &saved), None);
+
+        // Back to the driver's default is no voltage of the user's.
+        let restore = saving("gpu.card", true, draft(&[]));
+        let asked = question(&restore, &devices, &saved);
+        assert_eq!(asked, None, "(question): expected none for the default | received: {asked:?}");
+    }
+
+    #[test]
+    fn turning_on_a_device_with_a_saved_voltage_asks_and_turning_it_off_does_not() {
+        // Saved earlier and switched off since: the profile still lists the
+        // voltage, which the card reports as what it would be set to.
+        let mut off = card_at("gpu.card", "RX 550", TuningState::Unmanaged, Some(1000), 1050);
+        off.enabled = false;
+        let devices = [off];
+        // Saved earlier, off since: the device holds the default.
+        let saved = [setting("gpu.card", false, &[("core-p7-voltage", 1000)])];
+        let on = saving("gpu.card", true, draft(&[("core-p7-voltage", 1000)]));
+        let asked = question(&on, &devices, &saved);
+        assert_eq!(
+            asked,
+            Some("RX 550"),
+            "(question): expected one naming RX 550 for {on:?} | received: {asked:?}"
+        );
+
+        let turn_off = saving("gpu.card", false, draft(&[("core-p7-voltage", 1000)]));
+        assert_eq!(question(&turn_off, &devices, &saved), None);
+
+        // The switch itself: it sends what is saved.
+        let flip_on = TuningAction::Switch { device: "gpu.card".into(), enabled: true };
+        let asked = question(&flip_on, &devices, &saved);
+        assert_eq!(
+            asked,
+            Some("RX 550"),
+            "(question): expected one naming RX 550 for {flip_on:?} | received: {asked:?}"
+        );
+        let flip_off = TuningAction::Switch { device: "gpu.card".into(), enabled: false };
+        assert_eq!(question(&flip_off, &devices, &saved), None);
+    }
+
+    #[test]
+    fn the_first_risky_device_is_named_and_a_device_that_is_not_there_is_never_risky() {
+        let first = card_at("gpu.a", "RX 550", TuningState::Different, Some(1000), 1050);
+        let second = card_at("gpu.b", "RX 580", TuningState::Different, Some(900), 1050);
+        let gone = TuningDevice::missing(&saved_voltage("gpu.gone", 1000));
+        let devices = [gone, first, second];
+        let saved = [
+            saved_voltage("gpu.b", 900),
+            saved_voltage("gpu.gone", 1000),
+            saved_voltage("gpu.a", 1000),
+        ];
+        let risky = tuning_risky_device(&devices, &saved).map(|device| device.name.as_str());
+        assert_eq!(risky, Some("RX 550"), "(risky device): expected the first in the list");
+
+        let only_gone = [TuningDevice::missing(&saved_voltage("gpu.gone", 1000))];
+        assert_eq!(tuning_risky_device(&only_gone, &saved), None);
+        assert_eq!(tuning_risky_device(&devices, &[]), None, "no setting, nothing set");
+    }
+
+    #[test]
+    fn an_entry_becomes_a_draft_only_when_it_changes_something() {
+        let mut control = tuning_control("power-limit", TuningKind::PowerLimit, None);
+        control.wanted = Some(-20);
+        let after = |draft: Option<&BTreeMap<String, i32>>, entered| {
+            tuning_draft_after(&control, draft, entered)
+        };
+        assert_eq!(after(None, Some(-20.0)), None, "the box echoing the saved value");
+        assert_eq!(after(None, None), None, "an emptied box");
+        assert_eq!(after(None, Some(f64::NAN)), None);
+        assert_eq!(after(None, Some(-30.4)), Some(Some(-30)));
+        assert_eq!(after(None, Some(500.0)), Some(Some(75)), "clamped to the range");
+        assert_eq!(after(None, Some(1e30)), Some(Some(75)), "too large for an i32 still clamps");
+        let entered = draft(&[("power-limit", -30)]);
+        assert_eq!(after(Some(&entered), Some(-30.0)), None, "the box echoing the draft");
+        assert_eq!(after(Some(&entered), Some(-20.0)), Some(None), "back at what is saved");
+    }
+
+    #[test]
+    fn every_tuning_kind_has_a_name_and_limits_have_a_sentence() {
+        let kinds = [
+            TuningKind::PowerLimit,
+            TuningKind::TemperatureLimit,
+            TuningKind::FanTargetTemperature,
+            TuningKind::FanMaxSpeed,
+            TuningKind::FanMinSpeed,
+            TuningKind::QuietClockFloor,
+            TuningKind::CoreClock,
+            TuningKind::CoreVoltage,
+            TuningKind::MemoryClock,
+            TuningKind::MemoryVoltage,
+        ];
+        for kind in kinds {
+            assert!(!tuning_control_name(kind).is_empty(), "{kind:?}");
+            let detail = tuning_control_detail(kind);
+            assert_eq!(detail.is_empty(), tuning_kind_is_risky(kind), "{kind:?}: {detail:?}");
         }
     }
 

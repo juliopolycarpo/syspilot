@@ -17,6 +17,10 @@ use syspilot_proto::message::{
 };
 use syspilot_proto::profile::{CurvePoint, CustomAction, Profile, UpdateMode};
 use syspilot_proto::sensor::{DeviceClass, DeviceInfo, Sample, SensorInfo, SensorKind, SensorList};
+use syspilot_proto::tuning::{
+    TunedDevice, TuningControl, TuningDevice, TuningKind, TuningSetting, TuningState, TuningStatus,
+    TuningUnit, check_values,
+};
 
 use crate::backend::{Backend, Change, Failure, Listener};
 use crate::model::Snapshot;
@@ -53,6 +57,11 @@ pub enum Scenario {
     FanUnknownBoard,
     /// As `Healthy`, and a newer version of SysPilot has been found.
     UpdateAvailable,
+    /// As `Healthy`, but the tuning values are held back: Windows did not
+    /// shut down normally after they were last set.
+    TuningHeld,
+    /// As `Healthy`, on a PC with no device that can be tuned.
+    TuningNone,
 }
 
 impl Scenario {
@@ -68,6 +77,8 @@ impl Scenario {
             "fan-no-driver" => Some(Self::FanNoDriver),
             "fan-unknown-board" => Some(Self::FanUnknownBoard),
             "update-available" => Some(Self::UpdateAvailable),
+            "tuning-held" => Some(Self::TuningHeld),
+            "tuning-none" => Some(Self::TuningNone),
             _ => None,
         }
     }
@@ -487,6 +498,113 @@ fn fan_feature_detail(scenario: Scenario) -> (bool, &'static str) {
     }
 }
 
+/// Key of the demo's graphics card.
+const DEMO_CARD: &str = "gpu.example-4070.bus-1";
+/// Key of a card the demo's profile still has values for, though it was
+/// taken out of the PC.
+const DEMO_ABSENT_CARD: &str = "gpu.example-1050.bus-2";
+
+/// The controls of the demo's graphics card, all at the driver's defaults.
+fn tuning_controls() -> Vec<TuningControl> {
+    let control =
+        |key: String, kind, state, unit, (min, max, default): (i32, i32, i32)| TuningControl {
+            key,
+            kind,
+            state,
+            unit,
+            min,
+            max,
+            step: 1,
+            default,
+            current: default,
+            wanted: None,
+        };
+    let alone = |key: &str, kind, unit, range| control(key.to_owned(), kind, None, unit, range);
+    let mut controls = vec![
+        alone("power-limit", TuningKind::PowerLimit, TuningUnit::Percent, (-50, 50, 0)),
+        alone("temperature-limit", TuningKind::TemperatureLimit, TuningUnit::Celsius, (60, 90, 85)),
+        alone("fan-max-speed", TuningKind::FanMaxSpeed, TuningUnit::Rpm, (1200, 3600, 3000)),
+    ];
+    let states = [(0, 300, 750), (1, 900, 850), (2, 1300, 950), (3, 1500, 1050)];
+    for (state, clock, voltage) in states {
+        controls.push(control(
+            format!("core-p{state}-clock"),
+            TuningKind::CoreClock,
+            Some(state),
+            TuningUnit::Megahertz,
+            (300, 1800, clock),
+        ));
+        controls.push(control(
+            format!("core-p{state}-voltage"),
+            TuningKind::CoreVoltage,
+            Some(state),
+            TuningUnit::Millivolt,
+            (700, 1150, voltage),
+        ));
+    }
+    controls.push(control(
+        "memory-p1-clock".to_owned(),
+        TuningKind::MemoryClock,
+        Some(1),
+        TuningUnit::Megahertz,
+        (1500, 2250, 2000),
+    ));
+    controls
+}
+
+/// What the demo's profile says about tuning in `scenario`.
+fn tuning_settings(scenario: Scenario) -> Vec<TuningSetting> {
+    if scenario == Scenario::TuningNone {
+        return Vec::new();
+    }
+    let values = |values: &[(&str, i32)]| {
+        values.iter().map(|(key, value)| ((*key).to_owned(), *value)).collect()
+    };
+    vec![
+        TuningSetting {
+            device: DEMO_CARD.into(),
+            enabled: true,
+            values: values(&[("power-limit", -10), ("core-p3-voltage", 1000)]),
+        },
+        TuningSetting {
+            device: DEMO_ABSENT_CARD.into(),
+            enabled: true,
+            values: values(&[("power-limit", -20)]),
+        },
+    ]
+}
+
+/// What the service would say about tuning with `settings` in the profile:
+/// the demo's card holds whatever it is asked to, unless `held`.
+fn tuning(scenario: Scenario, settings: &[TuningSetting], held: bool) -> TuningStatus {
+    if scenario == Scenario::TuningNone {
+        return TuningStatus::default();
+    }
+    let setting = settings.iter().find(|setting| setting.device == DEMO_CARD);
+    let enabled = setting.is_some_and(|setting| setting.enabled);
+    let card = TunedDevice {
+        key: DEMO_CARD.into(),
+        name: "Example Graphics 4070".into(),
+        interface: "Example graphics driver".into(),
+        controls: tuning_controls(),
+        problem: None,
+    };
+    let state = match (enabled, held) {
+        (false, _) => TuningState::Unmanaged,
+        (true, true) => TuningState::Held,
+        (true, false) => TuningState::Applied,
+    };
+    let mut card = TuningDevice::reported(&card, setting, state);
+    if enabled && !held {
+        for control in &mut card.controls {
+            control.current = control.expected();
+        }
+    }
+    let absent = settings.iter().filter(|setting| setting.device != DEMO_CARD);
+    let devices = std::iter::once(card).chain(absent.map(TuningDevice::missing)).collect();
+    TuningStatus { devices, problem: None }
+}
+
 fn status(scenario: Scenario) -> ServiceStatus {
     let with_driver = scenario.driver_ready();
     let feature = |key: &str, title: &str, available: bool, detail: &str| Feature {
@@ -554,7 +672,7 @@ fn status(scenario: Scenario) -> ServiceStatus {
             },
             checked_unix: Some(unix_now().saturating_sub(3 * 3600)),
         },
-        tuning: Default::default(),
+        tuning: tuning(scenario, &tuning_settings(scenario), scenario == Scenario::TuningHeld),
         problems: Vec::new(),
     }
 }
@@ -631,7 +749,8 @@ impl DemoBackend {
         let snapshot = Snapshot {
             elevated,
             status: Some(status(scenario)),
-            profile: elevated.then(|| profile_for(&states)),
+            profile: elevated
+                .then(|| Profile { tuning: tuning_settings(scenario), ..profile_for(&states) }),
             history: if elevated { history() } else { Vec::new() },
             sensors: sensors(scenario),
             system: system(),
@@ -648,7 +767,7 @@ impl DemoBackend {
 }
 
 /// Applies a request to the demo snapshot the way the service would.
-fn apply(snapshot: &mut Snapshot, request: &Request) -> Result<(), Failure> {
+fn apply(scenario: Scenario, snapshot: &mut Snapshot, request: &Request) -> Result<(), Failure> {
     let unknown = |id: &str| Failure::Other(format!("There is no entry called {id}."));
     let record = |snapshot: &mut Snapshot, id: &str, kind| {
         let event = HistoryEvent {
@@ -727,6 +846,27 @@ fn apply(snapshot: &mut Snapshot, request: &Request) -> Result<(), Failure> {
                 status.update.state = UpdateState::Installing;
             }
         }
+        Request::SetTuning(settings) => {
+            syspilot_proto::profile::validate_tuning(settings)
+                .map_err(|problem| Failure::Other(problem.to_string()))?;
+            for setting in settings.iter().filter(|setting| setting.device == DEMO_CARD) {
+                check_values(&tuning_controls(), &setting.values)
+                    .map_err(|problem| Failure::Other(problem.to_string()))?;
+            }
+            if let Some(profile) = &mut snapshot.profile {
+                profile.tuning.clone_from(settings);
+            }
+            // New values are the user's word: nothing is held back any more.
+            if let Some(status) = &mut snapshot.status {
+                status.tuning = tuning(scenario, settings, false);
+            }
+        }
+        Request::ApplyTuning => {
+            let settings = snapshot.profile.as_ref().map(|profile| profile.tuning.clone());
+            if let Some(status) = &mut snapshot.status {
+                status.tuning = tuning(scenario, &settings.unwrap_or_default(), false);
+            }
+        }
         _ => return Err(Failure::Other("The demo does not support this.".into())),
     }
     Ok(())
@@ -745,7 +885,7 @@ impl Backend for DemoBackend {
         if !state.snapshot.elevated {
             return Err(Failure::Other("Administrator rights are required.".into()));
         }
-        apply(&mut state.snapshot, request)?;
+        apply(self.scenario, &mut state.snapshot, request)?;
         // Tell every listener that is still there.
         state.listeners.retain(|listener| listener.send(()).is_ok());
         Ok(())
@@ -961,8 +1101,69 @@ mod tests {
         }
     }
 
+    fn tuning_of(demo: &DemoBackend) -> TuningStatus {
+        demo.load().unwrap().status.unwrap().tuning
+    }
+
+    #[test]
+    fn the_demo_card_holds_its_saved_values_and_an_absent_card_is_listed() {
+        let demo = DemoBackend::new(Scenario::Healthy);
+        let tuning = tuning_of(&demo);
+        assert_eq!(tuning.devices.len(), 2);
+        let card = &tuning.devices[0];
+        assert_eq!((card.enabled, &card.state), (true, &TuningState::Applied));
+        let limit = &card.controls[0];
+        assert_eq!((limit.wanted, limit.current, limit.default), (Some(-10), -10, 0));
+        let layout = model::tuning_layout(&card.controls);
+        assert_eq!((layout.limits.len(), layout.core.len(), layout.memory.len()), (3, 4, 1));
+        assert_eq!(tuning.devices[1].state, TuningState::Missing);
+        assert_eq!(demo.load().unwrap().profile.unwrap().tuning.len(), 2);
+    }
+
+    #[test]
+    fn saving_tuning_values_changes_the_profile_and_the_card() {
+        let demo = DemoBackend::new(Scenario::TuningHeld);
+        assert_eq!(tuning_of(&demo).devices[0].state, TuningState::Held);
+        assert_eq!(tuning_of(&demo).devices[0].controls[0].current, 0, "held: still the default");
+
+        let saved = demo.load().unwrap().profile.unwrap().tuning;
+        let values = [("power-limit".to_owned(), -25)].into();
+        let settings = model::tuning_settings_with(&saved, DEMO_CARD, true, values);
+        demo.send(&Request::SetTuning(settings)).unwrap();
+        let card = tuning_of(&demo).devices.remove(0);
+        assert_eq!(card.state, TuningState::Applied, "new values release what was held");
+        assert_eq!(card.controls[0].current, -25);
+        assert_eq!(card.controls[8].wanted, None, "the voltage is no longer listed");
+
+        // Turned off: the defaults come back and the values are kept.
+        let saved = demo.load().unwrap().profile.unwrap().tuning;
+        let values = [("power-limit".to_owned(), -25)].into();
+        let off = model::tuning_settings_with(&saved, DEMO_CARD, false, values);
+        demo.send(&Request::SetTuning(off)).unwrap();
+        let card = tuning_of(&demo).devices.remove(0);
+        assert_eq!((card.enabled, &card.state), (false, &TuningState::Unmanaged));
+        assert_eq!((card.controls[0].current, card.controls[0].wanted), (0, Some(-25)));
+    }
+
+    #[test]
+    fn the_demo_refuses_a_tuning_value_outside_its_range_and_applies_again_on_request() {
+        let demo = DemoBackend::new(Scenario::TuningHeld);
+        let values = [("power-limit".to_owned(), 90)].into();
+        let settings = model::tuning_settings_with(&[], DEMO_CARD, true, values);
+        let refusal = demo.send(&Request::SetTuning(settings)).unwrap_err();
+        assert_eq!(
+            refusal,
+            Failure::Other("(tuning.values.power-limit): expected -50..=50 | received: 90".into())
+        );
+        demo.send(&Request::ApplyTuning).unwrap();
+        assert_eq!(tuning_of(&demo).devices[0].state, TuningState::Applied);
+        assert_eq!(tuning_of(&DemoBackend::new(Scenario::TuningNone)), TuningStatus::default());
+    }
+
     #[test]
     fn scenario_names_parse() {
+        assert_eq!(Scenario::parse("tuning-held"), Some(Scenario::TuningHeld));
+        assert_eq!(Scenario::parse("tuning-none"), Some(Scenario::TuningNone));
         assert_eq!(Scenario::parse("fan-control"), Some(Scenario::FanControl));
         assert_eq!(Scenario::parse("fan-read-only"), Some(Scenario::FanReadOnly));
         assert_eq!(Scenario::parse("fan-no-driver"), Some(Scenario::FanNoDriver));
