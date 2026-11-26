@@ -103,7 +103,9 @@ The subject of each commit on `main` becomes a line of
    > git cliff --tag vX.Y.Z -o CHANGELOG.md
    ```
 
-   Regenerate the file if another PR merges first.
+   Regenerate the file if another PR merges first. Keep the PR to that one
+   commit: git-cliff lists any other commit on the branch, and the squash
+   merge removes it again, so the tag's check would fail.
 2. After the squash merge, tag the merge commit: `git tag -s vX.Y.Z -m
    "SysPilot X.Y.Z"` and push the tag.
 3. The tag runs the release workflow. It stops if `CHANGELOG.md` is not what
