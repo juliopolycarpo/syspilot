@@ -15,7 +15,7 @@ use windows_reactor::*;
 
 use crate::backend::{Backend, BackendHandle, Change, Failure, Listener};
 use crate::form::{Choice, CustomForm, Field};
-use crate::model::{self, Link, Snapshot, Tone, Trends, TuningDrafts, ViewLevel};
+use crate::model::{self, Link, Snapshot, Tone, Trends, TuningAction, TuningDrafts, ViewLevel};
 use crate::preferences::{self, Preferences, Theme};
 use crate::widgets::{self, Palette, glyph};
 use crate::{contrast, launch, pages};
@@ -181,10 +181,9 @@ pub enum Dialog {
     Tuning {
         /// Device name.
         name: String,
-        /// The settings to send when the user agrees.
-        settings: Vec<TuningSetting>,
-        /// The device's key, whose drafts and switch wait for the answer.
-        device: String,
+        /// What to do when the user agrees. The request is made then, from
+        /// the settings as they are by that time.
+        action: TuningAction,
     },
 }
 
@@ -550,11 +549,12 @@ impl App {
                 self.send(None, Request::RemoveCustom { id }, context);
             }
             Dialog::ClearHistory if agreed => self.send(None, Request::ClearHistory, context),
-            Dialog::Tuning { settings, device, .. } if agreed => {
-                self.send(Some(tuning_switch(&device)), Request::SetTuning(settings), context);
-            }
+            Dialog::Tuning { action, .. } if agreed => self.send_tuning(action, context),
             // Declined: the switch goes back; what was entered stays.
-            Dialog::Tuning { device, .. } => _ = self.pending.remove(&tuning_switch(&device)),
+            Dialog::Tuning { action: TuningAction::Save { device, .. }, .. } => {
+                _ = self.pending.remove(&tuning_switch(&device));
+            }
+            Dialog::Tuning { .. } => {}
             Dialog::AdvancedLevel | Dialog::RemoveCustom { .. } | Dialog::ClearHistory => {}
         }
     }
@@ -571,21 +571,49 @@ impl App {
         self.pending.get(&tuning_switch(&device.key)).copied().unwrap_or(device.enabled)
     }
 
-    /// Sends the shown values of a device with its switch at `enabled`,
-    /// after asking when that puts a clock or a voltage of the user's into
-    /// effect.
-    fn set_tuning(&mut self, key: &str, enabled: bool, context: &ComponentContext<Self>) {
-        let Some(device) = self.tuning_device(key).filter(|_| self.can_change()) else { return };
+    /// The tuning settings of the profile, as the service last reported them.
+    fn saved_tuning(&self) -> &[TuningSetting] {
+        self.snapshot.profile.as_ref().map_or(&[][..], |profile| &profile.tuning)
+    }
+
+    /// Saves the shown values of a device with its switch at `enabled`.
+    fn save_tuning(&mut self, key: &str, enabled: bool, context: &ComponentContext<Self>) {
+        let Some(device) = self.tuning_device(key) else { return };
         let values = model::tuning_values(device, self.tuning_drafts.get(key));
-        let risky = enabled && model::tuning_values_are_risky(device, &values);
-        let name = device.name.clone();
-        let saved = self.snapshot.profile.as_ref().map_or(&[][..], |profile| &profile.tuning);
-        let settings = model::tuning_settings_with(saved, key, enabled, values);
-        if risky {
-            self.dialog = Some(Dialog::Tuning { name, settings, device: key.to_owned() });
-        } else {
-            self.send(Some(tuning_switch(key)), Request::SetTuning(settings), context);
+        let action = TuningAction::Save { device: key.to_owned(), enabled, values };
+        self.start_tuning(action, context);
+    }
+
+    /// Does what the user asked of the tuning: sends it, after asking when
+    /// that puts a clock or a voltage of the user's into effect.
+    fn start_tuning(&mut self, action: TuningAction, context: &ComponentContext<Self>) {
+        if !self.can_change() {
+            return;
         }
+        let risky = match &action {
+            TuningAction::Save { device, enabled: true, values } => self
+                .tuning_device(device)
+                .filter(|found| model::tuning_values_are_risky(found, values))
+                .map(|found| found.name.clone()),
+            TuningAction::Save { .. } | TuningAction::Remove { .. } | TuningAction::ApplyAgain => {
+                None
+            }
+        };
+        match risky {
+            Some(name) => self.dialog = Some(Dialog::Tuning { name, action }),
+            None => self.send_tuning(action, context),
+        }
+    }
+
+    /// Sends `action`, made into a request from the settings as they are now.
+    fn send_tuning(&mut self, action: TuningAction, context: &ComponentContext<Self>) {
+        let request = model::tuning_request(&action, self.saved_tuning());
+        // Only a save waits on the device's switch.
+        let entry = match &action {
+            TuningAction::Save { device, .. } => Some(tuning_switch(device)),
+            TuningAction::Remove { .. } | TuningAction::ApplyAgain => None,
+        };
+        self.send(entry, request, context);
     }
 
     fn enter_tuning_value(&mut self, device: &str, control: &str, entered: Option<f64>) {
@@ -867,7 +895,7 @@ impl Component for App {
                     .is_some_and(|device| self.tuning_switch_position(device) != on);
                 if differs && self.can_change() {
                     self.pending.insert(tuning_switch(&key), on);
-                    self.set_tuning(&key, on, context);
+                    self.save_tuning(&key, on, context);
                 }
             }
             Message::SaveTuning(key) => {
@@ -876,18 +904,14 @@ impl Component for App {
                 let enabled = self
                     .tuning_device(&key)
                     .is_some_and(|device| self.tuning_switch_position(device));
-                self.set_tuning(&key, enabled, context);
+                self.save_tuning(&key, enabled, context);
             }
             Message::DiscardTuning(key) => _ = self.tuning_drafts.remove(&key),
             Message::DefaultTuning(key) => self.enter_tuning_defaults(&key),
             Message::RemoveTuning(key) => {
-                let saved = self.snapshot.profile.as_ref().map(|profile| profile.tuning.clone());
-                if let Some(mut settings) = saved.filter(|_| self.can_change()) {
-                    settings.retain(|setting| setting.device != key);
-                    self.send(None, Request::SetTuning(settings), context);
-                }
+                self.start_tuning(TuningAction::Remove { device: key }, context);
             }
-            Message::ApplyTuning => self.send(None, Request::ApplyTuning, context),
+            Message::ApplyTuning => self.start_tuning(TuningAction::ApplyAgain, context),
         }
     }
 

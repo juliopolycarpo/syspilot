@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 use syspilot_proto::catalog::{Catalog, Category, Direction, Level, Reboot, Tweak};
 use syspilot_proto::message::{
     ActionState, DriverState, EntryStatus, FanAvailability, FanChannelStatus, FanPhase, FanStatus,
-    HistoryEvent, HistoryKind, ServiceStatus, SystemInfo, UpdateState, UpdateStatus,
+    HistoryEvent, HistoryKind, Request, ServiceStatus, SystemInfo, UpdateState, UpdateStatus,
 };
 use syspilot_proto::profile::{CurvePoint, Profile, UpdateMode};
 use syspilot_proto::sensor::{DeviceClass, Sample, SensorInfo, SensorKind, SensorList};
@@ -1253,6 +1253,56 @@ pub fn tuning_settings_with(
     settings
 }
 
+/// What the user asked of the tuning. It is kept until it is sent, because
+/// `SetTuning` replaces every setting: the list to send is made from the
+/// profile as it is then, not as it was when the user clicked, so a change
+/// made meanwhile (a question was open, another client saved) is not undone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TuningAction {
+    /// "Save", or a switch flipped: the device's switch and values.
+    Save {
+        /// Key of the device.
+        device: String,
+        /// Whether its setting is in effect.
+        enabled: bool,
+        /// The values to keep; every control not listed gets its default.
+        values: BTreeMap<String, i32>,
+    },
+    /// "Remove" on a device that is not there: its setting goes.
+    Remove {
+        /// Key of the device.
+        device: String,
+    },
+    /// "Apply again": the saved settings are tried again.
+    ApplyAgain,
+}
+
+/// The settings in effect once `action` is done, on top of the profile's
+/// `saved` ones.
+pub fn tuning_settings_after(action: &TuningAction, saved: &[TuningSetting]) -> Vec<TuningSetting> {
+    match action {
+        TuningAction::Save { device, enabled, values } => {
+            tuning_settings_with(saved, device, *enabled, values.clone())
+        }
+        TuningAction::Remove { device } => {
+            saved.iter().filter(|setting| setting.device != *device).cloned().collect()
+        }
+        TuningAction::ApplyAgain => saved.to_vec(),
+    }
+}
+
+/// The request that does `action`, made from the profile's `saved` settings
+/// as they are now.
+pub fn tuning_request(action: &TuningAction, saved: &[TuningSetting]) -> Request {
+    match action {
+        // Nothing to replace: the service applies what the profile holds.
+        TuningAction::ApplyAgain => Request::ApplyTuning,
+        TuningAction::Save { .. } | TuningAction::Remove { .. } => {
+            Request::SetTuning(tuning_settings_after(action, saved))
+        }
+    }
+}
+
 /// The draft for a control after the user entered `entered`: clamped to the
 /// control's range, and dropped when it is what is saved anyway. `None`
 /// means the entry changes nothing (the box echoing its own value, or an
@@ -2013,6 +2063,63 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
         assert_eq!(added.len(), 1, "turned on with nothing listed still holds the defaults");
         let emptied = tuning_settings_with(&saved, "gpu.card", false, draft(&[]));
         assert_eq!(emptied, [other], "off and nothing listed: the setting goes");
+    }
+
+    fn setting(device: &str, enabled: bool, values: &[(&str, i32)]) -> TuningSetting {
+        TuningSetting { device: device.into(), enabled, values: draft(values) }
+    }
+
+    #[test]
+    fn a_request_is_made_from_the_profile_as_it_is_when_it_is_sent() {
+        let save = TuningAction::Save {
+            device: "gpu.card".into(),
+            enabled: true,
+            values: draft(&[("a", 2)]),
+        };
+        // The same action, sent after another client saved other devices.
+        let at_the_click =
+            [setting("gpu.other", true, &[]), setting("gpu.card", false, &[("a", 1)])];
+        let at_the_send = [
+            setting("gpu.other", true, &[("b", 5)]),
+            setting("gpu.third", true, &[("c", 7)]),
+            setting("gpu.card", false, &[("a", 1)]),
+        ];
+        let card = setting("gpu.card", true, &[("a", 2)]);
+        assert_eq!(
+            tuning_request(&save, &at_the_click),
+            Request::SetTuning(vec![setting("gpu.other", true, &[]), card.clone()])
+        );
+        assert_eq!(
+            tuning_request(&save, &at_the_send),
+            Request::SetTuning(vec![
+                setting("gpu.other", true, &[("b", 5)]),
+                setting("gpu.third", true, &[("c", 7)]),
+                card,
+            ]),
+            "(request): expected the other devices as saved at the send"
+        );
+    }
+
+    #[test]
+    fn removing_drops_one_device_and_applying_again_sends_no_settings() {
+        let saved = [
+            setting("gpu.other", true, &[("b", 5)]),
+            setting("gpu.gone", false, &[("a", 1)]),
+            setting("gpu.third", true, &[("c", 7)]),
+        ];
+        let remove = TuningAction::Remove { device: "gpu.gone".into() };
+        assert_eq!(
+            tuning_request(&remove, &saved),
+            Request::SetTuning(vec![saved[0].clone(), saved[2].clone()])
+        );
+
+        let again = TuningAction::ApplyAgain;
+        assert_eq!(tuning_request(&again, &saved), Request::ApplyTuning);
+        assert_eq!(
+            tuning_settings_after(&again, &saved),
+            saved,
+            "(settings): expected the saved ones to stay in effect"
+        );
     }
 
     #[test]
