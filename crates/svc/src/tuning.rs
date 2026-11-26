@@ -520,11 +520,17 @@ impl Tuning {
     /// `current` is whether the job began in the round that is now running;
     /// only then is a device's problem held against it.
     fn after_change(&mut self, job: &TuneJob, report: &TuneReport, current: bool, now: Instant) {
+        // A device's own problem, or else the report's: an interface that
+        // could not list its devices skipped every change to them, so what
+        // the job was to do there did not happen. Only one interface exists
+        // today, so the report's problem is taken to concern every device.
         let problem_of = |key: &str| {
-            report.devices.iter().find(|device| device.key == key).and_then(|d| d.problem.clone())
+            let device = report.devices.iter().find(|device| device.key == key);
+            device.and_then(|device| device.problem.clone()).or_else(|| report.problem.clone())
         };
         for key in &job.reset {
-            // A reset that failed is tried again by the next look.
+            // A reset that failed, or never ran, is tried again by the next
+            // look.
             if problem_of(key).is_none() {
                 self.managed.remove(key);
             }
@@ -648,7 +654,8 @@ impl Tuning {
             .collect();
         // A setting for a device that is not there has to show somewhere. When
         // an interface could not list its devices, the device may well be
-        // there: that is a failure to say so, not a missing card.
+        // there: that is a failure to say so, not a missing card. With one
+        // interface only, the problem is taken to concern every device.
         let absent = self
             .settings
             .iter()
@@ -1444,6 +1451,63 @@ mod tests {
         fixture.tuning.apply_again(fixture.now);
         fixture.pass(0);
         fixture.assert_state(&TuningState::Applied, "once the devices are listed again");
+    }
+
+    /// Lets the job under way end, with the fake's devices as they are now.
+    fn end_running_job(fixture: &mut Fixture) {
+        let outcome = fixture.tuner.outcome_of_last();
+        fixture.tuning.finished(outcome, fixture.now);
+    }
+
+    #[test]
+    fn a_reset_skipped_because_the_devices_could_not_be_listed_is_tried_again() {
+        let mut fixture = Fixture::new(vec![setting(&[("power-limit", -20)])]);
+        fixture.pass(0);
+        assert_eq!(fixture.current("power-limit"), -20);
+
+        let off = TuningSetting { enabled: false, ..setting(&[("power-limit", -20)]) };
+        fixture.tuning.set_settings(vec![off], fixture.now);
+        fixture.tuning.run_due(fixture.now);
+        end_running_job(&mut fixture);
+        assert_eq!(fixture.kinds_of_jobs().last(), Some(&"reset"), "the look starts a reset");
+        // The reset finds no device to reset.
+        fixture.tuner.state().backend.unlisted = Some("(adapters): expected a list".into());
+        end_running_job(&mut fixture);
+        fixture.assert_managed("after a reset that never ran");
+
+        fixture.tuner.state().backend.unlisted = None;
+        fixture.pass(45);
+        let current = fixture.tuner.state().backend.devices[0].controls[0].current;
+        assert_eq!(
+            current, 0,
+            "(power-limit after the next look): expected 0 | received: {current}"
+        );
+    }
+
+    #[test]
+    fn an_apply_skipped_because_the_devices_could_not_be_listed_fails() {
+        let mut fixture = Fixture::new(vec![setting(&[("power-limit", -20)])]);
+        fixture.tuning.run_due(fixture.now);
+        end_running_job(&mut fixture);
+        assert_eq!(fixture.kinds_of_jobs().last(), Some(&"apply"), "the look starts an apply");
+        // Listed for the report, not for the apply: the fake cannot tell the
+        // two apart, so the device is left out of both.
+        fixture.tuner.state().backend.unlisted = Some("(adapters): expected a list".into());
+        end_running_job(&mut fixture);
+        // The next look lists the device again and finds the value missing:
+        // the apply failed, so it is not tried again before a trigger, and
+        // does not count towards giving up on a contested device.
+        fixture.tuner.state().backend.unlisted = None;
+        fixture.pass(45);
+        fixture.assert_state(
+            &TuningState::Failed { reason: "(adapters): expected a list".into() },
+            "at the next look after an apply that never ran",
+        );
+        let current = fixture.current("power-limit");
+        assert_eq!(
+            current, 0,
+            "(power-limit): expected the default, not applied | received: {current}"
+        );
     }
 
     #[test]
