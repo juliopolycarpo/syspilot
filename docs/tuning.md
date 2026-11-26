@@ -40,12 +40,16 @@ Each device is a card with a switch, its values and three buttons.
   driver's default, and what the device has now when that is something else.
 - **Save** stores the values. If tuning is on for the device, they take
   effect at once.
-- The switch turns tuning on or off for the device.
+- The switch turns tuning on or off for the device, with the values saved
+  for it. Values entered and not saved stay entries.
 - **Use defaults** enters the default of every value, to be saved like any
   other entry.
 
 Before a clock or a voltage of yours takes effect, the app asks. Limits take
 effect without a question: they make a device slower or louder, not unstable.
+The question can come on any change, not only one to the device it names:
+while values are held back, saving or removing values on one card, or
+**Apply again**, sets the held values of every card too.
 
 Changing anything needs the app to run as administrator.
 
@@ -56,7 +60,7 @@ Changing anything needs the app to run as administrator.
 | Applied | Tuning is on and the device has your values. |
 | Not applied yet | Tuning is on and the device has other values right now. SysPilot is setting yours. |
 | Contested | Something else keeps changing the values. SysPilot set them three times and stopped. **Apply again** starts over. |
-| Held back | Windows did not shut down normally after the values were last set, so SysPilot has not set them again. Change them, or choose **Apply again** if they were not the cause. |
+| Held back | Windows did not shut down normally after the values were last set, so SysPilot has not set them again. Change them, or choose **Apply again** if they were not the cause. A card that has your values anyway says **Applied**. |
 | Failed | The values could not be set; the card says why. |
 | Not found | The profile has values for a device that is not in this PC now. They are kept until you choose **Remove**. |
 
