@@ -260,7 +260,7 @@ pub fn probe() -> Vec<Box<dyn Provider>> {
         registry::read_u32(PROCESSOR_KEY, "~MHz").filter(|mhz| *mhz > 0).map(|mhz| ClockModel {
             nominal_mhz: f64::from(mhz),
             performance: PdhPerformance::open()
-                .map(|source| Box::new(source) as Box<dyn PerformanceSource>),
+                .map(|source| -> Box<dyn PerformanceSource> { Box::new(source) }),
         });
     vec![Box::new(CpuProvider::new(device, first.len(), Box::new(times), clock))]
 }

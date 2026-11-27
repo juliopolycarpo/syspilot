@@ -393,6 +393,7 @@ impl Drop for FanSession {
 
 #[cfg(test)]
 mod tests {
+    use std::mem::ManuallyDrop;
     use std::sync::{Mutex, MutexGuard, PoisonError};
 
     use super::*;
@@ -768,7 +769,8 @@ may-stop = false
         let mut rig = Rig::new();
         let mut crashed = rig.start(&[curve("board.pwm1")]).unwrap();
         steps(&mut crashed, Some(45.0), 3);
-        std::mem::forget(crashed);
+        // Its `Drop` would hand the fans back; a crash does not get to run it.
+        let _crashed = ManuallyDrop::new(crashed);
         assert_eq!(rig.register(0x102), BIOS_MODE & 0x0F, "the crash left manual mode");
         assert_eq!(rig.store.0.lock().unwrap().len(), 1);
 

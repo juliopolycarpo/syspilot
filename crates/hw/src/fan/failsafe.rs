@@ -997,6 +997,7 @@ fn install_panic_hook() {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::mem::ManuallyDrop;
 
     use super::*;
     use crate::chips::nct67xx::Chip;
@@ -1332,7 +1333,7 @@ may-stop = true
             .map(|(index, (channel, source))| {
                 let board_channel = grant.channel(index as u8 + 1).unwrap();
                 let plan = ChannelPlan::new(board_channel, curve(), source, tuning).unwrap();
-                (plan, Box::new(channel.clone()) as Box<dyn FanChannel>)
+                (plan, channel.duplicate())
             })
             .collect();
         FanController::new(policy, Box::new(store.clone()), planned).unwrap()
@@ -1750,7 +1751,8 @@ may-stop = true
     fn crashed_while_controlling() -> (FakeOriginalStore, Vec<FakeFanChannel>, EventLog) {
         let rig = controlled();
         let Rig { controller, store, channels, log } = rig;
-        std::mem::forget(controller);
+        // Its `Drop` would hand the fans back; a crash does not get to run it.
+        let _crashed = ManuallyDrop::new(controller);
         (store, channels, log)
     }
 
@@ -1848,7 +1850,7 @@ may-stop = true
         let mut restarted = FanController::new(
             FailSafePolicy::default(),
             Box::new(store),
-            vec![(plan, Box::new(channels[0].clone()) as Box<dyn FanChannel>)],
+            vec![(plan, channels[0].duplicate())],
         )
         .unwrap();
         let events = restarted.recover();
@@ -1896,7 +1898,7 @@ may-stop = true
         FanController::new(
             FailSafePolicy::default(),
             Box::new(store.clone()),
-            vec![(plan, Box::new(channel.clone()) as Box<dyn FanChannel>)],
+            vec![(plan, channel.duplicate())],
         )
         .unwrap()
     }
@@ -2077,7 +2079,7 @@ may-stop = true
                     NO_RAMP,
                 )
                 .unwrap();
-                (plan, Box::new(channel.clone()) as Box<dyn FanChannel>)
+                (plan, channel.duplicate())
             })
             .collect();
         let error = FanController::new(FailSafePolicy::default(), Box::new(store), plans)
@@ -2224,7 +2226,7 @@ may-stop = true
         let controller = FanController::new(
             FailSafePolicy::default(),
             Box::new(store.clone()),
-            vec![(plan, Box::new(channels[0].clone()) as Box<dyn FanChannel>)],
+            vec![(plan, channels[0].duplicate())],
         )
         .unwrap();
         // The state a panic inside take_manual leaves: original saved and held,

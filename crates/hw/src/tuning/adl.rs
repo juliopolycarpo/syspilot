@@ -484,13 +484,13 @@ mod tests {
 
     #[test]
     fn a_string_field_ends_at_its_terminator() {
-        let mut field = [0 as c_char; 16];
+        let mut field: [c_char; 16] = [0; 16];
         for (slot, byte) in field.iter_mut().zip(b" RX 550 \0junk") {
             *slot = *byte as c_char;
         }
         assert_eq!(text(&field), "RX 550");
-        assert_eq!(text(&[0 as c_char; 4]), "");
-        let mut padded = [0 as c_char; 16];
+        assert_eq!(text(&[0; 4]), "");
+        let mut padded: [c_char; 16] = [0; 16];
         for (slot, byte) in padded.iter_mut().zip(b"Radeon  RX\t550") {
             *slot = *byte as c_char;
         }

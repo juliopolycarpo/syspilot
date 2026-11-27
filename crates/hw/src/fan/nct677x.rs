@@ -331,6 +331,7 @@ impl FanChannel for Nct677xChannel {
 
 #[cfg(test)]
 mod tests {
+    use std::mem::ManuallyDrop;
     use std::sync::{MutexGuard, PoisonError};
 
     use super::*;
@@ -908,7 +909,8 @@ may-stop = false
         for _ in 0..3 {
             crashed.tick(&readings(Some(45.0)), 1.0);
         }
-        std::mem::forget(crashed);
+        // Its `Drop` would hand the fans back; a crash does not get to run it.
+        let _crashed = ManuallyDrop::new(crashed);
         assert_eq!(rig.register(0x102), 0x05, "the crash left manual mode");
 
         let mut restarted = controller_over(&rig, &store);
