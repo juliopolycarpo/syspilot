@@ -1,6 +1,7 @@
 //! Assembles the real service from its parts.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use syspilot_engine::os::{Hive, Registry, reg_type};
 use syspilot_engine::win::{self, WinRegistry};
@@ -57,7 +58,7 @@ pub fn serve(
     data.secure()?;
     // Taking the pipe name is also what makes this the only running copy,
     // so it happens before anything is applied.
-    pipe::start(instance, queue.clone()).map_err(|error| match error.kind() {
+    let replies = pipe::start(instance, queue.clone()).map_err(|error| match error.kind() {
         std::io::ErrorKind::PermissionDenied => {
             format!("{} is already running.", instance.name())
         }
@@ -93,8 +94,17 @@ pub fn serve(
         .map_err(|error| format!("create the sensor section: {error}"))?;
     on_ready();
     host.run();
+    // The last answer, such as the one to `Shutdown`, may still be on its
+    // way to the client; the process ending now would cut it off. The
+    // host's shutdown has already failed the requests it parked or had
+    // not taken yet, so only answers handed over are waited for, and the
+    // bound covers a client that stops reading one.
+    replies.wait_until_written(REPLY_GRACE);
     Ok(())
 }
+
+/// How long a stopping service waits for its last answers to be written.
+const REPLY_GRACE: Duration = Duration::from_secs(1);
 
 #[cfg(test)]
 mod tests {
