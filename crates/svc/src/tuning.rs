@@ -1314,21 +1314,223 @@ mod tests {
         fixture.assert_state(&failed, "after the failure of the round's own apply");
     }
 
+    /// A job that ends every process in it when the test drops it, so that
+    /// what a test starts does not outlive the test.
+    struct ProcessTreeJob {
+        job: syspilot_proto::win::OwnedHandle,
+        /// The process [`Self::assign`] put in; the others are its
+        /// descendants.
+        assigned: std::cell::Cell<Option<u32>>,
+    }
+
+    impl ProcessTreeJob {
+        fn new() -> io::Result<Self> {
+            use windows_sys::Win32::System::JobObjects::{
+                CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+                SetInformationJobObject,
+            };
+            // SAFETY: null attributes and name create an anonymous job.
+            let job = syspilot_proto::win::OwnedHandle::new(unsafe {
+                CreateJobObjectW(std::ptr::null(), std::ptr::null())
+            })?;
+            // SAFETY: the structure is plain data for which all-zero is valid.
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // SAFETY: `limits` matches the information class and outlives
+            // the call; the size passed is its size.
+            let set = unsafe {
+                SetInformationJobObject(
+                    job.raw(),
+                    JobObjectExtendedLimitInformation,
+                    std::ptr::from_ref(&limits).cast(),
+                    size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                )
+            };
+            if set == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Self { job, assigned: std::cell::Cell::new(None) })
+        }
+
+        /// Puts `child` in the job; the processes it starts from then on
+        /// are in it too.
+        fn assign(&self, child: &Child) -> io::Result<()> {
+            use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+            // SAFETY: both handles are valid for the duration of the call.
+            if unsafe { AssignProcessToJobObject(self.job.raw(), child.as_raw_handle()) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            self.assigned.set(Some(child.id()));
+            Ok(())
+        }
+
+        /// The ids of the processes in the job that [`Self::assign`] did
+        /// not put there: those the assigned one started.
+        fn descendants(&self) -> Vec<u32> {
+            use windows_sys::Win32::System::JobObjects::{
+                JobObjectBasicProcessIdList, QueryInformationJobObject,
+            };
+            /// `JOBOBJECT_BASIC_PROCESS_ID_LIST` with room for more than the
+            /// one id the Windows header declares.
+            #[repr(C)]
+            struct ProcessIdList {
+                assigned: u32,
+                listed: u32,
+                ids: [usize; 16],
+            }
+            let mut list = ProcessIdList { assigned: 0, listed: 0, ids: [0; 16] };
+            // SAFETY: `list` has the layout of the information class with a
+            // longer array, outlives the call, and the size passed is its size.
+            let queried = unsafe {
+                QueryInformationJobObject(
+                    self.job.raw(),
+                    JobObjectBasicProcessIdList,
+                    std::ptr::from_mut(&mut list).cast(),
+                    size_of::<ProcessIdList>() as u32,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_ne!(
+                queried,
+                0,
+                "(job): expected its process ids | received: {}",
+                io::Error::last_os_error()
+            );
+            let listed = list.ids.iter().take(list.listed as usize);
+            // Process ids are 32-bit; the list holds them in pointer-sized slots.
+            let ids = listed.filter_map(|&id| u32::try_from(id).ok());
+            ids.filter(|&id| Some(id) != self.assigned.get()).collect()
+        }
+
+        /// Whether a process the assigned one started runs `image` (a file
+        /// name such as `PING.EXE`, in any case). By name, because the
+        /// console host Windows starts for `cmd` joins the job too, and
+        /// before `ping` does.
+        fn runs(&self, image: &str) -> bool {
+            self.descendants()
+                .into_iter()
+                .filter_map(image_name)
+                .any(|name| name.eq_ignore_ascii_case(image))
+        }
+    }
+
+    /// The file name of the executable process `pid` runs, or `None` once it
+    /// has ended or cannot be opened.
+    fn image_name(pid: u32) -> Option<String> {
+        use syspilot_proto::win::OwnedHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+            QueryFullProcessImageNameW,
+        };
+        // SAFETY: no pointers are passed; a failed open returns null, which
+        // `OwnedHandle::new` rejects.
+        let process =
+            OwnedHandle::new(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) })
+                .ok()?;
+        let mut path = [0u16; 1024];
+        let mut length = path.len() as u32;
+        // SAFETY: `process` was opened with the right the call needs; `path`
+        // has room for `length` UTF-16 units, and the call writes back how
+        // many it used.
+        let named = unsafe {
+            QueryFullProcessImageNameW(
+                process.raw(),
+                PROCESS_NAME_WIN32,
+                path.as_mut_ptr(),
+                &mut length,
+            )
+        };
+        if named == 0 {
+            return None;
+        }
+        let path = String::from_utf16_lossy(path.get(..length as usize)?);
+        path.rsplit('\\').next().map(str::to_owned)
+    }
+
+    /// Resumes every thread of the process `pid`, which was started
+    /// suspended: std does not hand out the primary thread's handle, so the
+    /// threads are found in a snapshot of the system's threads.
+    fn resume_threads_of(pid: u32) -> io::Result<()> {
+        use syspilot_proto::win::OwnedHandle;
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+        };
+        use windows_sys::Win32::System::Threading::{
+            OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
+        };
+        // SAFETY: a thread snapshot takes no process id and has no
+        // preconditions; failure is checked by `OwnedHandle::new`.
+        let snapshot = OwnedHandle::new(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) })?;
+        let mut entry =
+            THREADENTRY32 { dwSize: size_of::<THREADENTRY32>() as u32, ..Default::default() };
+        let mut resumed = 0;
+        // SAFETY: `snapshot` is a valid snapshot handle and `entry` a live
+        // THREADENTRY32 whose `dwSize` is set, as the call requires.
+        let mut more = unsafe { Thread32First(snapshot.raw(), &mut entry) } != 0;
+        while more {
+            if entry.th32OwnerProcessID == pid {
+                // SAFETY: no pointers are passed; a failed open returns null,
+                // which `OwnedHandle::new` rejects.
+                let thread = OwnedHandle::new(unsafe {
+                    OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID)
+                })?;
+                // SAFETY: `thread` is a valid handle opened with
+                // THREAD_SUSPEND_RESUME, the right ResumeThread needs.
+                if unsafe { ResumeThread(thread.raw()) } == u32::MAX {
+                    return Err(io::Error::last_os_error());
+                }
+                resumed += 1;
+            }
+            // SAFETY: as for `Thread32First`.
+            more = unsafe { Thread32Next(snapshot.raw(), &mut entry) } != 0;
+        }
+        if resumed == 0 {
+            return Err(io::Error::other(format!(
+                "(suspended child): expected a thread of process {pid} to resume | received: none"
+            )));
+        }
+        Ok(())
+    }
+
     /// A child that neither reads its input nor reports, as a tuner stuck in
     /// a driver call. `cmd` starts `ping` and ends with the kill, but `ping`
     /// lives on with the pipes it inherited, so anything that waits for the
     /// pipes to close waits as long as `ping` runs: about seven seconds.
-    fn spawn_stuck_child() -> io::Result<Spawned> {
+    ///
+    /// Both go into `job`, which ends `ping` when the test is done. `cmd`
+    /// starts suspended and runs only once it is in the job, so `ping`, which
+    /// it starts, is in the job too.
+    ///
+    /// Returns once `ping` runs, so that the tuner's timeout, which starts
+    /// then, cannot end `cmd` before `ping` exists on a slow machine.
+    fn spawn_stuck_child(job: &ProcessTreeJob) -> io::Result<Spawned> {
         use std::os::windows::process::CommandExt;
         use std::process::{Command, Stdio};
-        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+        use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
         let mut process = Command::new("cmd")
             .args(["/c", "ping", "-n", "8", "127.0.0.1", ">nul"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW)
+            .creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED)
             .spawn()?;
+        if let Err(error) = job.assign(&process).and_then(|()| resume_threads_of(process.id())) {
+            let _ = process.kill();
+            return Err(error);
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !job.runs("PING.EXE") {
+            if Instant::now() >= deadline {
+                let _ = process.kill();
+                let running: Vec<String> =
+                    job.descendants().into_iter().filter_map(image_name).collect();
+                return Err(io::Error::other(format!(
+                    "(stuck child): expected cmd to start PING.EXE in the job within 5 s | received: {running:?}"
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let streams = process.stdin.take().zip(process.stdout.take());
         streams
             .map(|(input, output)| (process, input, output))
@@ -1350,9 +1552,25 @@ mod tests {
             reset: Vec::new(),
         };
         for job in [TuneJob::default(), large] {
-            let started = Instant::now();
-            let outcome = run_tuner(&job, spawn_stuck_child, 300);
-            let took = started.elapsed();
+            let tree = ProcessTreeJob::new().unwrap();
+            // From when the child runs: waiting for `ping` is not the tuner's time.
+            let started = std::cell::Cell::new(Instant::now());
+            let spawn = || {
+                let spawned = spawn_stuck_child(&tree);
+                started.set(Instant::now());
+                spawned
+            };
+            let outcome = run_tuner(&job, spawn, 300);
+            let took = started.get().elapsed();
+            // `ping` outlived the kill with the pipes, or the test would not
+            // show that nothing waits for them. Looked for by name: `cmd`
+            // may still be listed while its kill takes effect, and its
+            // console host is in the job too.
+            assert!(
+                tree.runs("PING.EXE"),
+                "(processes cmd started, in the tuner's job): expected PING.EXE still running | received: {:?}",
+                tree.descendants().into_iter().filter_map(image_name).collect::<Vec<_>>()
+            );
             assert_eq!(
                 outcome,
                 Err("(tuner): expected its report within 0.3 s | received: nothing".to_owned()),
