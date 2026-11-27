@@ -116,8 +116,10 @@ impl PendingReplies {
     }
 
     /// Waits until every answer has been written, or `bound` has passed.
-    /// Returns whether they all were. A request that reached the queue but
-    /// not the loop is never answered, so it holds this up to `bound`.
+    /// Returns whether they all were. Once the loop has shut down, an answer
+    /// is only still owed while its write is under way: parked and queued
+    /// requests were failed by then. A client that stops reading a large
+    /// answer holds this up to `bound`.
     pub fn wait_until_written(&self, bound: Duration) -> bool {
         let unwritten = self.unwritten.lock().unwrap_or_else(PoisonError::into_inner);
         let (unwritten, _) = self
@@ -436,6 +438,33 @@ mod tests {
             );
             assert_eq!(request.join().unwrap().unwrap(), Response::States(vec![]));
         });
+    }
+
+    /// Pins "until written", not "until handed over": an answer larger
+    /// than the pipe's buffers cannot be written while its client does not
+    /// read, so it must still be owed then.
+    #[test]
+    fn an_answer_stays_owed_while_its_write_is_under_way() {
+        let server = TestServer::start();
+        let mut stream = PipeStream::connect(&server.instance.pipe_name(), 3000).unwrap();
+        write_frame(&mut stream, &Request::Hello { protocol: PROTOCOL_VERSION }).unwrap();
+        assert!(matches!(read_frame(&mut stream).unwrap(), Response::Hello(_)));
+        write_frame(&mut stream, &Request::States).unwrap();
+        let Event::Request { reply, .. } = server.next_event() else {
+            panic!("expected a Request event");
+        };
+        let message = "x".repeat(4 * BUFFER_BYTES as usize);
+        let large = Response::Error(ServiceError { code: ErrorCode::Invalid, message });
+        reply.send(large.clone()).unwrap();
+        assert!(
+            !server.pending.wait_until_written(Duration::from_millis(200)),
+            "(answer larger than the pipe buffers, client not reading): expected owed | received: written"
+        );
+        assert_eq!(read_frame::<_, Response>(&mut stream).unwrap(), large);
+        assert!(
+            server.pending.wait_until_written(Duration::from_secs(5)),
+            "(answer once the client read it): expected written within 5 s | received: still owed"
+        );
     }
 
     #[test]

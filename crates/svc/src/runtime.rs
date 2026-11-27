@@ -95,10 +95,10 @@ pub fn serve(
     on_ready();
     host.run();
     // The last answer, such as the one to `Shutdown`, may still be on its
-    // way to the client; the process ending now would cut it off. Dropping
-    // the host first gives up on requests it parked, so only answers
-    // already handed over are waited for.
-    drop(host);
+    // way to the client; the process ending now would cut it off. The
+    // host's shutdown has already failed the requests it parked or had
+    // not taken yet, so only answers handed over are waited for, and the
+    // bound covers a client that stops reading one.
     replies.wait_until_written(REPLY_GRACE);
     Ok(())
 }
