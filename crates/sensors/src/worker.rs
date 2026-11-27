@@ -280,7 +280,7 @@ mod tests {
             BIOS_MODE, CPU, ReplayHandles, crashed_replay_access, curve, replay_access,
         };
         use std::collections::VecDeque;
-        use std::sync::{Arc, Mutex};
+        use std::sync::{Arc, Mutex, PoisonError};
         use syspilot_proto::message::{FanPhase, FanRuntime};
 
         fn replay_machine(temperature: f64) -> (Machine, ReplayHandles) {
@@ -415,7 +415,9 @@ mod tests {
 
         impl Write for SharedFrames {
             fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(bytes);
+                // A poisoned lock only means another thread panicked; the
+                // buffer is a plain byte vector and stays usable.
+                self.0.lock().unwrap_or_else(PoisonError::into_inner).extend_from_slice(bytes);
                 Ok(bytes.len())
             }
             fn flush(&mut self) -> std::io::Result<()> {
