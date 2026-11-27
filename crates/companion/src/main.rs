@@ -231,7 +231,11 @@ mod tests {
             parse(&arguments("--colour red")).unwrap_err().ends_with("received: --colour"),
             "(unknown option): expected it named"
         );
-        assert!(parse(&arguments("--instance a/b --from 1 --app a.exe")).is_err());
+        let bad_instance = parse(&arguments("--instance a/b --from 1 --app a.exe"));
+        assert!(
+            bad_instance.is_err(),
+            "(--instance a/b): expected an error | received: {bad_instance:?}"
+        );
     }
 
     #[test]

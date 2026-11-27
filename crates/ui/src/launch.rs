@@ -251,7 +251,7 @@ fn place_companion(source: &Path, data_directory: &Path) -> io::Result<PathBuf> 
     if !source.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            format!("{COMPANION_EXECUTABLE} is not next to the app"),
+            format!("(companion): expected {} | received: no such file", source.display()),
         ));
     }
     let folder = data_directory.join(COMPANION_FOLDER);
@@ -425,7 +425,8 @@ mod tests {
     #[test]
     fn the_data_directory_is_the_instances_under_program_data() {
         let directory = data_directory(&Instance::named("SysPilot-Test.ui").unwrap());
-        let program_data = std::env::var_os("ProgramData").unwrap_or_default();
+        let program_data =
+            std::env::var_os("ProgramData").unwrap_or_else(|| r"C:\ProgramData".into());
         assert_eq!(directory, Path::new(&program_data).join("SysPilot-Test.ui"));
     }
 
