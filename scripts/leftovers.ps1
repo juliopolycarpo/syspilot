@@ -16,11 +16,14 @@
 #>
 
 # The names of everything under $Folder, hidden items included; none when
-# $Folder does not exist, and its own name when it is a file. Never looks
-# outside $Folder.
+# $Folder does not exist, and its own name when it is a file. A folder that
+# cannot be read is named as "unreadable: <path>", so that a check built on
+# this says what it could not look at. Never looks outside $Folder.
 function Get-LeftoverName([Parameter(Mandatory)] [string] $Folder) {
     if (-not (Test-Path -LiteralPath $Folder)) {
         return @()
     }
-    @(Get-ChildItem -LiteralPath $Folder -Recurse -Force | ForEach-Object Name)
+    $names = @(Get-ChildItem -LiteralPath $Folder -Recurse -Force -ErrorVariable unreadable -ErrorAction SilentlyContinue |
+        ForEach-Object Name)
+    $names + @($unreadable | ForEach-Object { "unreadable: $($_.TargetObject)" })
 }
