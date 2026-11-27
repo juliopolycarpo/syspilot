@@ -156,18 +156,24 @@ fn run(options: &Options) {
         )
     });
 
-    let last = match dialog::show_progress(shared, options.to.as_deref(), give_up) {
-        ProgressEnd::Ended(phase) => phase,
+    let (last, shown) = match dialog::show_progress(shared, options.to.as_deref(), give_up) {
+        ProgressEnd::Ended(phase) => (phase, true),
         // Closed by the user: the update goes on, and nobody waits for it.
         ProgressEnd::Closed => return,
         // Without a window the update is still followed, unseen, so that
         // the app comes back all the same.
-        ProgressEnd::NotShown => watcher
-            .join()
-            .unwrap_or_else(|_| Phase::Failed("The update could not be followed.".to_owned())),
+        ProgressEnd::NotShown => (
+            watcher
+                .join()
+                .unwrap_or_else(|_| Phase::Failed("The update could not be followed.".to_owned())),
+            false,
+        ),
     };
     let open = match last {
         Phase::Ready | Phase::AlreadyCurrent => true,
+        // No failure dialog either, then, to offer the app from: open it, and
+        // it shows the update's state.
+        Phase::Failed(_) if !shown => true,
         Phase::Failed(reason) => {
             dialog::show_failure("The update did not finish", &reason, true) == Choice::OpenApp
         }
