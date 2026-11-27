@@ -162,7 +162,11 @@ An update the user starts from the app is followed by
 from a copy in `companion\` in the data directory and closes; the companion
 shows the update's steps, watches the pipe and Windows Installer
 (`companion/src/watch.rs`, a state machine over what it sees), and opens the
-app again once the new version answers and the installation is done.
+app again once the new version answers and the installation is done. What
+the window shows is data (`screen.rs`, laid out by `layout.rs`); `window.rs`
+draws it with Direct2D on Mica (`paint.rs`) in the app's theme
+(`theme.rs`), `access.rs` hands it to screen readers, and `dialog.rs` shows
+the same screens in a task dialog when the window cannot be made.
 
 ### Tuning
 

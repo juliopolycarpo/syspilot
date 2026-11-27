@@ -96,7 +96,10 @@ LocalSystem on every machine that has it. What a release must get past:
   they point it, is refused. It never creates the data directory itself,
   which would take the open permissions of `%ProgramData%`. The companion
   sends no request: it reads the handshake and the status, with the same
-  check of the pipe's owner as the app.
+  check of the pipe's owner as the app. Its window loads only Windows' own
+  libraries (Direct2D, DirectWrite, DWM, UI Automation), never the
+  `DWriteCore.dll` that ships beside the app, and the folder it runs from,
+  which Windows searches first for them, is that administrators-only one.
 - **The download lands where only LocalSystem and Administrators can write**:
   `updates\` in the data directory, with the same protected ACL as the
   profile. Between verification and installation nobody else can replace the
