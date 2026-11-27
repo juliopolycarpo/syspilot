@@ -1067,8 +1067,10 @@ impl Component for App {
                 // What the companion needs, as the user saw it when asking:
                 // the status changes once the service has the request.
                 let handover = self.companion_instance.as_ref().zip(self.snapshot.status.as_ref());
-                let handover = handover
-                    .and_then(|(instance, status)| launch::Handover::for_update(instance, status));
+                let theme = self.preferences.theme.for_companion();
+                let handover = handover.and_then(|(instance, status)| {
+                    launch::Handover::for_update(instance, status, theme)
+                });
                 let backend = Arc::clone(&self.backend);
                 _ = context.spawn_background(move |_| {
                     Message::UpdateStarted(handover, backend.send(&Request::InstallUpdate))

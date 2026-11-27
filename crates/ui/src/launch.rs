@@ -10,7 +10,7 @@ use std::ptr::{null, null_mut};
 
 use syspilot_proto::Instance;
 use syspilot_proto::message::{ServiceStatus, UpdateState};
-use syspilot_proto::update::COMPANION_EXECUTABLE;
+use syspilot_proto::update::{COMPANION_EXECUTABLE, CompanionTheme};
 use syspilot_proto::win::{OwnedHandle, is_owned_by_system_or_administrators, wide};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::Security::{
@@ -173,18 +173,25 @@ pub struct Handover {
     pub from: String,
     /// The version being installed, when a look has found it.
     pub to: Option<String>,
+    /// The app's theme, for the companion's window.
+    pub theme: CompanionTheme,
 }
 
 impl Handover {
     /// The handover for updating `instance`, whose service reports
-    /// `status`. `None` for a copy that does not update itself.
-    pub fn for_update(instance: &Instance, status: &ServiceStatus) -> Option<Self> {
+    /// `status`, from an app in `theme`. `None` for a copy that does not
+    /// update itself.
+    pub fn for_update(
+        instance: &Instance,
+        status: &ServiceStatus,
+        theme: CompanionTheme,
+    ) -> Option<Self> {
         let to = match &status.update.state {
             UpdateState::Unavailable => return None,
             UpdateState::Available { version } => Some(version.clone()),
             _ => None,
         };
-        Some(Self { instance: instance.clone(), from: status.version.clone(), to })
+        Some(Self { instance: instance.clone(), from: status.version.clone(), to, theme })
     }
 
     /// The companion's command line, for opening `app` again.
@@ -196,6 +203,8 @@ impl Handover {
             self.from.clone(),
             "--app".to_owned(),
             app.display().to_string(),
+            "--theme".to_owned(),
+            self.theme.argument().to_owned(),
         ];
         if let Some(to) = &self.to {
             arguments.extend(["--to".to_owned(), to.clone()]);
@@ -393,7 +402,8 @@ mod tests {
     fn the_handover_names_both_versions_when_a_look_found_the_new_one() {
         let instance = Instance::named("SysPilot-Test.ui").unwrap();
         let found = UpdateState::Available { version: "0.3.1".into() };
-        let handover = Handover::for_update(&instance, &status("0.3.0", found)).unwrap();
+        let handover =
+            Handover::for_update(&instance, &status("0.3.0", found), CompanionTheme::Dark).unwrap();
         assert_eq!(
             handover.arguments(Path::new(r"C:\Program Files\SysPilot\syspilot.exe")),
             [
@@ -403,6 +413,8 @@ mod tests {
                 "0.3.0",
                 "--app",
                 r"C:\Program Files\SysPilot\syspilot.exe",
+                "--theme",
+                "dark",
                 "--to",
                 "0.3.1",
             ]
@@ -412,7 +424,8 @@ mod tests {
     #[test]
     fn the_handover_leaves_the_target_out_when_it_is_not_known() {
         let instance = Instance::product();
-        let handover = Handover::for_update(&instance, &status("0.3.0", UpdateState::Idle));
+        let idle = status("0.3.0", UpdateState::Idle);
+        let handover = Handover::for_update(&instance, &idle, CompanionTheme::System);
         let handover = handover.expect("(idle): expected a handover");
         assert_eq!(handover.to, None);
         assert!(!handover.arguments(Path::new("a.exe")).contains(&"--to".to_owned()));
@@ -421,7 +434,9 @@ mod tests {
     #[test]
     fn a_copy_that_does_not_update_itself_hands_over_nothing() {
         let unavailable = status("0.3.0", UpdateState::Unavailable);
-        assert_eq!(Handover::for_update(&Instance::product(), &unavailable), None);
+        let handover =
+            Handover::for_update(&Instance::product(), &unavailable, CompanionTheme::System);
+        assert_eq!(handover, None);
     }
 
     #[test]
