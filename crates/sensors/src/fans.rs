@@ -24,7 +24,7 @@ pub use inert::{Access, Fans};
 /// What the sensors read at one moment, by key.
 #[cfg_attr(
     not(feature = "fan-control"),
-    allow(dead_code, reason = "only a build with fan control reads a sample")
+    expect(dead_code, reason = "only a build with fan control reads a sample")
 )]
 pub struct Sample<'a> {
     /// The sensor keys.
