@@ -70,8 +70,10 @@ pub fn serve(
     let logging = core.profile().logging.clone();
     // Only the installed product is replaced by a release. A console run or
     // a test instance looks for nothing and installs nothing.
-    let updater: Option<Box<dyn Updater>> = (!console && instance.is_product())
-        .then(|| Box::new(ProcessUpdater::new(queue.clone(), data.updates())) as _);
+    let updater: Option<Box<dyn Updater>> =
+        (!console && instance.is_product()).then(|| -> Box<dyn Updater> {
+            Box::new(ProcessUpdater::new(queue.clone(), data.updates()))
+        });
     let parts = HostParts {
         instance: instance.clone(),
         console,

@@ -159,8 +159,10 @@ fn log_error_event(source: &str, message: &str) {
             strings.as_ptr(),
             ptr::null(),
         );
-        DeregisterEventSource(log);
     }
+    // SAFETY: `log` came from `RegisterEventSourceW` above, is not used again
+    // and is deregistered exactly once.
+    unsafe { DeregisterEventSource(log) };
 }
 
 /// The service's main function, called by the service control manager.
