@@ -1412,7 +1412,10 @@ mod tests {
     /// Both go into `job`, which ends `ping` when the test is done. `cmd` is
     /// put there as soon as it exists, milliseconds before it can have
     /// started `ping`; a `ping` that was quicker would be outside the job,
-    /// and the test's look at the job's processes would say so.
+    /// and this function would say so.
+    ///
+    /// Returns once `ping` runs, so that the tuner's timeout, which starts
+    /// then, cannot end `cmd` before `ping` exists on a slow machine.
     fn spawn_stuck_child(job: &ProcessTreeJob) -> io::Result<Spawned> {
         use std::os::windows::process::CommandExt;
         use std::process::{Command, Stdio};
@@ -1427,6 +1430,16 @@ mod tests {
         if let Err(error) = job.assign(&process) {
             let _ = process.kill();
             return Err(error);
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while job.descendants().is_empty() {
+            if Instant::now() >= deadline {
+                let _ = process.kill();
+                return Err(io::Error::other(
+                    "(stuck child): expected cmd to start ping in the job within 5 s | received: no other process in the job",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
         let streams = process.stdin.take().zip(process.stdout.take());
         streams
@@ -1450,9 +1463,15 @@ mod tests {
         };
         for job in [TuneJob::default(), large] {
             let tree = ProcessTreeJob::new().unwrap();
-            let started = Instant::now();
-            let outcome = run_tuner(&job, || spawn_stuck_child(&tree), 300);
-            let took = started.elapsed();
+            // From when the child runs: waiting for `ping` is not the tuner's time.
+            let started = std::cell::Cell::new(Instant::now());
+            let spawn = || {
+                let spawned = spawn_stuck_child(&tree);
+                started.set(Instant::now());
+                spawned
+            };
+            let outcome = run_tuner(&job, spawn, 300);
+            let took = started.get().elapsed();
             // `ping` outlived the kill with the pipes, or the test would not
             // show that nothing waits for them. `cmd` itself may still be
             // listed while the kill takes effect, so it does not count.
