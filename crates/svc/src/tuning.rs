@@ -1316,7 +1316,12 @@ mod tests {
 
     /// A job that ends every process in it when the test drops it, so that
     /// what a test starts does not outlive the test.
-    struct ProcessTreeJob(syspilot_proto::win::OwnedHandle);
+    struct ProcessTreeJob {
+        job: syspilot_proto::win::OwnedHandle,
+        /// The process [`Self::assign`] put in; the others are its
+        /// descendants.
+        assigned: std::cell::Cell<Option<u32>>,
+    }
 
     impl ProcessTreeJob {
         fn new() -> io::Result<Self> {
@@ -1345,7 +1350,7 @@ mod tests {
             if set == 0 {
                 return Err(io::Error::last_os_error());
             }
-            Ok(Self(job))
+            Ok(Self { job, assigned: std::cell::Cell::new(None) })
         }
 
         /// Puts `child` in the job; the processes it starts from then on
@@ -1353,39 +1358,49 @@ mod tests {
         fn assign(&self, child: &Child) -> io::Result<()> {
             use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
             // SAFETY: both handles are valid for the duration of the call.
-            if unsafe { AssignProcessToJobObject(self.0.raw(), child.as_raw_handle()) } == 0 {
+            if unsafe { AssignProcessToJobObject(self.job.raw(), child.as_raw_handle()) } == 0 {
                 return Err(io::Error::last_os_error());
             }
+            self.assigned.set(Some(child.id()));
             Ok(())
         }
 
-        /// How many processes in the job are still running.
-        fn running(&self) -> u32 {
+        /// The ids of the processes in the job that [`Self::assign`] did
+        /// not put there: those the assigned one started.
+        fn descendants(&self) -> Vec<u32> {
             use windows_sys::Win32::System::JobObjects::{
-                JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectBasicAccountingInformation,
-                QueryInformationJobObject,
+                JobObjectBasicProcessIdList, QueryInformationJobObject,
             };
-            // SAFETY: the structure is plain data for which all-zero is valid.
-            let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION =
-                unsafe { std::mem::zeroed() };
-            // SAFETY: `accounting` matches the information class and
-            // outlives the call; the size passed is its size.
+            /// `JOBOBJECT_BASIC_PROCESS_ID_LIST` with room for more than the
+            /// one id the Windows header declares.
+            #[repr(C)]
+            struct ProcessIdList {
+                assigned: u32,
+                listed: u32,
+                ids: [usize; 16],
+            }
+            let mut list = ProcessIdList { assigned: 0, listed: 0, ids: [0; 16] };
+            // SAFETY: `list` has the layout of the information class with a
+            // longer array, outlives the call, and the size passed is its size.
             let queried = unsafe {
                 QueryInformationJobObject(
-                    self.0.raw(),
-                    JobObjectBasicAccountingInformation,
-                    std::ptr::from_mut(&mut accounting).cast(),
-                    size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                    self.job.raw(),
+                    JobObjectBasicProcessIdList,
+                    std::ptr::from_mut(&mut list).cast(),
+                    size_of::<ProcessIdList>() as u32,
                     std::ptr::null_mut(),
                 )
             };
             assert_ne!(
                 queried,
                 0,
-                "(job): expected its accounting | received: {}",
+                "(job): expected its process ids | received: {}",
                 io::Error::last_os_error()
             );
-            accounting.ActiveProcesses
+            let listed = list.ids.iter().take(list.listed as usize);
+            // Process ids are 32-bit; the list holds them in pointer-sized slots.
+            let ids = listed.filter_map(|&id| u32::try_from(id).ok());
+            ids.filter(|&id| Some(id) != self.assigned.get()).collect()
         }
     }
 
@@ -1397,7 +1412,7 @@ mod tests {
     /// Both go into `job`, which ends `ping` when the test is done. `cmd` is
     /// put there as soon as it exists, milliseconds before it can have
     /// started `ping`; a `ping` that was quicker would be outside the job,
-    /// and the test's count of the job's processes would say so.
+    /// and the test's look at the job's processes would say so.
     fn spawn_stuck_child(job: &ProcessTreeJob) -> io::Result<Spawned> {
         use std::os::windows::process::CommandExt;
         use std::process::{Command, Stdio};
@@ -1439,10 +1454,12 @@ mod tests {
             let outcome = run_tuner(&job, || spawn_stuck_child(&tree), 300);
             let took = started.elapsed();
             // `ping` outlived the kill with the pipes, or the test would not
-            // show that nothing waits for them.
+            // show that nothing waits for them. `cmd` itself may still be
+            // listed while the kill takes effect, so it does not count.
+            let descendants = tree.descendants();
             assert!(
-                tree.running() >= 1,
-                "(processes left in the tuner's job): expected ping still running | received: none"
+                !descendants.is_empty(),
+                "(processes cmd started, in the tuner's job): expected ping still running | received: none"
             );
             assert_eq!(
                 outcome,
