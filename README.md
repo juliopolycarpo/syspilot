@@ -104,7 +104,7 @@ repository, so you can also build it yourself (see [Building](#building)).
 Two levels. **Simple** lists the settings that are safe for anyone and says
 what each one does in a sentence. **Advanced** adds the rest of the catalog,
 the exact values behind every switch, your own actions, the history and every
-sensor.
+sensor. *Show Advanced Settings*, in the title bar, switches between them.
 
 | | |
 | --- | --- |

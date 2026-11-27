@@ -107,21 +107,37 @@ fn readings(app: &App) -> View {
         .keyed_children(tiles)
 }
 
-fn attention(app: &App) -> View {
-    let rows = model::attention(&app.snapshot).into_iter().enumerate().map(
-        |(index, (title, badge, note))| {
-            let row = widgets::card().content(
-                StackPanel::new().spacing(GAP_TIGHT).children((
-                    StackPanel::new()
-                        .orientation(Orientation::Horizontal)
-                        .spacing(GAP_SMALL)
-                        .children((widgets::strong(title), widgets::badge(&badge, app.palette))),
-                    widgets::dim(note),
+fn attention(app: &App, context: &ViewContext<App>) -> View {
+    let level = app.level();
+    let rows = model::attention(&app.snapshot).into_iter().enumerate().map(|(index, item)| {
+        let destination = item.category.map_or(Page::Custom, Page::Tweaks);
+        let action: View = if destination.exists_at(level) {
+            Button::new()
+                .on_click(context.message(Message::Go(destination)))
+                .content(format!("Open {}", destination.label()))
+        } else {
+            View::empty()
+        };
+        let row = widgets::card().content(
+            Grid::new()
+                .columns([GridLength::Star(1.0), GridLength::Auto])
+                .column_spacing(GAP_MEDIUM)
+                .children((
+                    StackPanel::new().spacing(GAP_TIGHT).children((
+                        StackPanel::new()
+                            .orientation(Orientation::Horizontal)
+                            .spacing(GAP_SMALL)
+                            .children((
+                                widgets::strong(item.title),
+                                widgets::badge(&item.badge, app.palette),
+                            )),
+                        widgets::dim(item.note),
+                    )),
+                    widgets::column(1).content(action),
                 )),
-            );
-            KeyedView::new(index.to_string(), row)
-        },
-    );
+        );
+        KeyedView::new(index.to_string(), row)
+    });
     StackPanel::new().spacing(GAP_SMALL).keyed_children(rows)
 }
 
@@ -195,10 +211,21 @@ pub fn view(app: &App, context: &ViewContext<App>) -> View {
     ];
     if attention_count > 0 {
         content.push(KeyedView::new("attention-heading", widgets::heading("Needs attention")));
-        content.push(KeyedView::new("attention", attention(app)));
+        content.push(KeyedView::new("attention", attention(app, context)));
     }
     if !app.snapshot.sensors.sensors.is_empty() {
-        content.push(KeyedView::new("readings-heading", widgets::heading("Right now")));
+        content.push(KeyedView::new(
+            "readings-heading",
+            Grid::new().columns([GridLength::Star(1.0), GridLength::Auto]).children((
+                widgets::heading("Right now"),
+                widgets::column(1).content(
+                    Button::new()
+                        .style(ButtonStyle::Subtle)
+                        .on_click(context.message(Message::Go(Page::Sensors)))
+                        .content("All sensors"),
+                ),
+            )),
+        ));
         content.push(KeyedView::new("readings", readings(app)));
     }
     let heading = if app.level() == ViewLevel::Simple { "Make Windows yours" } else { "Tweaks" };

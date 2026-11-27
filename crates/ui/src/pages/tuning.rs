@@ -9,42 +9,58 @@ use syspilot_proto::tuning::{TuningControl, TuningDevice, TuningState, TuningSta
 use windows_reactor::*;
 
 use crate::app::{App, Message};
-use crate::model::{self, Tone, TuningStateRow};
+use crate::model::{self, Badge, Tone, TuningStateRow};
 use crate::pages::tweaks::switch;
 use crate::widgets::{self, GAP_LARGE, GAP_MEDIUM, GAP_SMALL, GAP_TIGHT};
 
 /// Where the tuning documentation lives.
 const DOCS_LINK: &str = "https://github.com/juliopolycarpo/syspilot/blob/main/docs/tuning.md";
 
-/// Width of a box a value is entered in.
-const VALUE_BOX: f64 = 150.0;
+/// Width of a limit's slider.
+const LIMIT_SLIDER: f64 = 200.0;
+/// Width of a limit's numeric box.
+const LIMIT_BOX: f64 = 104.0;
+/// Width of a state cell's numeric box.
+const CELL_BOX: f64 = 96.0;
+/// Width of a single-column state table value column, so its slider stays compact.
+const SINGLE_VALUE_COLUMN: f64 = 420.0;
 /// Width of the column that names a state in a table.
 const STATE_COLUMN: f64 = 72.0;
 
-/// The box one value is entered in, showing `shown`. `name` is what a screen
-/// reader calls it.
-fn value_box(
+/// A slider paired with a numeric box for `control`, showing `shown`.
+fn value_input(
     app: &App,
     device: &TuningDevice,
     control: &TuningControl,
     shown: i32,
-    name: String,
+    (slider_width, box_width): (Option<f64>, f64),
+    names: (String, String),
     context: &ViewContext<App>,
-) -> NumberBox {
-    let (device_key, control_key) = (device.key.clone(), control.key.clone());
-    NumberBox::new()
-        .minimum(f64::from(control.min))
-        .maximum(f64::from(control.max))
-        .value(f64::from(shown))
-        .is_enabled(app.can_change())
-        .automation_name(name)
-        .width(VALUE_BOX)
-        .on_value_changed(context.callback(move |entered| {
-            Message::TuningValue(device_key.clone(), control_key.clone(), entered)
-        }))
+) -> View {
+    let (slider_device, slider_control) = (device.key.clone(), control.key.clone());
+    let (box_device, box_control) = (device.key.clone(), control.key.clone());
+    widgets::slider_with_number_box(
+        widgets::NumericRange {
+            min: f64::from(control.min),
+            max: f64::from(control.max),
+            value: f64::from(shown),
+        },
+        app.can_change(),
+        slider_width,
+        box_width,
+        names,
+        (
+            context.callback(move |entered| {
+                Message::TuningValue(slider_device.clone(), slider_control.clone(), Some(entered))
+            }),
+            context.callback(move |entered| {
+                Message::TuningValue(box_device.clone(), box_control.clone(), entered)
+            }),
+        ),
+    )
 }
 
-/// A control that stands alone: what it is on the left, its box on the right.
+/// A control that stands alone: what it is on the left, its slider and box on the right.
 fn limit(
     app: &App,
     device: &TuningDevice,
@@ -63,24 +79,25 @@ fn limit(
                 widgets::caption(model::tuning_control_detail(control.kind)),
                 widgets::caption(model::tuning_control_hint(control, shown)),
             )),
-            widgets::column(1).content(value_box(
+            widgets::column(1).content(value_input(
                 app,
                 device,
                 control,
                 shown,
-                format!("{name}, {unit}"),
+                (Some(LIMIT_SLIDER), LIMIT_BOX),
+                (format!("{name} slider, {unit}"), format!("{name}, {unit}")),
                 context,
             )),
-            widgets::column(2).content(widgets::dim(unit).min_width(36.0)),
+            widgets::column(2).content(widgets::dim(unit).min_width(44.0)),
         ))
 }
 
-/// One cell of a state table: the box and, under it, what differs.
+/// One cell of a state table: the slider and box, and under it, what differs.
 fn cell(
     app: &App,
     device: &TuningDevice,
     control: Option<&TuningControl>,
-    name: String,
+    names: (String, String),
     column: i32,
     context: &ViewContext<App>,
 ) -> View {
@@ -90,9 +107,8 @@ fn cell(
         return holder.keyed_children([KeyedView::new("none", widgets::dim("—"))]);
     };
     let shown = model::tuning_shown_value(control, app.tuning_drafts.get(&device.key));
-    let entry = value_box(app, device, control, shown, name, context)
-        .horizontal_alignment(HorizontalAlignment::Left);
-    let mut parts = vec![KeyedView::new("box", entry)];
+    let entry = value_input(app, device, control, shown, (None, CELL_BOX), names, context);
+    let mut parts = vec![KeyedView::new("input", entry)];
     // No line at all when there is nothing to say, so that a table at its
     // defaults stays compact.
     let note = model::tuning_cell_note(control, shown);
@@ -110,19 +126,20 @@ fn state_table(
     rows: &[TuningStateRow<'_>],
     context: &ViewContext<App>,
 ) -> View {
-    let columns = || {
-        Grid::new()
-            .columns([
-                GridLength::Pixel(STATE_COLUMN),
-                GridLength::Pixel(VALUE_BOX + GAP_LARGE),
-                GridLength::Pixel(VALUE_BOX + GAP_LARGE),
-            ])
-            .column_spacing(GAP_MEDIUM)
-    };
     // A column no state has a value for is left out; a single state without
     // one gets a dash in its place.
     let has_clocks = rows.iter().any(|row| row.clock.is_some());
     let has_voltages = rows.iter().any(|row| row.voltage.is_some());
+    let columns = || {
+        let mut cols = vec![GridLength::Pixel(STATE_COLUMN)];
+        if has_clocks && has_voltages {
+            cols.push(GridLength::Star(1.0));
+            cols.push(GridLength::Star(1.0));
+        } else {
+            cols.push(GridLength::Pixel(SINGLE_VALUE_COLUMN));
+        }
+        Grid::new().columns(cols).column_spacing(GAP_MEDIUM)
+    };
     let voltage_column = if has_clocks { 2 } else { 1 };
     let mut header = vec![KeyedView::new("state", widgets::caption("State"))];
     if has_clocks {
@@ -141,12 +158,18 @@ fn state_table(
             .margin(Thickness::new(0.0, 6.0, 0.0, 0.0));
         let mut cells = vec![KeyedView::new("state", state)];
         if has_clocks {
-            let name = format!("{label} clock, MHz");
-            cells.push(KeyedView::new("clock", cell(app, device, row.clock, name, 1, context)));
+            let slider_name = format!("{label} clock slider, MHz");
+            let box_name = format!("{label} clock, MHz");
+            cells.push(KeyedView::new(
+                "clock",
+                cell(app, device, row.clock, (slider_name, box_name), 1, context),
+            ));
         }
         if has_voltages {
-            let name = format!("{label} voltage, mV");
-            let voltage = cell(app, device, row.voltage, name, voltage_column, context);
+            let slider_name = format!("{label} voltage slider, mV");
+            let box_name = format!("{label} voltage, mV");
+            let voltage =
+                cell(app, device, row.voltage, (slider_name, box_name), voltage_column, context);
             cells.push(KeyedView::new("voltage", voltage));
         }
         KeyedView::new(format!("state-{}", row.state), columns().keyed_children(cells))
@@ -172,6 +195,11 @@ fn actions(app: &App, device: &TuningDevice, context: &ViewContext<App>) -> View
     } else {
         ""
     };
+    let standing_view = if entered {
+        widgets::toned(widgets::caption(standing), Tone::Caution, app.palette)
+    } else {
+        widgets::caption(standing)
+    };
     let key = || device.key.clone();
     StackPanel::new().orientation(Orientation::Horizontal).spacing(GAP_SMALL).children((
         Button::new()
@@ -190,7 +218,7 @@ fn actions(app: &App, device: &TuningDevice, context: &ViewContext<App>) -> View
             .tooltip(
                 "Enters the driver's default for every value. Nothing changes until you save.",
             ),
-        widgets::caption(standing).vertical_alignment(VerticalAlignment::Center),
+        standing_view.vertical_alignment(VerticalAlignment::Center),
     ))
 }
 
@@ -199,6 +227,12 @@ fn title(app: &App, device: &TuningDevice) -> View {
     let mut line: Vec<KeyedView> = vec![KeyedView::new("name", widgets::strong(&device.name))];
     if let Some(badge) = model::tuning_badge(&device.state) {
         line.push(KeyedView::new("badge", widgets::badge(&badge, app.palette)));
+    }
+    if app.tuning_drafts.contains_key(&device.key) {
+        line.push(KeyedView::new(
+            "unsaved",
+            widgets::badge(&Badge { text: "Unsaved", tone: Tone::Caution }, app.palette),
+        ));
     }
     let name_line = StackPanel::new()
         .orientation(Orientation::Horizontal)
@@ -298,11 +332,11 @@ fn introduction(context: &ViewContext<App>) -> View {
         widgets::dim(
             "SysPilot sets these values through the device's own driver and sets them again after a restart, after sleep and when something else changes them. Turning tuning off puts the driver's defaults back.",
         ),
-        Button::new()
-            .style(ButtonStyle::TextLink)
-            .on_click(context.message(Message::OpenLink(DOCS_LINK.to_owned())))
-            .content("Read the documentation")
-            .tooltip(DOCS_LINK),
+        widgets::link(
+            "Read the documentation",
+            DOCS_LINK,
+            context.message(Message::OpenLink(DOCS_LINK.to_owned())),
+        ),
     ))
 }
 

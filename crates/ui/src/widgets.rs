@@ -267,6 +267,76 @@ pub fn fact(label: impl Into<String>, value: impl Into<String>) -> View {
         .children((dim(label), body(value).is_text_selection_enabled(true).grid_column(1)))
 }
 
+/// A left-aligned text link whose label lines up with surrounding text.
+pub fn link(label: impl Into<String>, tooltip: impl Into<String>, on_click: Callback<()>) -> View {
+    Button::new()
+        .style(ButtonStyle::TextLink)
+        // WinUI's text-link style has 12 px horizontal padding; pull left so
+        // the link text lines up with the paragraph above it.
+        .margin(Thickness::new(-12.0, 0.0, 0.0, 0.0))
+        .horizontal_alignment(HorizontalAlignment::Left)
+        .on_click(on_click)
+        .content(label.into())
+        .tooltip(tooltip)
+}
+
+/// Range and current value for [`slider_with_number_box`].
+#[derive(Debug, Clone, Copy)]
+pub struct NumericRange {
+    /// Minimum allowed value.
+    pub min: f64,
+    /// Maximum allowed value.
+    pub max: f64,
+    /// Value currently shown.
+    pub value: f64,
+}
+
+/// A slider paired with a numeric input box for quick adjustment and exact entry.
+///
+/// When `range.max <= range.min`, only the numeric box is shown so the slider
+/// never has a zero-width range.
+pub fn slider_with_number_box(
+    range: NumericRange,
+    enabled: bool,
+    slider_width: Option<f64>,
+    box_width: f64,
+    (slider_name, box_name): (String, String),
+    (on_slider, on_box): (Callback<f64>, Callback<Option<f64>>),
+) -> View {
+    let number_box = NumberBox::new()
+        .minimum(range.min)
+        .maximum(range.max)
+        .value(range.value)
+        .is_enabled(enabled)
+        .automation_name(box_name)
+        .width(box_width)
+        .vertical_alignment(VerticalAlignment::Center)
+        .on_value_changed(on_box);
+
+    if range.max <= range.min {
+        return number_box.into();
+    }
+
+    let slider = Slider::new()
+        .minimum(range.min)
+        .maximum(range.max)
+        .value(range.value)
+        .step_frequency(1.0)
+        .is_enabled(enabled)
+        .automation_name(slider_name)
+        .vertical_alignment(VerticalAlignment::Center)
+        .on_value_changed(on_slider);
+
+    let slider_col = match slider_width {
+        Some(width) => GridLength::Pixel(width),
+        None => GridLength::Star(1.0),
+    };
+    Grid::new()
+        .columns([slider_col, GridLength::Pixel(box_width)])
+        .column_spacing(GAP_SMALL)
+        .children((slider, number_box.grid_column(1)))
+}
+
 /// A scrolling page: title, one line about it, then its content.
 pub fn page(title: &str, subtitle: &str, content: impl IntoIterator<Item = KeyedView>) -> View {
     let title = TextBlock::new()
@@ -576,5 +646,25 @@ mod tests {
             // Without a wash a badge needs a line around it to read as one.
             assert_eq!(palette.outline(), (1.0, text));
         }
+    }
+
+    #[test]
+    fn slider_with_number_box_builds_for_valid_and_degenerate_ranges() {
+        let _ = slider_with_number_box(
+            NumericRange { min: -50.0, max: 50.0, value: 0.0 },
+            true,
+            Some(200.0),
+            104.0,
+            ("Power limit slider".into(), "Power limit".into()),
+            (Callback::new(|_| {}), Callback::new(|_| {})),
+        );
+        let _ = slider_with_number_box(
+            NumericRange { min: 100.0, max: 100.0, value: 100.0 },
+            false,
+            None,
+            96.0,
+            ("Fixed slider".into(), "Fixed".into()),
+            (Callback::new(|_| {}), Callback::new(|_| {})),
+        );
     }
 }

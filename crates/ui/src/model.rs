@@ -421,8 +421,21 @@ pub fn overview(snapshot: &Snapshot) -> Overview {
     overview
 }
 
+/// An entry that needs the user's attention, with its destination category.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttentionItem {
+    /// Entry title.
+    pub title: String,
+    /// State badge.
+    pub badge: Badge,
+    /// Explanation of why it needs attention.
+    pub note: String,
+    /// Catalog category when this is a built-in tweak, or `None` for a custom action.
+    pub category: Option<Category>,
+}
+
 /// Entries that need the user's attention, with the reason.
-pub fn attention(snapshot: &Snapshot) -> Vec<(String, Badge, String)> {
+pub fn attention(snapshot: &Snapshot) -> Vec<AttentionItem> {
     snapshot
         .states
         .iter()
@@ -437,7 +450,7 @@ pub fn attention(snapshot: &Snapshot) -> Vec<(String, Badge, String)> {
             let note = entry_note(status)
                 .or_else(|| tweak.filter(|_| audit).map(|tweak| tweak.summary.clone()))
                 .unwrap_or_default();
-            Some((title, badge, note))
+            Some(AttentionItem { title, badge, note, category: tweak.map(|tweak| tweak.category) })
         })
         .collect()
 }
@@ -1589,16 +1602,18 @@ registry = { scope = "machine", key = 'SYSTEM\Example', name = "On", data = { dw
         );
         let attention = attention(&snapshot);
         assert_eq!(attention.len(), 1);
-        assert_eq!(attention[0].0, "Turn off mitigations");
-        assert_eq!(attention[0].1.text, "Contested");
+        assert_eq!(attention[0].title, "Turn off mitigations");
+        assert_eq!(attention[0].badge.text, "Contested");
+        assert_eq!(attention[0].category, Some(Category::Security));
     }
 
     #[test]
     fn failed_check_asks_for_attention_with_its_summary() {
         let snapshot = snapshot(vec![status("security.check", false, ActionState::Different)]);
         let attention = attention(&snapshot);
-        assert_eq!(attention[0].1.text, "Needs attention");
-        assert_eq!(attention[0].2, "Secure Boot stops tampered boot software.");
+        assert_eq!(attention[0].badge.text, "Needs attention");
+        assert_eq!(attention[0].note, "Secure Boot stops tampered boot software.");
+        assert_eq!(attention[0].category, Some(Category::Security));
     }
 
     #[test]

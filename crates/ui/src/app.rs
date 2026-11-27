@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use syspilot_proto::catalog::Category;
 use syspilot_proto::message::Request;
@@ -258,8 +258,8 @@ pub enum Message {
     Answered(ContentDialogResult),
     /// The message banner was closed.
     DismissNotice,
-    /// A level was picked by its name in the selector.
-    PickLevel(Option<String>),
+    /// "Show Advanced Settings" was toggled.
+    ShowAdvanced(bool),
     /// A theme was picked by index.
     PickTheme(Option<usize>),
     /// "Restart as administrator".
@@ -291,8 +291,10 @@ pub enum Message {
     AskClearHistory,
     /// Sensor logging was switched.
     LoggingEnabled(bool),
-    /// The logging interval was changed.
+    /// The logging interval was changed via slider or numeric box.
     LoggingInterval(Option<f64>),
+    /// The timer that sends the logging interval once it settles woke up.
+    LoggingIntervalTimer,
     /// An update mode was picked by index.
     PickUpdateMode(Option<usize>),
     /// "Look now" for a new version.
@@ -371,6 +373,10 @@ pub struct App {
     pub details_open: HashSet<String>,
     /// Tuning values entered and not saved.
     pub tuning_drafts: TuningDrafts,
+    /// Pending logging interval while a slider drag or numeric edit settles.
+    pub logging_interval_draft: Option<u32>,
+    /// When the draft last changed, while the timer that sends it runs.
+    logging_interval_changed: Option<Instant>,
     /// Whether the navigation pane is open, once the view has said so.
     pane_open: Option<bool>,
 }
@@ -384,6 +390,29 @@ fn set_open(open_keys: &mut HashSet<String>, key: String, open: bool) {
     } else {
         open_keys.remove(&key);
     }
+}
+
+/// How long the logging interval must stay still before it is sent, so that
+/// a slider drag sends one request and not one per pixel.
+const LOGGING_SETTLE: Duration = Duration::from_millis(250);
+
+/// How much longer to wait for a logging interval last changed `since` ago,
+/// or `None` once it has been still for [`LOGGING_SETTLE`].
+fn settle_wait(since: Duration) -> Option<Duration> {
+    LOGGING_SETTLE.checked_sub(since).filter(|wait| !wait.is_zero())
+}
+
+/// Wakes the app with [`Message::LoggingIntervalTimer`] after `wait`.
+fn wait_for_logging_interval(wait: Duration, context: &ComponentContext<App>) {
+    _ = context.spawn_background(move |_| {
+        std::thread::sleep(wait);
+        Message::LoggingIntervalTimer
+    });
+}
+
+/// Clamps and rounds a user-entered logging interval to 1..=3600 seconds.
+fn clamp_logging_interval(entered: Option<f64>) -> Option<u32> {
+    entered.filter(|value| value.is_finite()).map(|value| value.round().clamp(1.0, 3600.0) as u32)
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -446,6 +475,12 @@ impl App {
         lock(&self.trends).clone()
     }
 
+    /// The logging interval shown in Settings: the active draft while
+    /// dragging/typing, otherwise the saved value.
+    pub fn logging_interval_shown(&self, saved: u32) -> u32 {
+        self.logging_interval_draft.unwrap_or(saved)
+    }
+
     fn load(&mut self, context: &ComponentContext<Self>) {
         if self.loading {
             self.reload_wanted = true;
@@ -502,6 +537,7 @@ impl App {
             Failure::Other(message) => Link::Failed(message),
         };
         self.pending.clear();
+        self.logging_interval_draft = None;
         self.dialog = None;
         self.retry_later(context);
     }
@@ -541,6 +577,9 @@ impl App {
             (_, None) => {}
         }
         if let Err(failure) = result {
+            // A refused interval is not saved, so the box must not keep
+            // showing it.
+            self.logging_interval_draft = None;
             self.fail(failure);
         }
         self.load(context);
@@ -757,6 +796,11 @@ impl App {
                 for id in self.settled.drain(..) {
                     self.pending.remove(&id);
                 }
+                if self.logging_interval_draft == Some(self.logging().interval_secs)
+                    || !self.can_change()
+                {
+                    self.logging_interval_draft = None;
+                }
                 if !self.listening {
                     self.listen(context);
                 }
@@ -811,6 +855,8 @@ impl Component for App {
             unfolded: HashSet::new(),
             details_open: HashSet::new(),
             tuning_drafts: TuningDrafts::new(),
+            logging_interval_draft: None,
+            logging_interval_changed: None,
             pane_open: None,
         };
         app.go(Page::Home);
@@ -862,14 +908,10 @@ impl Component for App {
             }
             Message::Answered(result) => self.answer(result, context),
             Message::DismissNotice => self.notice = None,
-            Message::PickLevel(name) => {
-                let level = match name.as_deref() {
-                    Some("Advanced") => ViewLevel::Advanced,
-                    Some("Simple") => ViewLevel::Simple,
-                    _ => self.level(),
-                };
+            Message::ShowAdvanced(show) => {
+                let level = if show { ViewLevel::Advanced } else { ViewLevel::Simple };
                 if level == self.level() {
-                    // The selector echoing the current level.
+                    // The checkbox echoing the current level.
                 } else if level == ViewLevel::Advanced && !self.preferences.advanced_acknowledged {
                     self.dialog = Some(Dialog::AdvancedLevel);
                 } else {
@@ -940,13 +982,35 @@ impl Component for App {
                 }
             }
             Message::LoggingInterval(seconds) => {
+                let Some(seconds) = clamp_logging_interval(seconds) else {
+                    return;
+                };
+                let shown = self.logging_interval_shown(self.logging().interval_secs);
+                if seconds == shown || !self.can_change() {
+                    return;
+                }
+                self.logging_interval_draft = Some(seconds);
+                // One timer serves a whole drag: it is only started when none
+                // is running, and checks on waking how long the value has
+                // been still.
+                if self.logging_interval_changed.replace(Instant::now()).is_none() {
+                    wait_for_logging_interval(LOGGING_SETTLE, context);
+                }
+            }
+            Message::LoggingIntervalTimer => {
+                let Some(changed) = self.logging_interval_changed else { return };
+                if let Some(wait) = settle_wait(changed.elapsed()) {
+                    wait_for_logging_interval(wait, context);
+                    return;
+                }
+                self.logging_interval_changed = None;
+                let Some(seconds) = self.logging_interval_draft else { return };
                 let mut logging = self.logging();
-                // An emptied box has no value; the setting stays as it is.
-                let seconds = seconds
-                    .map_or(logging.interval_secs, |value| value.round().clamp(1.0, 3600.0) as u32);
                 if logging.interval_secs != seconds && self.can_change() {
                     logging.interval_secs = seconds;
                     self.send(None, Request::SetLogging(logging), context);
+                } else {
+                    self.logging_interval_draft = None;
                 }
             }
             Message::PickUpdateMode(index) => {
@@ -1038,21 +1102,17 @@ impl Component for App {
                 SlotView::new(NavigationViewSlot::Content, content),
             ]);
 
-        let level_item = |name: &str, own: ViewLevel| {
-            KeyedView::new(name, SelectorBarItem::new().text(name).is_selected(level == own))
-        };
         let title_bar = TitleBar::new().title("SysPilot").grid_row(0).slots([SlotView::new(
             TitleBarSlot::RightHeader,
-            SelectorBar::new()
-                .on_selected_text_changed(context.callback(Message::PickLevel))
-                .automation_name("Level")
-                .collection_slot(
-                    SelectorBarSlot::Items,
-                    [
-                        level_item("Simple", ViewLevel::Simple),
-                        level_item("Advanced", ViewLevel::Advanced),
-                    ],
-                ),
+            CheckBox::new()
+                .is_checked(level == ViewLevel::Advanced)
+                .on_is_checked_changed(context.callback(Message::ShowAdvanced))
+                .automation_name("Show Advanced Settings")
+                .min_width(0.0)
+                .vertical_alignment(VerticalAlignment::Center)
+                .margin(Thickness::new(0.0, 0.0, widgets::GAP_MEDIUM, 0.0))
+                .content("Show Advanced Settings")
+                .tooltip("Show technical details, fans, tuning, custom actions and history"),
         )]);
 
         Grid::new().rows([GridLength::Auto, GridLength::Star(1.0)]).children((
@@ -1334,5 +1394,25 @@ mod tests {
         // The scripted backend has no second listener: reconnecting fails
         // at `listen`, which proves a new one was asked for.
         assert_eq!(listen(&backend, &slot, &trends, &wants_readings), Err(Failure::NotRunning));
+    }
+
+    #[test]
+    fn a_logging_interval_is_sent_once_it_has_been_still_for_the_settle_time() {
+        let just_changed = settle_wait(Duration::ZERO);
+        assert_eq!(just_changed, Some(LOGGING_SETTLE), "(just changed): expected the full wait");
+        let halfway = settle_wait(LOGGING_SETTLE / 2);
+        assert_eq!(halfway, Some(LOGGING_SETTLE / 2), "(halfway): expected the rest of the wait");
+        assert_eq!(settle_wait(LOGGING_SETTLE), None, "(settled exactly): expected no wait");
+        assert_eq!(settle_wait(LOGGING_SETTLE * 2), None, "(long settled): expected no wait");
+    }
+
+    #[test]
+    fn logging_interval_clamps_rounds_and_ignores_non_finite() {
+        assert_eq!(clamp_logging_interval(None), None);
+        assert_eq!(clamp_logging_interval(Some(f64::NAN)), None);
+        assert_eq!(clamp_logging_interval(Some(f64::INFINITY)), None);
+        assert_eq!(clamp_logging_interval(Some(0.2)), Some(1));
+        assert_eq!(clamp_logging_interval(Some(5.6)), Some(6));
+        assert_eq!(clamp_logging_interval(Some(9999.0)), Some(3600));
     }
 }
