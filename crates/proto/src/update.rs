@@ -19,6 +19,12 @@ pub const UPDATER_EXECUTABLE: &str = "syspilot-update.exe";
 pub const CHECK_COMMAND: &str = "check";
 /// The updater's command that downloads, verifies and installs.
 pub const INSTALL_COMMAND: &str = "install";
+/// File name of Windows Installer's log of the last update, in the update
+/// directory.
+pub const INSTALL_LOG: &str = "install.log";
+/// File name of the update companion: the window the app hands over to
+/// while an update it started installs, next to the app.
+pub const COMPANION_EXECUTABLE: &str = "syspilot-companion.exe";
 
 /// Longest version text accepted from the updater.
 const VERSION_MAX: usize = 32;

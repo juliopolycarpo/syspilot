@@ -14,16 +14,13 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use syspilot_proto::update::UpdaterReport;
+use syspilot_proto::update::{INSTALL_LOG, UpdaterReport};
 
 use crate::sshsig::{self, FileSignature, Key, SIGNATURE_FILE_MAX};
 use crate::version::Version;
 
 /// Largest package downloaded. A release is about 30 MiB.
 const PACKAGE_MAX: u64 = 512 * 1024 * 1024;
-/// File name of Windows Installer's log of the last update, in the update
-/// directory.
-pub const INSTALL_LOG: &str = "install.log";
 /// What a download is called until it has been verified.
 const PARTIAL_SUFFIX: &str = ".part";
 

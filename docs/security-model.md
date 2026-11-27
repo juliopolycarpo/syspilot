@@ -86,6 +86,17 @@ LocalSystem on every machine that has it. What a release must get past:
   beyond "look" or "install into this directory".
 - **Only an elevated administrator can ask** for a look, an installation or a
   change of the update mode. The daily look needs nobody.
+- **The update companion runs elevated, so it runs from where only
+  administrators write.** The app copies `syspilot-companion.exe` into
+  `companion\` in the data directory and starts it with its own token, which
+  the companion passes on to the app it opens afterwards. The app creates that
+  folder only inside a data directory that already exists and is owned by
+  SYSTEM or Administrators, as the service leaves it; `%ProgramData%` comes
+  from the user's environment, so a folder the user made, there or anywhere
+  they point it, is refused. It never creates the data directory itself,
+  which would take the open permissions of `%ProgramData%`. The companion
+  sends no request: it reads the handshake and the status, with the same
+  check of the pipe's owner as the app.
 - **The download lands where only LocalSystem and Administrators can write**:
   `updates\` in the data directory, with the same protected ACL as the
   profile. Between verification and installation nobody else can replace the

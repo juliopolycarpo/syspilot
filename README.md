@@ -202,7 +202,7 @@ power-limit = -10
 
 ## How it is built
 
-Five programs with a strict split of privilege:
+Six programs with a strict split of privilege:
 
 | Part               | Runs as                       | Does                                                  |
 | ------------------ | ----------------------------- | ----------------------------------------------------- |
@@ -211,6 +211,7 @@ Five programs with a strict split of privilege:
 | `syspilot-update`  | Started by the service, for seconds a day | Finds a new release, verifies its signature and hands it to Windows Installer. |
 | `syspilot-tune`    | Started by the service, for a moment when tuning values are looked at or set | Reads and sets a device's tuning values through its vendor's driver. |
 | `syspilot` (app)   | The signed-in user            | Shows state and sends requests. Holds no rights.      |
+| `syspilot-companion` | Started by the app, while an update the user asked for installs | Shows the update's progress and opens the app again when it is done. |
 
 They talk over a local named pipe. Anyone signed in can read the catalog,
 states and sensors; only an elevated administrator can change anything or read
@@ -229,6 +230,7 @@ client claims.
 | `crates/tune`      | The tuner.                                                    |
 | `installer`        | The Windows Installer package and the release keys.           |
 | `crates/ui`        | The desktop app.                                              |
+| `crates/companion` | The update companion.                                         |
 | `catalog/tweaks`   | The built-in tweaks, as data.                                 |
 
 More in [`docs/`](docs/README.md): [architecture](docs/architecture/overview.md),

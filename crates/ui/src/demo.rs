@@ -605,7 +605,7 @@ fn tuning(scenario: Scenario, settings: &[TuningSetting], held: bool) -> TuningS
     TuningStatus { devices, problem: None }
 }
 
-fn status(scenario: Scenario) -> ServiceStatus {
+pub(crate) fn status(scenario: Scenario) -> ServiceStatus {
     let with_driver = scenario.driver_ready();
     let feature = |key: &str, title: &str, available: bool, detail: &str| Feature {
         key: key.to_owned(),
