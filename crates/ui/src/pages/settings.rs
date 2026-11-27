@@ -166,29 +166,18 @@ fn about(app: &App, context: &ViewContext<App>) -> View {
 /// The settings page.
 pub fn view(app: &App, context: &ViewContext<App>) -> View {
     let theme = Theme::ALL.iter().position(|theme| *theme == app.preferences.theme);
-    let level_index = match app.level() {
-        ViewLevel::Simple => Some(0),
-        ViewLevel::Advanced => Some(1),
-    };
     let mut content = vec![
         KeyedView::new(
             "level",
             setting(
-                "Level",
-                "Simple shows the common, safe options. Advanced adds everything else, with the technical detail, custom actions and the history. You can also switch at the top of the window.",
-                ComboBox::new()
-                    .items_source(["Simple", "Advanced"])
-                    .selected_index(level_index)
-                    .automation_name("Level")
-                    .min_width(200.0)
-                    .on_selection_changed(context.callback(|index| {
-                        let name = match index {
-                            Some(0) => Some("Simple".to_owned()),
-                            Some(1) => Some("Advanced".to_owned()),
-                            _ => None,
-                        };
-                        Message::PickLevel(name)
-                    })),
+                "Advanced settings",
+                "Off by default; remembers your choice. Adds technical detail, fans, tuning, custom actions and history. You can also toggle this in the title bar.",
+                CheckBox::new()
+                    .is_checked(app.level() == ViewLevel::Advanced)
+                    .on_is_checked_changed(context.callback(Message::ShowAdvanced))
+                    .automation_name("Show Advanced Settings")
+                    .min_width(0.0)
+                    .content("Show Advanced Settings"),
             ),
         ),
         KeyedView::new(

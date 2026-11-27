@@ -258,8 +258,8 @@ pub enum Message {
     Answered(ContentDialogResult),
     /// The message banner was closed.
     DismissNotice,
-    /// A level was picked by its name in the selector.
-    PickLevel(Option<String>),
+    /// "Show Advanced Settings" was toggled.
+    ShowAdvanced(bool),
     /// A theme was picked by index.
     PickTheme(Option<usize>),
     /// "Restart as administrator".
@@ -887,14 +887,10 @@ impl Component for App {
             }
             Message::Answered(result) => self.answer(result, context),
             Message::DismissNotice => self.notice = None,
-            Message::PickLevel(name) => {
-                let level = match name.as_deref() {
-                    Some("Advanced") => ViewLevel::Advanced,
-                    Some("Simple") => ViewLevel::Simple,
-                    _ => self.level(),
-                };
+            Message::ShowAdvanced(show) => {
+                let level = if show { ViewLevel::Advanced } else { ViewLevel::Simple };
                 if level == self.level() {
-                    // The selector echoing the current level.
+                    // The checkbox echoing the current level.
                 } else if level == ViewLevel::Advanced && !self.preferences.advanced_acknowledged {
                     self.dialog = Some(Dialog::AdvancedLevel);
                 } else {
@@ -1080,32 +1076,17 @@ impl Component for App {
                 SlotView::new(NavigationViewSlot::Content, content),
             ]);
 
-        let level_item = |name: &str, own: ViewLevel, tip: &str| {
-            KeyedView::new(
-                name,
-                SelectorBarItem::new().text(name).is_selected(level == own).tooltip(tip),
-            )
-        };
         let title_bar = TitleBar::new().title("SysPilot").grid_row(0).slots([SlotView::new(
             TitleBarSlot::RightHeader,
-            SelectorBar::new()
-                .on_selected_text_changed(context.callback(Message::PickLevel))
-                .automation_name("Level")
-                .collection_slot(
-                    SelectorBarSlot::Items,
-                    [
-                        level_item(
-                            "Simple",
-                            ViewLevel::Simple,
-                            "Common, safe options in plain language",
-                        ),
-                        level_item(
-                            "Advanced",
-                            ViewLevel::Advanced,
-                            "Every option, technical detail, fans, tuning, custom actions and history",
-                        ),
-                    ],
-                ),
+            CheckBox::new()
+                .is_checked(level == ViewLevel::Advanced)
+                .on_is_checked_changed(context.callback(Message::ShowAdvanced))
+                .automation_name("Show Advanced Settings")
+                .min_width(0.0)
+                .vertical_alignment(VerticalAlignment::Center)
+                .margin(Thickness::new(0.0, 0.0, widgets::GAP_MEDIUM, 0.0))
+                .content("Show Advanced Settings")
+                .tooltip("Show technical details, fans, tuning, custom actions and history"),
         )]);
 
         Grid::new().rows([GridLength::Auto, GridLength::Star(1.0)]).children((
