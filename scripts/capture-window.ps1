@@ -26,19 +26,13 @@ Add-Type -Namespace SysPilot -Name Native -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr context);
 [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
 '@
+. (Join-Path $PSScriptRoot 'window-finder.ps1')
 
 # Per-monitor aware (-4), so the rectangle is in physical pixels.
 [void][SysPilot.Native]::SetProcessDpiAwarenessContext([IntPtr]::new(-4))
 
-$deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-do {
-    $window = (Get-Process -Id $ProcessId).MainWindowHandle
-    if ($window -ne [IntPtr]::Zero) { break }
-    Start-Sleep -Milliseconds 100
-} while ((Get-Date) -lt $deadline)
-if ($window -eq [IntPtr]::Zero) {
-    throw "(window): expected process $ProcessId to show a window within $TimeoutSeconds seconds | received: none"
-}
+# Not Process.MainWindowHandle: for an elevated process it can be an overlay window.
+$window = Wait-SysPilotWindow -ProcessId $ProcessId -TimeoutSeconds $TimeoutSeconds
 
 $rect = New-Object SysPilot.Native+RECT
 [void][SysPilot.Native]::GetWindowRect($window, [ref] $rect)

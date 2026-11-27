@@ -22,16 +22,17 @@ param(
     [switch] $List,
     # Lists the controls a keyboard user can reach that have no accessible
     # name, instead of acting. Nothing listed means none.
-    [switch] $Unnamed
+    [switch] $Unnamed,
+    # Seconds to wait for the window to appear.
+    [int] $TimeoutSeconds = 20
 )
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+. (Join-Path $PSScriptRoot 'window-finder.ps1')
 $automation = [System.Windows.Automation.AutomationElement]
-$window = (Get-Process -Id $ProcessId).MainWindowHandle
-if ($window -eq [IntPtr]::Zero) {
-    throw "(window): expected process $ProcessId to have a window | received: none"
-}
+# Not Process.MainWindowHandle: for an elevated process it can be an overlay window.
+$window = Wait-SysPilotWindow -ProcessId $ProcessId -TimeoutSeconds $TimeoutSeconds
 $root = $automation::FromHandle($window)
 $everything = [System.Windows.Automation.Condition]::TrueCondition
 $scope = [System.Windows.Automation.TreeScope]::Descendants
