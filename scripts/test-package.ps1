@@ -202,11 +202,23 @@ action = { registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Msi', n
             Start-Process msiexec.exe -ArgumentList '/x', "`"$package`"", '/qn', '/norestart' -Wait
         }
         # A service the packages could not remove, such as one a failed
-        # install registered before it rolled back.
-        if (Get-Service $instance -ErrorAction SilentlyContinue) {
-            Stop-Service $instance -Force -ErrorAction SilentlyContinue
+        # install registered before it rolled back. Its stop is bounded: a
+        # service stuck stopping may be the failure, and an unbounded wait
+        # here would hide it behind the job's timeout.
+        $leftService = Get-Service $instance -ErrorAction SilentlyContinue
+        if ($leftService) {
+            sc.exe stop $instance | Out-Null
+            try {
+                $leftService.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
+            } catch {
+                Write-Warning "The $instance service did not stop in 30 s; ending its processes."
+            }
             sc.exe delete $instance | Out-Null
         }
-        Remove-Item -Recurse -Force $folder, $data, $shortcut, $preferences, $scriptEntry, $scratch -ErrorAction SilentlyContinue
+        # What still runs from the install folder (service, sensors, tuner)
+        # would keep the folder from being removed.
+        Get-InstalledProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
+        $eventSource = "HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\$instance"
+        Remove-Item -Recurse -Force $folder, $data, $shortcut, $preferences, $scriptEntry, $scratch, $eventSource -ErrorAction SilentlyContinue
     }
 }
