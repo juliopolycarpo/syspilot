@@ -580,7 +580,7 @@ impl Canvas<'_> {
             Mark::Current => {
                 // A quarter of a ring, turning; the hairline ring under it
                 // shows where it runs.
-                self.circle(center, 6.0, Some(1.0), palette.strong_stroke.faded(0.5));
+                self.circle(center, 6.0, Some(1.0), palette.spinner_track);
                 self.arc(center, 6.0, spin, 0.3, 2.0, palette.accent);
             }
             Mark::Pending => self.circle(center, 6.0, Some(1.0), palette.strong_stroke),

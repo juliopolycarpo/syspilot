@@ -127,6 +127,8 @@ pub struct Palette {
     pub on_accent: Color,
     /// `ControlStrongStrokeColorDefault`: the bar's track, open steps.
     pub strong_stroke: Color,
+    /// The faint ring the running step's spinner turns on.
+    pub spinner_track: Color,
     /// `SystemFillColorCritical`: a failure.
     pub critical: Color,
     /// What is drawn on `critical`.
@@ -160,6 +162,7 @@ impl Palette {
                 accent_pressed: accent.light2.faded(0.8),
                 on_accent: Color::rgb(0x000000),
                 strong_stroke: Color::argb(0x8BFF_FFFF),
+                spinner_track: Color::argb(0x45FF_FFFF),
                 critical: Color::rgb(0xFF99A4),
                 on_critical: Color::rgb(0x000000),
                 button: Color::argb(0x0FFF_FFFF),
@@ -180,6 +183,7 @@ impl Palette {
                 accent_pressed: accent.dark1.faded(0.8),
                 on_accent: Color::rgb(0xFFFFFF),
                 strong_stroke: Color::argb(0x7200_0000),
+                spinner_track: Color::argb(0x3900_0000),
                 critical: Color::rgb(0xC42B1C),
                 on_critical: Color::rgb(0xFFFFFF),
                 button: Color::argb(0xB3FF_FFFF),
@@ -202,6 +206,7 @@ impl Palette {
                 accent_pressed: system.highlight,
                 on_accent: system.highlight_text,
                 strong_stroke: system.window_text,
+                spinner_track: system.window_text,
                 critical: system.window_text,
                 on_critical: system.window,
                 button: system.button_face,
@@ -312,6 +317,7 @@ mod tests {
             palette.accent,
             palette.on_accent,
             palette.strong_stroke,
+            palette.spinner_track,
             palette.critical,
             palette.on_critical,
             palette.button,
