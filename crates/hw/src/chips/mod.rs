@@ -1,7 +1,7 @@
 //! Super I/O hardware-monitor chips: temperatures, fans, voltages and fan
 //! duty from the Nuvoton NCT67xx and ITE IT87xx families.
 //!
-//! - [`detect`] finds the chips on the two possible port pairs, leaving
+//! - [`detect`](mod@detect) finds the chips on the two possible port pairs, leaving
 //!   configuration mode on every path.
 //! - [`nct67xx`] and [`it87xx`] hold the register layouts and read a chip.
 //! - [`provider`] turns a detected chip into a [`crate::Provider`].

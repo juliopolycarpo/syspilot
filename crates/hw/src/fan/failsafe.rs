@@ -887,14 +887,14 @@ struct PanicChannel {
 /// the channel in manual mode. So the hook gets what it needs from
 /// the controller beforehand, in three pieces that each sit behind their own
 /// lock, held only for an instant and never across register I/O: the
-/// channel's saved registers ([`Original`], copied or replaced), the
+/// channel's saved registers (`Original`, copied or replaced), the
 /// channel's own duplicate handle on the bus ([`FanChannel::duplicate`]) and
-/// the store ([`SharedStore`], locked per call). The controller writes the
+/// the store (`SharedStore`, locked per call). The controller writes the
 /// saved registers before its first write to a channel, so whatever step
 /// panicked, a channel that may be away from the BIOS has its registers
 /// here.
 ///
-/// Every wait is bounded by [`PANIC_LOCK_WAIT`]: a hook that blocks forever
+/// Every wait is bounded by `PANIC_LOCK_WAIT`: a hook that blocks forever
 /// would keep the process alive with the fans in manual mode, which is worse
 /// than giving up. The one thing it cannot do is restore while the panicking
 /// thread itself is inside a bus transaction (the bus lock is held by the

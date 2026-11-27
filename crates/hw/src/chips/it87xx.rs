@@ -49,7 +49,6 @@ const VOLTAGE_CLIPPED: u8 = 0xFF;
 
 /// The chips this module knows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[allow(missing_docs)]
 pub enum Chip {
     It8613E,
     It8620E,

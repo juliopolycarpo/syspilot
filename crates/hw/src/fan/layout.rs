@@ -4,7 +4,7 @@
 //! found, the driver's state and whether the build has fan control into the
 //! [`FanStatus`] the status view shows: the board's channels and, when
 //! nothing may be written, the reason in words. Always compiled, because it
-//! only describes: a [`ControlGrant`] still comes from
+//! only describes: a [`ControlGrant`](super::board::ControlGrant) still comes from
 //! [`BoardCatalog::offer`] and nowhere else.
 //!
 //! The order of the reasons is the order a user can act on them: PawnIO
