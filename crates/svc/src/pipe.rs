@@ -401,23 +401,23 @@ mod tests {
     }
 
     #[test]
-    fn waiting_for_replies_returns_at_once_when_none_is_owed() {
+    fn waiting_for_writes_returns_at_once_when_none_is_owed() {
         let pending = PendingWrites::default();
-        assert!(pending.wait_until_written(Duration::ZERO), "(owed replies): expected none");
+        assert!(pending.wait_until_written(Duration::ZERO), "(owed writes): expected none");
     }
 
     #[test]
-    fn waiting_for_replies_gives_up_at_its_bound() {
+    fn waiting_for_writes_gives_up_at_its_bound() {
         let pending = PendingWrites::default();
         let owed = pending.owe();
         assert!(
             !pending.wait_until_written(Duration::from_millis(20)),
-            "(wait with a reply owed): expected false at the bound | received: true"
+            "(wait with a write owed): expected false at the bound | received: true"
         );
         drop(owed);
         assert!(
             pending.wait_until_written(Duration::ZERO),
-            "(owed replies after settling): expected none"
+            "(owed writes after settling): expected none"
         );
     }
 
