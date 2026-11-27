@@ -103,8 +103,18 @@ jobs:
       # The same package, as a test instance: installed, checked and removed
       # on the runner, which must leave nothing behind.
       - name: Install and remove the package
+        id: package
         shell: pwsh
         run: ./scripts/test-package.ps1
+
+      # As in CI: Windows Installer's logs of each step, when one failed.
+      - name: Keep the package test's logs
+        if: failure() && steps.package.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: package-test-logs-${{ github.ref_name }}
+          path: target/package-test
+          retention-days: 14
 
       - name: Publish a draft release
         shell: pwsh

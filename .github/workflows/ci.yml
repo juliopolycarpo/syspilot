@@ -120,8 +120,19 @@ jobs:
       # then installs, updates and removes it on the runner and fails on
       # anything left behind. Catches a broken package before a tag does.
       - name: Install and remove the package
+        id: package
         shell: pwsh
         run: ./scripts/test-package.ps1
+
+      # Windows Installer's verbose logs of each step, the only record of
+      # why a removal left something behind (#61).
+      - name: Keep the package test's logs
+        if: failure() && steps.package.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: package-test-logs-${{ github.sha }}
+          path: target/package-test
+          retention-days: 14
 
       - uses: actions/upload-artifact@v7
         with:
