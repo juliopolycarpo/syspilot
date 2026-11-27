@@ -35,6 +35,18 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
+      # The scripts' own tests that need no desktop and no build, in
+      # PowerShell 7 and in the Windows PowerShell 5.1 a contributor may run
+      # them with. test-window-finder.ps1 needs an interactive desktop, so it
+      # is not here.
+      - name: Test the scripts
+        shell: pwsh
+        run: |
+          ./scripts/test-leftovers.ps1
+          if ($LASTEXITCODE -ne 0) { throw "(test-leftovers.ps1 in pwsh): expected exit code 0 | received: $LASTEXITCODE" }
+          powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/test-leftovers.ps1
+          if ($LASTEXITCODE -ne 0) { throw "(test-leftovers.ps1 in powershell): expected exit code 0 | received: $LASTEXITCODE" }
+
       - name: Lint
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
