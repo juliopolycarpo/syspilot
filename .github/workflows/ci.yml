@@ -1,103 +1,47 @@
 name: CI
 
+# Temporary: runs test-package.ps1 with a failure injected while the app is
+# open, then checks that its cleanup left nothing. Not for merging.
 on:
-  push:
-    branches: [main]
   pull_request:
 
 permissions:
   contents: read
 
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
-# RUSTFLAGS is deliberately not set here: it would replace the flags in
-# .cargo/config.toml (static CRT) instead of adding to them.
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  check:
-    name: Format, lint, test, build
+  cleanup:
+    name: Package test cleanup after a failure
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-
-      # rustup reads rust-toolchain.toml and installs the pinned toolchain
-      # with its components.
       - name: Install the toolchain
         run: rustup show active-toolchain
-
       - uses: Swatinem/rust-cache@v2
-
-      - name: Format
-        run: cargo fmt --all --check
-
-      # The scripts' own tests that need no desktop and no build, in
-      # PowerShell 7 and in the Windows PowerShell 5.1 a contributor may run
-      # them with. test-window-finder.ps1 needs an interactive desktop, so it
-      # is not here.
-      - name: Test the scripts
-        shell: pwsh
-        run: |
-          ./scripts/test-leftovers.ps1
-          if ($LASTEXITCODE -ne 0) { throw "(test-leftovers.ps1 in pwsh): expected exit code 0 | received: $LASTEXITCODE" }
-          powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/test-leftovers.ps1
-          if ($LASTEXITCODE -ne 0) { throw "(test-leftovers.ps1 in powershell): expected exit code 0 | received: $LASTEXITCODE" }
-
-      - name: Lint
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-      # Hosted runners are elevated, which the service tests need. They
-      # install a service named SysPilot-Test and remove it again.
-      - name: Test
-        run: cargo test --workspace --locked
-
-      # The feature tier. Fan control is off in every release, so the steps
-      # above never compile it. These do, for the crates that carry it, and
-      # run its tests on the replay bus and named fakes only. The driver and
-      # real-worker tests are not compiled or skip themselves with the feature
-      # on, and the service's end-to-end tests are left out (--bins), so no
-      # step here opens the driver, writes a register or installs a service.
-      - name: Lint with fan control
-        run: >
-          cargo clippy -p syspilot-hw -p syspilot-svc -p syspilot-sensors
-          --all-targets --locked
-          --features syspilot-svc/fan-control,syspilot-sensors/fan-control
-          -- -D warnings
-
-      - name: Test with fan control
-        run: |
-          cargo test -p syspilot-hw -p syspilot-sensors -p syspilot-svc --locked --lib --bins --features syspilot-svc/fan-control,syspilot-sensors/fan-control
-          cargo test -p syspilot-hw -p syspilot-sensors -p syspilot-svc --locked --test driver --test worker --features syspilot-svc/fan-control,syspilot-sensors/fan-control
-
       - name: Build release
         run: cargo build --release --workspace --locked
-
-      - name: Check the service's size budget
-        shell: pwsh
-        run: |
-          $limit = 1.5MB
-          $exe = Get-Item target/x86_64-pc-windows-msvc/release/syspilot-svc.exe
-          "syspilot-svc.exe: {0:N0} bytes (budget {1:N0})" -f $exe.Length, $limit
-          if ($exe.Length -gt $limit) {
-            throw "syspilot-svc.exe is over its size budget. See docs/architecture/overhead.md."
-          }
-
-      # Builds the installer from the release build, as a test instance,
-      # then installs, updates and removes it on the runner and fails on
-      # anything left behind. Catches a broken package before a tag does.
-      - name: Install and remove the package
+      - name: Run the package test, which must fail
+        id: package
+        continue-on-error: true
         shell: pwsh
         run: ./scripts/test-package.ps1
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: syspilot-${{ github.sha }}
-          path: |
-            target/x86_64-pc-windows-msvc/release/syspilot-svc.exe
-            target/x86_64-pc-windows-msvc/release/syspilot-sensors.exe
-          if-no-files-found: error
-          retention-days: 14
+      - name: Check that the failure was the injected one and nothing is left
+        shell: pwsh
+        run: |
+          if ('${{ steps.package.outcome }}' -ne 'failure') { throw "(package test): expected failure | received: ${{ steps.package.outcome }}" }
+          $instance = 'SysPilot-Test.msi'
+          $left = @{
+            'service' = [bool](Get-Service $instance -ErrorAction SilentlyContinue)
+            'service key' = Test-Path "HKLM:\SYSTEM\CurrentControlSet\Services\$instance"
+            'event log source' = Test-Path "HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\$instance"
+            'install folder' = Test-Path (Join-Path $env:ProgramFiles $instance)
+            'data folder' = Test-Path (Join-Path $env:ProgramData $instance)
+            'preferences' = Test-Path (Join-Path $env:LOCALAPPDATA $instance)
+            'shortcut' = Test-Path (Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\$instance.lnk")
+            'scratch key' = Test-Path 'HKLM:\SOFTWARE\SysPilot-Test\Msi'
+            'processes' = [bool](Get-Process | Where-Object { $_.Path -like "$env:ProgramFiles\$instance\*" })
+            'Installed apps entry' = [bool](Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object DisplayName -eq $instance)
+          }
+          $left.GetEnumerator() | Sort-Object Name | ForEach-Object { '{0,-22} {1}' -f $_.Name, $(if ($_.Value) { 'LEFT' } else { 'gone' }) }
+          $dirty = @($left.GetEnumerator() | Where-Object Value | ForEach-Object Name)
+          if ($dirty) { throw "(cleanup after a failure): expected nothing left | received: $($dirty -join ', ')" }

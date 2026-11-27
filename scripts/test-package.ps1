@@ -160,6 +160,7 @@ action = { registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Msi', n
     Set-Content (Join-Path $preferences 'app.toml') 'level = "advanced"'
     $app = Start-Process (Join-Path $folder 'syspilot.exe') -ArgumentList '--instance', $instance -PassThru
     Wait-AppOpen $app
+    throw '(experiment): an injected failure, to run the cleanup'
 
     Invoke-Installer 'update' @('/i', "`"$second`"")
     Assert-Same 'app closed by the update' $true $app.HasExited
