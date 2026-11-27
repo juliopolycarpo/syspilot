@@ -1,0 +1,22 @@
+# cargo-nextest runs each test in a process of its own, and tests of
+# different crates side by side. Doctests are not among them: run those with
+# `cargo test --doc --workspace`.
+nextest-version = { required = "0.9.152" }
+
+[profile.default]
+# Nothing waits longer than the service tests' 20 s of patience. A test still
+# running after a minute is reported, and ended after two, so that a hung test
+# fails instead of holding the run until the CI job's own timeout. An ended
+# test runs no Drop guard: look for a SysPilot-Test service or scratch key it
+# left behind.
+slow-timeout = { period = "60s", terminate-after = 2 }
+# A test fails if what it started still holds its output after it ended. A
+# test removes what it created (CONTRIBUTING.md), processes included.
+leak-timeout = { period = "500ms", result = "fail" }
+
+[profile.ci]
+# Every failure in one run, not only the first.
+fail-fast = false
+# Failures, slow tests and the summary; not a line per passing test.
+status-level = "slow"
+final-status-level = "slow"
