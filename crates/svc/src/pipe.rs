@@ -88,38 +88,40 @@ impl ConnectionLimit {
     }
 }
 
-/// The answers the loop owes or has handed over but a connection has not
-/// written yet. The loop hands an answer to the connection's thread, which
-/// writes it; a process that ends right after its last answer, as a console
-/// run does on `Shutdown`, waits here so that the answer is not lost.
+/// What the loop has handed to connections but they have not written yet:
+/// answers to requests, and the events of live subscriptions. The loop
+/// hands them to each connection's thread, which writes them; a process
+/// that ends right after its last answer and its `Stopping` event, as a
+/// console run does on `Shutdown`, waits here so that they are not lost.
 #[derive(Debug, Default)]
-pub struct PendingReplies {
+pub struct PendingWrites {
     unwritten: Mutex<usize>,
     written: Condvar,
 }
 
-/// One answer owed; dropping it, once the answer is written or will never
-/// be, settles it.
-struct OwedReply<'a>(&'a PendingReplies);
+/// One answer, or one subscription's events, owed; dropping it, once they
+/// are written or never will be, settles it.
+struct OwedWrite<'a>(&'a PendingWrites);
 
-impl Drop for OwedReply<'_> {
+impl Drop for OwedWrite<'_> {
     fn drop(&mut self) {
         *self.0.unwritten.lock().unwrap_or_else(PoisonError::into_inner) -= 1;
         self.0.written.notify_all();
     }
 }
 
-impl PendingReplies {
-    fn owe(&self) -> OwedReply<'_> {
+impl PendingWrites {
+    fn owe(&self) -> OwedWrite<'_> {
         *self.unwritten.lock().unwrap_or_else(PoisonError::into_inner) += 1;
-        OwedReply(self)
+        OwedWrite(self)
     }
 
-    /// Waits until every answer has been written, or `bound` has passed.
-    /// Returns whether they all were. Once the loop has shut down, an answer
-    /// is only still owed while its write is under way: parked and queued
-    /// requests were failed by then. A client that stops reading a large
-    /// answer holds this up to `bound`.
+    /// Waits until everything owed has been written, or `bound` has passed.
+    /// Returns whether it all was. Once the loop has shut down, something is
+    /// only still owed while its write is under way: parked and queued
+    /// requests were failed, and each subscription's channel closed after
+    /// its `Stopping` event. A client that stops reading holds this up to
+    /// `bound`.
     pub fn wait_until_written(&self, bound: Duration) -> bool {
         let unwritten = self.unwritten.lock().unwrap_or_else(PoisonError::into_inner);
         let (unwritten, _) = self
@@ -155,13 +157,13 @@ fn create_instance(
 }
 
 /// Creates the pipe and starts serving it. Fails if the name is already
-/// taken, which means another copy (or an impostor) is running. Returns the
-/// answers its connections have yet to write.
-pub fn start(instance: &Instance, queue: Arc<EventQueue>) -> io::Result<Arc<PendingReplies>> {
+/// taken, which means another copy (or an impostor) is running. Returns what
+/// its connections have yet to write.
+pub fn start(instance: &Instance, queue: Arc<EventQueue>) -> io::Result<Arc<PendingWrites>> {
     let name = wide(&instance.pipe_name());
     let security = SecurityDescriptor::from_sddl(&pipe_sddl())?;
     let first = create_instance(&name, &security, true)?;
-    let pending = Arc::new(PendingReplies::default());
+    let pending = Arc::new(PendingWrites::default());
     let for_listener = pending.clone();
     std::thread::Builder::new()
         .name("pipe-listener".into())
@@ -174,7 +176,7 @@ fn listen(
     security: SecurityDescriptor,
     first: OwnedHandle,
     queue: Arc<EventQueue>,
-    pending: Arc<PendingReplies>,
+    pending: Arc<PendingWrites>,
 ) {
     let limit = Arc::new(ConnectionLimit::default());
     let mut next = Some(first);
@@ -252,7 +254,7 @@ fn forward_events(stream: &mut PipeStream, events: &Receiver<ClientEvent>) {
 }
 
 /// Serves one connection until the client leaves or the service stops.
-fn serve(mut stream: PipeStream, queue: &EventQueue, pending: &PendingReplies) {
+fn serve(mut stream: PipeStream, queue: &EventQueue, pending: &PendingWrites) {
     match read_frame(&mut stream) {
         Ok(Request::Hello { protocol }) if protocol == PROTOCOL_VERSION => {}
         Ok(Request::Hello { protocol }) => {
@@ -288,6 +290,10 @@ fn serve(mut stream: PipeStream, queue: &EventQueue, pending: &PendingReplies) {
                 );
             }
             Request::Subscribe { sensors } => {
+                // Owed for the whole subscription: the loop's shutdown sends
+                // `Stopping` and then closes the channel, so this settles
+                // once that last event is written.
+                let _owed = pending.owe();
                 let id = NEXT_SUBSCRIBER.fetch_add(1, Ordering::Relaxed);
                 let (sink, events) = sync_channel(SUBSCRIBER_BACKLOG);
                 queue.push(Event::Subscribe { id, sensors, sink });
@@ -327,7 +333,7 @@ mod tests {
     struct TestServer {
         instance: Instance,
         queue: Arc<EventQueue>,
-        pending: Arc<PendingReplies>,
+        pending: Arc<PendingWrites>,
     }
 
     impl TestServer {
@@ -396,13 +402,13 @@ mod tests {
 
     #[test]
     fn waiting_for_replies_returns_at_once_when_none_is_owed() {
-        let pending = PendingReplies::default();
+        let pending = PendingWrites::default();
         assert!(pending.wait_until_written(Duration::ZERO), "(owed replies): expected none");
     }
 
     #[test]
     fn waiting_for_replies_gives_up_at_its_bound() {
-        let pending = PendingReplies::default();
+        let pending = PendingWrites::default();
         let owed = pending.owe();
         assert!(
             !pending.wait_until_written(Duration::from_millis(20)),
@@ -548,6 +554,30 @@ mod tests {
             Event::Unsubscribed(gone) => assert_eq!(gone, id),
             _ => panic!("expected an Unsubscribed event"),
         }
+    }
+
+    /// The regression behind #65: the loop's shutdown sends `Stopping` and
+    /// closes the subscription, and the process may end straight after, so
+    /// the subscription must stay owed until that event is written.
+    #[test]
+    fn a_subscription_is_owed_until_its_last_event_is_written() {
+        let server = TestServer::start();
+        let mut events = server.connect().subscribe(false).unwrap();
+        let Event::Subscribe { sink, .. } = server.next_event() else {
+            panic!("expected a Subscribe event");
+        };
+        assert!(
+            !server.pending.wait_until_written(Duration::from_millis(50)),
+            "(live subscription): expected owed | received: settled"
+        );
+        // What `Host::shut_down` does: the last event, then the channel closes.
+        sink.send(ClientEvent::Stopping).unwrap();
+        drop(sink);
+        assert!(
+            server.pending.wait_until_written(Duration::from_secs(5)),
+            "(closed subscription): expected settled within 5 s | received: still owed"
+        );
+        assert_eq!(events.next_event().unwrap(), ClientEvent::Stopping);
     }
 
     #[test]
