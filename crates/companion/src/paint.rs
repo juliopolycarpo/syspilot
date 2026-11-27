@@ -2,6 +2,7 @@
 //! DirectWrite, both part of Windows. Nothing here decides what goes
 //! where; it only draws.
 
+use std::cell::RefCell;
 use std::f32::consts::PI;
 
 use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, HWND, RECT};
@@ -96,7 +97,14 @@ pub struct Painter {
     fonts: Fonts,
     round: ID2D1StrokeStyle,
     target: Option<Target>,
+    /// The text laid out lately, kept because every frame draws the same
+    /// few strings.
+    layouts: RefCell<Vec<(String, Style, u32, IDWriteTextLayout)>>,
 }
+
+/// How many text layouts are kept: more than one screen has strings, so
+/// the cache only empties when the screen changes.
+const KEPT_LAYOUTS: usize = 24;
 
 fn d2d_color(color: Color) -> D2D1_COLOR_F {
     D2D1_COLOR_F { r: color.r, g: color.g, b: color.b, a: color.a }
@@ -193,13 +201,35 @@ impl Painter {
         // SAFETY: `round_properties` is valid for the call; no dashes.
         let round = unsafe { factory.CreateStrokeStyle(&round_properties, None) }?;
         let fonts = Fonts::new(&write)?;
-        Ok(Self { factory, write, imaging, fonts, round, target: None })
+        Ok(Self {
+            factory,
+            write,
+            imaging,
+            fonts,
+            round,
+            target: None,
+            layouts: RefCell::default(),
+        })
     }
 
     /// A text layout of `text` in `style`, wrapped at `width`.
     fn text_layout(&self, text: &str, style: Style, width: f32) -> Result<IDWriteTextLayout> {
+        let key = width.to_bits();
+        let mut layouts = self.layouts.borrow_mut();
+        if let Some((.., layout)) = layouts.iter().find(|(kept, kept_style, kept_width, _)| {
+            kept == text && *kept_style == style && *kept_width == key
+        }) {
+            return Ok(layout.clone());
+        }
         // SAFETY: the text and format live through the call.
-        unsafe { self.write.CreateTextLayout(&utf16(text), self.fonts.of(style), width, f32::MAX) }
+        let layout = unsafe {
+            self.write.CreateTextLayout(&utf16(text), self.fonts.of(style), width, f32::MAX)
+        }?;
+        if layouts.len() == KEPT_LAYOUTS {
+            layouts.clear();
+        }
+        layouts.push((text.to_owned(), style, key, layout.clone()));
+        Ok(layout)
     }
 
     /// The window's size or DPI changed: the target follows on the next
@@ -335,7 +365,9 @@ impl Measure for Painter {
             unsafe { layout.GetMetrics(&mut metrics) }
         });
         match measured {
-            Ok(()) => (metrics.widthIncludingTrailingWhitespace, metrics.height),
+            // Without the space a wrapped line ends on, which would measure it
+            // wider than its column.
+            Ok(()) => (metrics.width, metrics.height),
             // Text that cannot be measured is drawn on one line's room.
             Err(_) => (width, 20.0),
         }
@@ -608,5 +640,67 @@ impl Canvas<'_> {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use windows::core::Interface;
+
+    use super::*;
+
+    #[test]
+    fn directwrite_measures_text_and_wraps_it_in_a_narrow_column() {
+        // The WIC factory needs COM on the thread, as `Window::open` sets up.
+        // SAFETY: initialises COM on this test thread.
+        _ = unsafe {
+            windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+            )
+        };
+        let painter = Painter::new().expect("Direct2D and DirectWrite are part of Windows");
+        let text = "SysPilot opens again by itself when the update is done, unless this \
+                    window is closed first.";
+        let (wide_width, wide_height) = painter.measure(text, Style::Body, 2000.0);
+        assert!(
+            wide_width > 0.0 && wide_height > 0.0,
+            "(one line): expected a positive size | received: {wide_width}x{wide_height}"
+        );
+        let (narrow_width, narrow_height) = painter.measure(text, Style::Body, 120.0);
+        assert!(
+            narrow_width <= 120.0 && narrow_height > wide_height,
+            "(120 wide): expected it to wrap taller than {wide_height} | received: \
+             {narrow_width}x{narrow_height}"
+        );
+        let (_, headline) = painter.measure("Updating", Style::Headline, 400.0);
+        let (_, caption) = painter.measure("Updating", Style::Caption, 400.0);
+        assert!(headline > caption, "(styles): expected headline {headline} > caption {caption}");
+    }
+
+    #[test]
+    fn text_drawn_again_reuses_its_layout() {
+        // SAFETY: initialises COM on this test thread, for the WIC factory.
+        _ = unsafe {
+            windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+            )
+        };
+        let painter = Painter::new().expect("Direct2D and DirectWrite are part of Windows");
+        let layout = |text: &str, width| {
+            painter.text_layout(text, Style::Body, width).expect("a layout of plain text").as_raw()
+        };
+        let first = layout("Install it", 400.0);
+        assert_eq!(layout("Install it", 400.0), first, "(same text): expected the kept layout");
+        assert_ne!(layout("Install it", 300.0), first, "(other width): expected a new layout");
+        for index in 0..KEPT_LAYOUTS {
+            layout(&index.to_string(), 400.0);
+        }
+        assert!(
+            painter.layouts.borrow().len() <= KEPT_LAYOUTS,
+            "(many strings): expected at most {KEPT_LAYOUTS} kept | received: {}",
+            painter.layouts.borrow().len()
+        );
     }
 }

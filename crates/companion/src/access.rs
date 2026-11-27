@@ -40,7 +40,7 @@ use windows::core::{BOOL, BSTR, Error, IUnknown, Interface, Result};
 
 use crate::layout::{Layout, Rect};
 use crate::progress::BAR_END;
-use crate::screen::{Command, Mark, Screen};
+use crate::screen::{Bar, Command, Mark, Screen};
 
 /// What the window posts itself when a screen reader presses a button;
 /// `wparam` is the button's index.
@@ -478,6 +478,15 @@ impl Access {
     pub fn update(&self, view: View) {
         if let Ok(mut shown) = self.shared.view.try_borrow_mut() {
             *shown = Some(view);
+        }
+    }
+
+    /// Only the bar moved, to `bar`.
+    pub fn move_bar(&self, bar: Option<Bar>) {
+        if let Ok(mut shown) = self.shared.view.try_borrow_mut()
+            && let Some(view) = shown.as_mut()
+        {
+            view.screen.bar = bar;
         }
     }
 

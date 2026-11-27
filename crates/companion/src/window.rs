@@ -233,6 +233,23 @@ impl State {
         if self.screen.as_ref() == Some(&screen) {
             return;
         }
+        // Most ticks only move the bar: nothing to measure or lay out again.
+        if let Some(shown) = &self.screen
+            && shown.same_but_bar(&screen)
+        {
+            if let (Some(old), Some(new)) = (access::percent(shown), access::percent(&screen))
+                && old != new
+            {
+                self.pending.push(Event::Progress(old, new));
+                if let Some(taskbar) = &self.taskbar {
+                    taskbar.show(window, &screen);
+                }
+            }
+            self.access.move_bar(screen.bar);
+            self.screen = Some(screen);
+            invalidate(window);
+            return;
+        }
         let new_layout = lay_out(&screen, &self.painter);
         if new_layout.height != self.layout.height {
             let (width, height) = outer_size(new_layout.width, new_layout.height, dpi_of(window));

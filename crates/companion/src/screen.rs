@@ -191,6 +191,18 @@ impl Screen {
         }
     }
 
+    /// Whether `other` differs from this only in where the bar stands, so
+    /// that nothing moves but the bar.
+    pub fn same_but_bar(&self, other: &Self) -> bool {
+        self.badge == other.badge
+            && self.headline == other.headline
+            && self.rows == other.rows
+            && self.reason == other.reason
+            && self.note == other.note
+            && self.buttons == other.buttons
+            && self.bar.map(|bar| bar.failed) == other.bar.map(|bar| bar.failed)
+    }
+
     /// The step running now, if any.
     pub fn current(&self) -> Option<&Row> {
         self.rows.iter().find(|row| row.mark == Mark::Current)
@@ -270,6 +282,15 @@ mod tests {
             not_offered.buttons[not_offered.default_button().unwrap()].command,
             Command::Close
         );
+    }
+
+    #[test]
+    fn only_the_bar_moving_keeps_the_screen_the_same_but_for_it() {
+        let at = |position| Screen::working(None, Step::Installing, position);
+        assert!(at(400).same_but_bar(&at(401)), "(bar moved): expected the same but for it");
+        assert!(!at(400).same_but_bar(&Screen::working(None, Step::Restarting, 401)), "(new step)");
+        let failed = Screen::failed("h", "r", true, Some(&at(400)));
+        assert!(!at(400).same_but_bar(&failed), "(failure): expected a different screen");
     }
 
     #[test]
