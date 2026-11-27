@@ -19,6 +19,7 @@
 mod access;
 mod dialog;
 mod follow;
+mod keys;
 mod layout;
 mod paint;
 mod probe;

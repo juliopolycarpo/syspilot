@@ -51,6 +51,7 @@ use windows::core::{BOOL, PCWSTR, Result, w};
 
 use crate::access::{self, Access, Event, INVOKE_MESSAGE, View};
 use crate::follow::{Follower, Tick};
+use crate::keys::{self, Action, Focus, Key};
 use crate::layout::{Layout, lay_out};
 use crate::paint::{Frame, Painter};
 use crate::progress::BAR_END;
@@ -350,37 +351,32 @@ impl State {
     }
 
     fn key(&mut self, window: HWND, key: u16) -> bool {
-        let count = self.button_count();
-        match key {
-            _ if key == VK_ESCAPE.0 => self.close(),
-            _ if key == VK_RETURN.0 => {
-                let target = if self.focus_visible {
-                    Some(self.focus)
-                } else {
-                    self.screen.as_ref().and_then(Screen::default_button)
-                };
-                if let Some(index) = target {
-                    self.press(index);
-                }
-            }
-            _ if key == VK_SPACE.0 && self.focus_visible => self.press(self.focus),
-            _ if (key == VK_TAB.0 || key == VK_LEFT.0 || key == VK_RIGHT.0) && count > 0 => {
+        let key = match key {
+            _ if key == VK_ESCAPE.0 => Key::Escape,
+            _ if key == VK_RETURN.0 => Key::Enter,
+            _ if key == VK_SPACE.0 => Key::Space,
+            _ if key == VK_LEFT.0 => Key::Left,
+            _ if key == VK_RIGHT.0 => Key::Right,
+            _ if key == VK_TAB.0 => {
                 // SAFETY: reads the key state of this thread's input.
                 let shift = unsafe { GetKeyState(i32::from(VK_SHIFT.0)) } < 0;
-                let back = key == VK_LEFT.0 || (key == VK_TAB.0 && shift);
-                if self.focus_visible {
-                    self.focus = if back {
-                        (self.focus + count - 1) % count
-                    } else {
-                        (self.focus + 1) % count
-                    };
-                }
-                self.focus_visible = true;
-                self.access.focus(Some(self.focus));
-                self.pending.push(Event::Focus(self.focus));
-                invalidate(window);
+                Key::Tab { back: shift }
             }
             _ => return false,
+        };
+        let focus = Focus { at: self.focus, visible: self.focus_visible };
+        let default = self.screen.as_ref().and_then(Screen::default_button);
+        match keys::action(key, self.button_count(), focus, default) {
+            Action::Close => self.close(),
+            Action::Press(index) => self.press(index),
+            Action::Focus(index) => {
+                self.focus = index;
+                self.focus_visible = true;
+                self.access.focus(Some(index));
+                self.pending.push(Event::Focus(index));
+                invalidate(window);
+            }
+            Action::Nothing => return false,
         }
         true
     }
