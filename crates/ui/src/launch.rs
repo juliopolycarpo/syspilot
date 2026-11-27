@@ -3,11 +3,20 @@
 
 use std::io;
 use std::path::Path;
-use std::ptr::null;
+use std::ptr::{null, null_mut};
 
 use syspilot_proto::win::wide;
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::Security::{
+    GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+};
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+/// Argument [`relaunch_elevated`] adds, so the copy it starts knows it was
+/// started for elevation and does not ask again if Windows did not elevate it.
+pub const RELAUNCHED_ARGUMENT: &str = "--elevated-restart";
 
 /// File name of the service executable, expected next to the app.
 const SERVICE_EXECUTABLE: &str = "syspilot-svc.exe";
@@ -84,11 +93,49 @@ fn shell_execute(verb: &str, file: &str, parameters: &str) -> io::Result<()> {
     if result as usize > 32 { Ok(()) } else { Err(io::Error::last_os_error()) }
 }
 
+/// Whether this process runs with an elevated (full administrator) token.
+/// An administrator who has not elevated gets `false`, like a standard user.
+pub fn is_elevated() -> bool {
+    let mut token: HANDLE = null_mut();
+    // SAFETY: the pseudo-handle of the current process needs no closing;
+    // `token` is a valid out-pointer.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return false;
+    }
+    let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+    let mut returned = 0u32;
+    // SAFETY: `elevation` is writable for the size passed; `returned` is a
+    // valid out-pointer; `token` is the open handle from above.
+    let queried = unsafe {
+        GetTokenInformation(
+            token,
+            TokenElevation,
+            (&raw mut elevation).cast(),
+            size_of::<TOKEN_ELEVATION>() as u32,
+            &mut returned,
+        )
+    };
+    // SAFETY: `token` was opened above and is closed exactly once.
+    unsafe { CloseHandle(token) };
+    queried != 0 && elevation.TokenIsElevated != 0
+}
+
+/// The arguments for the elevated copy: the given ones plus
+/// [`RELAUNCHED_ARGUMENT`], once.
+fn elevated_arguments(arguments: &[String]) -> Vec<String> {
+    let mut carried = arguments.to_vec();
+    if !carried.iter().any(|argument| argument == RELAUNCHED_ARGUMENT) {
+        carried.push(RELAUNCHED_ARGUMENT.to_owned());
+    }
+    carried
+}
+
 /// Starts this executable again with administrator rights and the given
 /// arguments. Windows asks for consent; a refusal is an error.
 pub fn relaunch_elevated(arguments: &[String]) -> io::Result<()> {
     let executable = std::env::current_exe()?;
-    shell_execute("runas", &executable.to_string_lossy(), &join_arguments(arguments))
+    let carried = elevated_arguments(arguments);
+    shell_execute("runas", &executable.to_string_lossy(), &join_arguments(&carried))
 }
 
 /// Runs the service executable that sits next to the app with
@@ -163,6 +210,23 @@ mod tests {
     fn arguments_join_with_single_spaces() {
         let arguments = ["--instance".to_owned(), "SysPilot-Test.ui".to_owned(), "a b".to_owned()];
         assert_eq!(join_arguments(&arguments), r#"--instance SysPilot-Test.ui "a b""#);
+    }
+
+    #[test]
+    fn elevation_is_what_windows_says_of_this_process() {
+        // `whoami /groups` lists the integrity level of the token: High
+        // (S-1-16-12288) is an elevated administrator.
+        let groups = std::process::Command::new("whoami").arg("/groups").output().unwrap();
+        let high = String::from_utf8_lossy(&groups.stdout).contains("S-1-16-12288");
+        assert_eq!(is_elevated(), high, "(elevation): whoami says high integrity: {high}");
+    }
+
+    #[test]
+    fn the_elevated_copy_is_marked_once() {
+        let given = ["--page".to_owned(), "sensors".to_owned()];
+        let marked = elevated_arguments(&given);
+        assert_eq!(marked, ["--page", "sensors", RELAUNCHED_ARGUMENT]);
+        assert_eq!(elevated_arguments(&marked), marked, "marked twice");
     }
 
     #[test]
