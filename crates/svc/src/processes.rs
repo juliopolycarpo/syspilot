@@ -23,6 +23,7 @@ use syspilot_proto::tuning::TUNER_EXECUTABLE;
 use syspilot_proto::update::UPDATER_EXECUTABLE;
 use syspilot_proto::win::OwnedHandle;
 use syspilot_proto::worker::WORKER_EXECUTABLE;
+use windows_sys::Win32::Foundation::{ERROR_NO_MORE_FILES, GetLastError};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
@@ -63,6 +64,17 @@ pub trait ProcessTable {
     fn image_path(&self, pid: u32) -> Option<PathBuf>;
 }
 
+/// Whether a process walk that stopped with `last_error` reached the end of
+/// the list. Anything but "no more files" is a failure part way, whose
+/// partial list would end a wait early without saying so.
+fn walk_ended(last_error: u32) -> Result<(), String> {
+    if last_error == ERROR_NO_MORE_FILES {
+        return Ok(());
+    }
+    let error = io::Error::from_raw_os_error(i32::try_from(last_error).unwrap_or(i32::MAX));
+    Err(format!("(process list): expected the end of the list | received: {error}"))
+}
+
 /// The processes of this machine.
 pub struct SystemProcesses;
 
@@ -89,7 +101,9 @@ impl ProcessTable for SystemProcesses {
             found.push((entry.th32ProcessID, String::from_utf16_lossy(&name[..length])));
             // SAFETY: as for `Process32FirstW`.
             if unsafe { Process32NextW(snapshot.raw(), &mut entry) } == 0 {
-                return Ok(found);
+                // SAFETY: trivially safe; reads the calling thread's last error.
+                let reason = unsafe { GetLastError() };
+                return walk_ended(reason).map(|()| found);
             }
         }
     }
@@ -503,11 +517,32 @@ mod tests {
         }
     }
 
+    /// A folder of a test's own, removed on drop.
+    struct TempFolder(PathBuf);
+
+    impl Drop for TempFolder {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// A copy of `ping.exe` named `name` in a folder of its own under the
     /// system temp directory, running for a long time until it is ended.
+    /// The child is killed before its folder, a field, is removed.
     struct RealProgram {
-        folder: PathBuf,
+        folder: TempFolder,
         child: Child,
+    }
+
+    #[test]
+    fn a_walk_ends_at_no_more_files_and_fails_at_anything_else() {
+        assert_eq!(walk_ended(ERROR_NO_MORE_FILES), Ok(()));
+        // 5 is ERROR_ACCESS_DENIED.
+        let failure = walk_ended(5).unwrap_err();
+        assert!(
+            failure.starts_with("(process list): expected the end of the list | received: "),
+            "(walk that failed part way): expected an error naming it | received: {failure}"
+        );
     }
 
     impl RealProgram {
@@ -516,7 +551,7 @@ mod tests {
         fn folder_as_reported(&self) -> PathBuf {
             let image = SystemProcesses.image_path(self.child.id());
             let parent = image.as_deref().and_then(Path::parent).map(Path::to_owned);
-            parent.unwrap_or_else(|| self.folder.clone())
+            parent.unwrap_or_else(|| self.folder.0.clone())
         }
     }
 
@@ -527,8 +562,10 @@ mod tests {
                 .join(format!("SysPilot-Test-processes-{tag}-{}", std::process::id()));
             let _ = fs::remove_dir_all(&folder);
             fs::create_dir_all(&folder).unwrap();
+            // Owned from here, so a copy or start that fails still removes it.
+            let folder = TempFolder(folder);
             let system = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap();
-            let copy = folder.join(name);
+            let copy = folder.0.join(name);
             fs::copy(system.join(r"System32\PING.EXE"), &copy).unwrap();
             let child = Command::new(&copy)
                 .args(["-n", "120", "127.0.0.1"])
@@ -546,7 +583,6 @@ mod tests {
         fn drop(&mut self) {
             let _ = self.child.kill();
             let _ = self.child.wait();
-            let _ = fs::remove_dir_all(&self.folder);
         }
     }
 

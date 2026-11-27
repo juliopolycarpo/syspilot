@@ -220,15 +220,17 @@ impl InstalledFolder {
         let path = std::env::temp_dir().join(format!("SysPilot-Test-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("the temp directory is writable");
+        // Owned from here, so a copy that fails still removes the folder.
+        let mut folder = Self(path);
         // The spelling the system gives a running program's path: long names
         // and no `\\?\` prefix, which `canonicalize` adds.
-        let path = std::fs::canonicalize(&path).expect("the folder exists");
-        let path = PathBuf::from(path.to_string_lossy().trim_start_matches(r"\\?\"));
+        let long = std::fs::canonicalize(&folder.0).expect("the folder exists");
+        folder.0 = PathBuf::from(long.to_string_lossy().trim_start_matches(r"\\?\"));
         let system = PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot is set"));
-        std::fs::copy(EXECUTABLE, path.join("syspilot-svc.exe")).expect("copy the executable");
-        std::fs::copy(system.join(r"System32\PING.EXE"), path.join("syspilot.exe"))
+        std::fs::copy(EXECUTABLE, folder.0.join("syspilot-svc.exe")).expect("copy the executable");
+        std::fs::copy(system.join(r"System32\PING.EXE"), folder.0.join("syspilot.exe"))
             .expect("copy ping.exe");
-        Self(path)
+        folder
     }
 
     /// Starts the stand-in for the app. It ends by itself after about

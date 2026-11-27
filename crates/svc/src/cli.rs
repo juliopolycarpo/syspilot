@@ -99,7 +99,7 @@ Service (administrator):
                              SysPilot's programs in this folder to exit,
                              before the data is deleted; the installer asks
                              for it
-  run                       Run in this console until Ctrl+C
+  run                        Run in this console until Ctrl+C
 
 Options:
   --instance <name>          Act on a named instance instead of SysPilot
