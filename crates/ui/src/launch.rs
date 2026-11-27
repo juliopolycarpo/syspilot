@@ -2,6 +2,8 @@
 //! installer, a web page, a folder.
 
 use std::io;
+use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::io::IntoRawHandle;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::ptr::{null, null_mut};
@@ -9,11 +11,12 @@ use std::ptr::{null, null_mut};
 use syspilot_proto::Instance;
 use syspilot_proto::message::{ServiceStatus, UpdateState};
 use syspilot_proto::update::COMPANION_EXECUTABLE;
-use syspilot_proto::win::wide;
+use syspilot_proto::win::{OwnedHandle, is_owned_by_system_or_administrators, wide};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::Security::{
     GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
 };
+use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, READ_CONTROL};
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -208,6 +211,36 @@ fn data_directory(instance: &Instance) -> PathBuf {
     Path::new(&program_data).join(instance.name())
 }
 
+/// Refuses a data directory that the service did not lock down: one whose
+/// owner is neither SYSTEM nor Administrators.
+///
+/// Existing is not enough. `%ProgramData%` comes from this process's
+/// environment, which the user can set without elevation, and any user can
+/// make folders in the real one; an elevated companion run from a folder
+/// the user owns would run whatever the user swapped in, or a DLL they put
+/// beside it. The service gives its directory the Administrators owner, and
+/// only an elevated process can.
+fn require_privileged_owner(directory: &Path) -> io::Result<()> {
+    // A directory opens only with backup semantics; reading its owner needs
+    // no more than READ_CONTROL.
+    let directory_file = std::fs::OpenOptions::new()
+        .access_mode(READ_CONTROL)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(directory)?;
+    let handle = OwnedHandle::new(directory_file.into_raw_handle() as HANDLE)?;
+    if is_owned_by_system_or_administrators(&handle)? {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "(data directory {}): expected owner SYSTEM or Administrators | received: another owner",
+                directory.display()
+            ),
+        ))
+    }
+}
+
 /// Copies the companion at `source` into its folder in `data_directory`
 /// and returns the copy's path.
 ///
@@ -242,7 +275,9 @@ fn place_companion(source: &Path, data_directory: &Path) -> io::Result<PathBuf> 
 pub fn start_update_companion(handover: &Handover) -> io::Result<()> {
     let app = std::env::current_exe()?;
     let source = app.with_file_name(COMPANION_EXECUTABLE);
-    let copy = place_companion(&source, &data_directory(&handover.instance))?;
+    let data = data_directory(&handover.instance);
+    require_privileged_owner(&data)?;
+    let copy = place_companion(&source, &data)?;
     let mut command = Command::new(&copy);
     command.args(handover.arguments(&app));
     // Its working folder is its own, so that it holds nothing open in the
@@ -445,6 +480,43 @@ mod tests {
         let refused = place_companion(&scratch.source, &data).unwrap_err();
         assert_eq!(refused.kind(), io::ErrorKind::NotFound, "(missing data directory): {refused}");
         assert!(!data.exists(), "(missing data directory): expected it still missing");
+    }
+
+    #[test]
+    fn a_data_directory_the_user_owns_is_refused() {
+        // What a user makes, here or under a %ProgramData% they pointed
+        // elsewhere: owned by their own account, elevated or not.
+        let scratch = CompanionScratch::new("user-owned");
+        let refused = require_privileged_owner(&scratch.root).unwrap_err();
+        assert_eq!(
+            refused.kind(),
+            io::ErrorKind::PermissionDenied,
+            "(user-owned data directory): expected PermissionDenied | received: {refused}"
+        );
+        assert!(
+            refused.to_string().contains("expected owner SYSTEM or Administrators"),
+            "{refused}"
+        );
+    }
+
+    #[test]
+    fn a_directory_owned_by_system_is_accepted() {
+        // %ProgramData% itself belongs to SYSTEM on every Windows install.
+        let program_data =
+            std::env::var_os("ProgramData").unwrap_or_else(|| r"C:\ProgramData".into());
+        let accepted = require_privileged_owner(Path::new(&program_data));
+        assert!(accepted.is_ok(), "(%ProgramData%): expected accepted | received: {accepted:?}");
+    }
+
+    #[test]
+    fn a_missing_data_directory_is_refused_as_missing() {
+        let scratch = CompanionScratch::new("owner-missing");
+        let refused = require_privileged_owner(&scratch.root.join("data")).unwrap_err();
+        assert_eq!(
+            refused.kind(),
+            io::ErrorKind::NotFound,
+            "(missing data directory): expected NotFound | received: {refused}"
+        );
     }
 
     #[test]
