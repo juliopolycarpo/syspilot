@@ -9,7 +9,7 @@
 //! Throughput is a pure kernel counter read on every sample. Temperature and
 //! wear send commands to the device (a SMART or NVMe log read), which can
 //! wake a sleeping disk, so they are read at most every
-//! [`HEALTH_MIN_INTERVAL`] and the last result is repeated in between.
+//! `HEALTH_MIN_INTERVAL` and the last result is repeated in between.
 //!
 //! A SATA drive's temperature comes from its SMART attribute 194, the one
 //! Windows shows (`Get-StorageReliabilityCounter`) and the one SMART tools

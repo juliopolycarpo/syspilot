@@ -200,7 +200,7 @@ impl IntelCpuProvider {
     /// Reads TjMax per core, the RAPL unit register and each domain's
     /// counter once to decide which sensors exist. On models covered by
     /// [`idle_power_floor_watts`] it also watches the package counter for
-    /// [`PLAUSIBILITY_WINDOW`] (250 ms spent in [`Clock::wait`]) and does not
+    /// `PLAUSIBILITY_WINDOW` (250 ms spent in [`Clock::wait`]) and does not
     /// declare package power when it reads below the floor. Energy baselines
     /// are taken by the first [`Provider::sample`], which therefore reports
     /// no power.
