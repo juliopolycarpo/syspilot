@@ -142,12 +142,12 @@ pub fn is_owned_by_system_or_administrators(handle: &OwnedHandle) -> io::Result<
     if status != 0 {
         return Err(io::Error::from_raw_os_error(status as i32));
     }
-    // SAFETY: on success `owner` points into `descriptor`, which is alive
-    // until the `LocalFree` below.
-    let trusted = unsafe {
-        IsWellKnownSid(owner, WinLocalSystemSid) != 0
-            || IsWellKnownSid(owner, WinBuiltinAdministratorsSid) != 0
-    };
+    // SAFETY: on success `owner` points to a valid SID inside `descriptor`,
+    // which is alive until the `LocalFree` below; the call only reads it.
+    let is_system = unsafe { IsWellKnownSid(owner, WinLocalSystemSid) } != 0;
+    // SAFETY: `owner` still points into the live `descriptor` and the call
+    // only reads the SID; the `||` skips it when LocalSystem already matched.
+    let trusted = is_system || unsafe { IsWellKnownSid(owner, WinBuiltinAdministratorsSid) } != 0;
     // SAFETY: `descriptor` was allocated by `GetSecurityInfo` and is freed once.
     unsafe { LocalFree(descriptor) };
     Ok(trusted)
