@@ -11,6 +11,8 @@ name: Release
 on:
   push:
     tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  # (dry run, not for merging): exercise every step but the tag-only ones.
+  pull_request:
 
 permissions:
   contents: write
@@ -36,6 +38,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Check that the tag is the workspace version
+        if: github.event_name == 'push'
         shell: pwsh
         run: |
           $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
@@ -54,6 +57,7 @@ jobs:
       # is left out of the comparison. Anything else that differs means the
       # file is stale.
       - name: Check that CHANGELOG.md is up to date
+        if: github.event_name == 'push'
         shell: pwsh
         run: |
           git cliff --output $env:RUNNER_TEMP/CHANGELOG.md
@@ -117,6 +121,7 @@ jobs:
           retention-days: 14
 
       - name: Publish a draft release
+        if: github.event_name == 'push'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
