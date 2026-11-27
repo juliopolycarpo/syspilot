@@ -26,6 +26,7 @@ param()
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'leftovers.ps1')
+. (Join-Path $PSScriptRoot 'window-finder.ps1')
 $repository = Split-Path -Parent $PSScriptRoot
 $instance = 'SysPilot-Test.msi'
 $folder = Join-Path $env:ProgramFiles $instance
@@ -46,9 +47,28 @@ if (-not ([Security.Principal.WindowsPrincipal] $identity).IsInRole($administrat
 # Fails the test unless `$received` is `$expected`.
 function Assert-Same([string] $what, $expected, $received) {
     if ($expected -ne $received) {
-        throw "($what): expected $expected | received: $received"
+        # An empty string is how the checks below say "nothing left".
+        $shown = foreach ($value in $expected, $received) { if ("$value" -eq '') { 'nothing' } else { $value } }
+        throw "($what): expected $($shown[0]) | received: $($shown[1])"
     }
     "ok  $what"
+}
+
+# Waits until the app started as `$process` shows its window, which is when
+# it holds its files open, and says how long that took. An app that ends
+# first or shows no window is reported, not failed: a runner's desktop may
+# not let it, and the update and removal are still tested without it.
+function Wait-AppOpen([Diagnostics.Process] $process) {
+    $started = Get-Date
+    $deadline = $started.AddSeconds(30)
+    while (-not $process.HasExited -and (Get-Date) -lt $deadline) {
+        if ([SysPilot.WindowFinder]::FindMainWindow([uint32] $process.Id) -ne [IntPtr]::Zero) {
+            return 'ok  app open after {0:N1} s' -f ((Get-Date) - $started).TotalSeconds
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    $what = if ($process.HasExited) { "ended with $($process.ExitCode)" } else { 'showed no window in 30 s' }
+    Write-Warning "The app $what here, so closing it is not tested."
 }
 
 # Runs Windows Installer without a window and returns its exit code.
@@ -83,10 +103,9 @@ function Get-InstalledEntries {
     @(Get-ItemProperty $roots -ErrorAction SilentlyContinue | Where-Object DisplayName -eq $instance)
 }
 
-# The processes that run from the installed folder.
+# The processes that run from the installed folder, whatever their name.
 function Get-InstalledProcesses {
-    $names = 'syspilot', 'syspilot-svc', 'syspilot-sensors', 'syspilot-update', 'syspilot-tune'
-    @(Get-Process $names -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$folder\*" })
+    @(Get-Process | Where-Object { $_.Path -and $_.Path.StartsWith("$folder\", [StringComparison]::OrdinalIgnoreCase) })
 }
 
 New-Item -ItemType Directory -Force $logs | Out-Null
@@ -96,6 +115,7 @@ $newer = '{0}.{1}.{2}' -f $parts[0], $parts[1], ([int] $parts[2] + 1)
 $first = New-TestPackage ''
 $second = New-TestPackage $newer
 $app = $null
+$passed = $false
 
 try {
     # 1. What the script installer of 0.1 left: its two scripts, its own
@@ -139,10 +159,7 @@ action = { registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Msi', n
     New-Item -ItemType Directory -Force $preferences | Out-Null
     Set-Content (Join-Path $preferences 'app.toml') 'level = "advanced"'
     $app = Start-Process (Join-Path $folder 'syspilot.exe') -ArgumentList '--instance', $instance -PassThru
-    Start-Sleep -Seconds 8
-    if ($app.HasExited) {
-        Write-Warning 'The app did not stay open here, so closing it is not tested.'
-    }
+    Wait-AppOpen $app
 
     Invoke-Installer 'update' @('/i', "`"$second`"")
     Assert-Same 'app closed by the update' $true $app.HasExited
@@ -158,8 +175,9 @@ action = { registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Msi', n
 
     # 3. Removal, again with the app open.
     $app = Start-Process (Join-Path $folder 'syspilot.exe') -ArgumentList '--instance', $instance -PassThru
-    Start-Sleep -Seconds 6
+    Wait-AppOpen $app
     Invoke-Installer 'remove' @('/x', "`"$second`"")
+    Assert-Same 'app closed by the removal' $true $app.HasExited
     Assert-Same 'service left' $false ([bool](Get-Service $instance -ErrorAction SilentlyContinue))
     Assert-Same 'service registration left' $false (Test-Path "HKLM:\SYSTEM\CurrentControlSet\Services\$instance")
     Assert-Same 'event log source left' $false (Test-Path "HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\$instance")
@@ -172,13 +190,23 @@ action = { registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Msi', n
     Assert-Same 'entries left in Installed apps' 0 @(Get-InstalledEntries).Count
     Assert-Same 'setting restored' $false (Test-Path $scratch)
     'The package installs, updates and removes cleanly.'
+    $passed = $true
 } finally {
     # Whatever a failed step left: remove it without hiding the failure.
-    if ($app -and -not $app.HasExited) {
-        Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
+    # After a pass the removal step has already done all of this.
+    if (-not $passed) {
+        if ($app -and -not $app.HasExited) {
+            Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
+        }
+        foreach ($package in $second, $first) {
+            Start-Process msiexec.exe -ArgumentList '/x', "`"$package`"", '/qn', '/norestart' -Wait
+        }
+        # A service the packages could not remove, such as one a failed
+        # install registered before it rolled back.
+        if (Get-Service $instance -ErrorAction SilentlyContinue) {
+            Stop-Service $instance -Force -ErrorAction SilentlyContinue
+            sc.exe delete $instance | Out-Null
+        }
+        Remove-Item -Recurse -Force $folder, $data, $shortcut, $preferences, $scriptEntry, $scratch -ErrorAction SilentlyContinue
     }
-    foreach ($package in $second, $first) {
-        Start-Process msiexec.exe -ArgumentList '/x', "`"$package`"", '/qn', '/norestart' -Wait
-    }
-    Remove-Item -Recurse -Force $folder, $preferences, $scriptEntry, $scratch -ErrorAction SilentlyContinue
 }
