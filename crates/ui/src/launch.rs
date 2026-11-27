@@ -97,9 +97,12 @@ fn shell_execute(verb: &str, file: &str, parameters: &str) -> io::Result<()> {
 /// An administrator who has not elevated gets `false`, like a standard user.
 pub fn is_elevated() -> bool {
     let mut token: HANDLE = null_mut();
-    // SAFETY: the pseudo-handle of the current process needs no closing;
-    // `token` is a valid out-pointer.
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+    // SAFETY: `GetCurrentProcess` has no preconditions; it returns a
+    // pseudo-handle that is always valid and needs no closing.
+    let process = unsafe { GetCurrentProcess() };
+    // SAFETY: `process` is the always-valid pseudo-handle from above; `token`
+    // is a valid out-pointer.
+    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
         return false;
     }
     let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
