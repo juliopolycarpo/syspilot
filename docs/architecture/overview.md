@@ -35,6 +35,7 @@ exists today, and the seams the app plugs into.
 | `update` | `proto`            | The updater: finds a new release, verifies its signature and hands it to Windows Installer, on the service's behalf. |
 | `tune`   | `proto`, `hw`      | The tuner: reads and sets tuning values through a vendor's driver (`hw::tuning`), on the service's behalf. |
 | `ui`     | `proto`            | The desktop app. It links none of the privileged code.            |
+| `companion` | `proto`         | The update companion: follows an update the app started and opens the app again. |
 
 `proto` is the only crate both sides link. If a change does not touch `proto`,
 it cannot change what the app and the service say to each other.
@@ -155,6 +156,13 @@ for the newest release, and to install it downloads the package into
 starts Windows Installer, which stops the service, replaces the files and
 starts it again. The reasoning is in decisions 19 and 20 and what a release
 must get past is in the [security model](../security-model.md#updates).
+
+An update the user starts from the app is followed by
+`syspilot-companion.exe` (crate `companion`, decision 22). The app starts it
+from a copy in `companion\` in the data directory and closes; the companion
+shows the update's steps, watches the pipe and Windows Installer
+(`companion/src/watch.rs`, a state machine over what it sees), and opens the
+app again once the new version answers and the installation is done.
 
 ### Tuning
 

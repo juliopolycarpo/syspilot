@@ -207,6 +207,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "syspilot-companion"
+version = "0.3.0"
+dependencies = [
+ "embed-resource",
+ "syspilot-proto",
+ "windows-sys",
+]
+
+[[package]]
 name = "syspilot-engine"
 version = "0.3.0"
 dependencies = [

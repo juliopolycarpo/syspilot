@@ -6,6 +6,7 @@ use std::time::Duration;
 use syspilot_engine::os::{Hive, Registry, reg_type};
 use syspilot_engine::win::{self, WinRegistry};
 use syspilot_proto::Instance;
+use syspilot_proto::update::INSTALL_LOG;
 
 use crate::catalog;
 use crate::core::Core;
@@ -86,7 +87,7 @@ pub fn serve(
         // write, which is what the saved BIOS registers need.
         fan_store_directory: data.state().display().to_string(),
         updater,
-        update_log: data.updates().join("install.log").display().to_string(),
+        update_log: data.updates().join(INSTALL_LOG).display().to_string(),
         tuner: Some(Box::new(ProcessTuner::new(queue.clone()))),
         tuning_mark: Some(Box::new(FileApplyMark::in_directory(data.state()))),
     };

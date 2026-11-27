@@ -1,0 +1,3 @@
+// The app's icon, as resource 1: Explorer shows it for the executable and
+// the dialog shows it as its main icon.
+1 ICON "../../ui/assets/syspilot.ico"

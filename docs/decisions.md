@@ -341,3 +341,39 @@ after three tries and says so. Devices are
 recognised by PCI device ID and bus number, so a card moved to another slot is
 a new device. Protocol version 4 adds the tuning settings, status and
 requests.
+
+## 22. An update the user starts is followed by a companion window
+
+**Decision.** When the user picks "Update now" and the service takes the
+request, the app starts `syspilot-companion.exe` and closes. The companion is
+a task dialog: the three steps of an update as a checklist, and a progress bar
+that creeps forward within each step. It follows the update by looking, every
+half second, at what answers on the service's pipe and whether Windows
+Installer holds its `_MSIExecute` mutex. Once a new version answers and
+Windows Installer is done, it opens the app again; when the update stops on
+the way, it says why and offers to open the app, which shows the update's
+state. It runs from a copy in `companion\` in the data directory, made by the
+app from the one installed next to it.
+
+**Why.** Windows Installer closes the app to replace its files, so an update
+that left the app open ended with the window vanishing and nothing to say
+whether the update worked or when to come back. Closing first, and handing
+over to a window that outlives the installation, turns that into something
+the user can follow. The companion uses the Windows task dialog and no
+toolkit: the app's toolkit runtime is among the files being replaced, and a
+process holding one of them would make Windows Installer leave the update for
+a restart. That is also why it runs from a copy outside the installation
+folder. The copy's folder is the data directory's, which only SYSTEM and
+administrators can write, because the companion inherits the app's elevated
+token and starts the app with it, without a second prompt. Nothing reports
+how far a download or an installation is, so the bar cannot be exact; a bar
+that creeps toward each step's end, never past it, still shows that the
+update is moving.
+
+**Cost.** One more executable to ship (0.5 MB), and one copy of it in the
+data directory. The companion knows the update only from outside: it takes
+the old version answering again after the service went away as a rollback,
+and gives up after the limits the service also keeps (30 minutes), or two
+minutes of a service that does not come back. It changes nothing, so closing
+it leaves the update to finish on its own, as before. Automatic updates are
+installed while no app is open and need no companion.
