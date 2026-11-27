@@ -99,7 +99,19 @@ pub struct Painter {
     target: Option<Target>,
     /// The text laid out lately, kept because every frame draws the same
     /// few strings.
-    layouts: RefCell<Vec<(String, Style, u32, IDWriteTextLayout)>>,
+    layouts: RefCell<Vec<(LayoutKey, IDWriteTextLayout)>>,
+}
+
+/// What a kept text layout was made for: the text, its style, the width
+/// it wraps at, and for text centred in a box, that box's height. Layouts
+/// are never changed once kept, as every caller with the same key gets the
+/// same one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LayoutKey {
+    text: String,
+    style: Style,
+    width: u32,
+    centred_in: Option<u32>,
 }
 
 /// How many text layouts are kept: more than one screen has strings, so
@@ -212,23 +224,41 @@ impl Painter {
         })
     }
 
-    /// A text layout of `text` in `style`, wrapped at `width`.
-    fn text_layout(&self, text: &str, style: Style, width: f32) -> Result<IDWriteTextLayout> {
-        let key = width.to_bits();
+    /// A text layout of `text` in `style`, wrapped at `width`, and when
+    /// `centred_in` is a height, centred both ways in a box that high.
+    fn text_layout(
+        &self,
+        text: &str,
+        style: Style,
+        width: f32,
+        centred_in: Option<f32>,
+    ) -> Result<IDWriteTextLayout> {
+        let key = LayoutKey {
+            text: text.to_owned(),
+            style,
+            width: width.to_bits(),
+            centred_in: centred_in.map(f32::to_bits),
+        };
         let mut layouts = self.layouts.borrow_mut();
-        if let Some((.., layout)) = layouts.iter().find(|(kept, kept_style, kept_width, _)| {
-            kept == text && *kept_style == style && *kept_width == key
-        }) {
+        if let Some((_, layout)) = layouts.iter().find(|(kept, _)| *kept == key) {
             return Ok(layout.clone());
         }
         // SAFETY: the text and format live through the call.
         let layout = unsafe {
             self.write.CreateTextLayout(&utf16(text), self.fonts.of(style), width, f32::MAX)
         }?;
+        if let Some(height) = centred_in {
+            // SAFETY: valid alignments on a live layout, not yet shared.
+            unsafe { layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER) }?;
+            // SAFETY: as above.
+            unsafe { layout.SetMaxHeight(height) }?;
+            // SAFETY: as above.
+            unsafe { layout.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER) }?;
+        }
         if layouts.len() == KEPT_LAYOUTS {
             layouts.clear();
         }
-        layouts.push((text.to_owned(), style, key, layout.clone()));
+        layouts.push((key, layout.clone()));
         Ok(layout)
     }
 
@@ -360,7 +390,7 @@ impl Painter {
 impl Measure for Painter {
     fn measure(&self, text: &str, style: Style, width: f32) -> (f32, f32) {
         let mut metrics = DWRITE_TEXT_METRICS::default();
-        let measured = self.text_layout(text, style, width).and_then(|layout| {
+        let measured = self.text_layout(text, style, width, None).and_then(|layout| {
             // SAFETY: `metrics` is a valid out-pointer.
             unsafe { layout.GetMetrics(&mut metrics) }
         });
@@ -474,7 +504,7 @@ impl Canvas<'_> {
     }
 
     fn text(&self, text: &str, style: Style, rect: &Rect, color: Color) {
-        let Ok(layout) = self.painter.text_layout(text, style, rect.width) else { return };
+        let Ok(layout) = self.painter.text_layout(text, style, rect.width, None) else { return };
         // SAFETY: a live layout and brush.
         unsafe {
             self.target.DrawTextLayout(
@@ -488,13 +518,10 @@ impl Canvas<'_> {
 
     /// `text` in the middle of `rect`, on one line.
     fn centred_text(&self, text: &str, rect: &Rect, color: Color) {
-        let Ok(layout) = self.painter.text_layout(text, Style::Body, rect.width) else { return };
-        // SAFETY: valid alignments on a live layout.
-        _ = unsafe { layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER) };
-        // SAFETY: as above.
-        _ = unsafe { layout.SetMaxHeight(rect.height) };
-        // SAFETY: as above.
-        _ = unsafe { layout.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER) };
+        let Ok(layout) = self.painter.text_layout(text, Style::Body, rect.width, Some(rect.height))
+        else {
+            return;
+        };
         // SAFETY: a live layout and brush.
         unsafe {
             self.target.DrawTextLayout(
@@ -645,6 +672,7 @@ impl Canvas<'_> {
 
 #[cfg(test)]
 mod tests {
+    use windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_ALIGNMENT_LEADING;
     use windows::core::Interface;
 
     use super::*;
@@ -689,7 +717,10 @@ mod tests {
         };
         let painter = Painter::new().expect("Direct2D and DirectWrite are part of Windows");
         let layout = |text: &str, width| {
-            painter.text_layout(text, Style::Body, width).expect("a layout of plain text").as_raw()
+            painter
+                .text_layout(text, Style::Body, width, None)
+                .expect("a layout of plain text")
+                .as_raw()
         };
         let first = layout("Install it", 400.0);
         assert_eq!(layout("Install it", 400.0), first, "(same text): expected the kept layout");
@@ -697,10 +728,35 @@ mod tests {
         for index in 0..KEPT_LAYOUTS {
             layout(&index.to_string(), 400.0);
         }
+        let kept = painter.layouts.borrow().len();
         assert!(
-            painter.layouts.borrow().len() <= KEPT_LAYOUTS,
-            "(many strings): expected at most {KEPT_LAYOUTS} kept | received: {}",
-            painter.layouts.borrow().len()
+            kept <= KEPT_LAYOUTS,
+            "(many strings): expected at most {KEPT_LAYOUTS} kept | received: {kept}"
         );
+    }
+
+    #[test]
+    fn a_centred_label_leaves_the_same_text_laid_out_plainly_alone() {
+        // SAFETY: initialises COM on this test thread, for the WIC factory.
+        _ = unsafe {
+            windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+            )
+        };
+        let painter = Painter::new().expect("Direct2D and DirectWrite are part of Windows");
+        let plain = painter.text_layout("Close", Style::Body, 120.0, None).expect("plain layout");
+        let centred =
+            painter.text_layout("Close", Style::Body, 120.0, Some(32.0)).expect("centred layout");
+        assert_ne!(plain.as_raw(), centred.as_raw(), "(centred): expected a layout of its own");
+        // SAFETY: a live layout.
+        let plain_alignment = unsafe { plain.GetTextAlignment() };
+        // SAFETY: as above.
+        let centred_alignment = unsafe { centred.GetTextAlignment() };
+        assert_eq!(
+            plain_alignment, DWRITE_TEXT_ALIGNMENT_LEADING,
+            "(plain after a centred one): expected leading | received: {plain_alignment:?}"
+        );
+        assert_eq!(centred_alignment, DWRITE_TEXT_ALIGNMENT_CENTER, "(centred)");
     }
 }
