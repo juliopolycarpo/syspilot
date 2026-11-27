@@ -112,8 +112,9 @@ sensor.
 
 A setting that weakens protection asks first and states the risk. A setting
 Windows refuses is shown as *Blocked by Windows*, with the reason. Changing
-anything needs an administrator; without one the app shows everything and
-offers to restart elevated.
+anything needs an administrator, so the app asks for administrator rights as
+it starts. If you decline, it shows everything read-only and offers to restart
+elevated.
 
 The Advanced level also has a Fans page: each fan's speed and duty, its curve
 and whether SysPilot follows it. Releases only show fans; following curves
@@ -130,7 +131,7 @@ stopped (see [tuning](docs/tuning.md)).
 ![The Tuning page with a graphics card's values, from the demo](docs/images/tuning.png)
 
 `syspilot --demo` runs the app on made-up data without a service, to look
-around without changing anything.
+around without changing anything. It does not ask for administrator rights.
 
 ## The command line
 

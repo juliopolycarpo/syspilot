@@ -41,6 +41,9 @@ struct Options {
     level: Option<ViewLevel>,
     /// Colours for this run.
     theme: Option<Theme>,
+    /// Started by [`launch::relaunch_elevated`]: asking for elevation
+    /// again would not change the answer.
+    relaunched: bool,
 }
 
 impl Options {
@@ -52,7 +55,17 @@ impl Options {
             page: Page::Home,
             level: None,
             theme: None,
+            relaunched: false,
         }
+    }
+
+    /// Whether the app should restart with administrator rights before it
+    /// opens a window. Most of what it does needs them, and a window that
+    /// silently runs without is easy to mistake for one that has them. A
+    /// demo changes nothing, and a copy that was already restarted once
+    /// stays as it is whatever Windows made of it (no prompt loop).
+    fn wants_elevation(&self, elevated: bool) -> bool {
+        !elevated && self.demo.is_none() && !self.relaunched
     }
 }
 
@@ -103,6 +116,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                     }
                 });
             }
+            launch::RELAUNCHED_ARGUMENT => options.relaunched = true,
             "--demo" => {
                 // The scenario is optional: `--demo --page home` is valid.
                 let named = rest.peek().and_then(|next| Scenario::parse(next));
@@ -150,8 +164,20 @@ fn launch(options: &Options, arguments: Vec<String>) -> Launch {
 fn main() {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     // A windowed program has no console to complain on; a bad argument is
-    // ignored in favour of starting normally.
-    let options = parse(&arguments).unwrap_or_else(|_| Options::plain());
+    // ignored in favour of starting normally, and so are the other
+    // arguments, so that the ones passed on to a restart are all understood.
+    let (options, arguments) = match parse(&arguments) {
+        Ok(options) => (options, arguments),
+        Err(_) => (Options::plain(), Vec::new()),
+    };
+    // Before any window exists, so that the unelevated copy never shows one.
+    // If the prompt is refused, carry on without rights: the app then shows
+    // everything read-only and offers to restart elevated.
+    if options.wants_elevation(launch::is_elevated())
+        && launch::relaunch_elevated(&arguments).is_ok()
+    {
+        return;
+    }
     if let Err(error) = Reactor::run_component::<App>(launch(&options, arguments)) {
         eprintln!("{error:?}");
         std::process::exit(1);
@@ -211,6 +237,28 @@ mod tests {
             "{unknown}"
         );
         assert!(parse(&arguments("--verbose")).unwrap_err().ends_with("received: --verbose"));
+    }
+
+    #[test]
+    fn a_plain_start_without_rights_asks_for_them() {
+        let plain = parse(&[]).unwrap();
+        assert!(plain.wants_elevation(false), "(plain start): expected to ask for elevation");
+        assert!(!plain.wants_elevation(true), "(elevated start): expected not to ask");
+    }
+
+    #[test]
+    fn a_demo_or_a_restarted_copy_does_not_ask_for_elevation() {
+        let demo = parse(&arguments("--demo")).unwrap();
+        assert!(!demo.wants_elevation(false), "(--demo): expected not to ask");
+        let restarted = parse(&arguments(launch::RELAUNCHED_ARGUMENT)).unwrap();
+        assert!(restarted.relaunched);
+        assert!(!restarted.wants_elevation(false), "(restarted copy): expected not to ask again");
+    }
+
+    #[test]
+    fn the_restart_marker_keeps_the_other_options() {
+        let restarted = parse(&arguments("--page sensors --elevated-restart")).unwrap();
+        assert_eq!((restarted.page, restarted.relaunched), (Page::Sensors, true));
     }
 
     #[test]
