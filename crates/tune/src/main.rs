@@ -2,7 +2,8 @@
 //!
 //! Started by the service, as LocalSystem, for one job: it reads one
 //! [`TuneJob`] frame from its standard input, carries it out through the
-//! vendor interfaces of this machine and writes one [`TuneReport`] frame to
+//! vendor interfaces of this machine and writes one
+//! [`TuneReport`](syspilot_proto::tuning::TuneReport) frame to
 //! its standard output. An empty job only reports. See
 //! [`syspilot_proto::tuning`].
 //!
