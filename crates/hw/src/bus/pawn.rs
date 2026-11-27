@@ -32,9 +32,12 @@ impl ThreadPin {
     fn to(cpu: LogicalCpu) -> Result<Self, BusError> {
         let target = GROUP_AFFINITY { Mask: cpu.mask(), Group: cpu.group, Reserved: [0; 3] };
         let mut previous = GROUP_AFFINITY { Mask: 0, Group: 0, Reserved: [0; 3] };
-        // SAFETY: the pseudo handle from `GetCurrentThread` is always valid;
-        // both pointers refer to live `GROUP_AFFINITY` values.
-        let pinned = unsafe { SetThreadGroupAffinity(GetCurrentThread(), &target, &mut previous) };
+        // SAFETY: `GetCurrentThread` has no preconditions; it returns a pseudo
+        // handle for the calling thread, which needs no closing.
+        let thread = unsafe { GetCurrentThread() };
+        // SAFETY: `thread` is that always-valid pseudo handle; both pointers
+        // refer to live `GROUP_AFFINITY` values.
+        let pinned = unsafe { SetThreadGroupAffinity(thread, &target, &mut previous) };
         if pinned == 0 {
             return Err(BusError::Os {
                 operation: "SetThreadGroupAffinity",
@@ -47,11 +50,14 @@ impl ThreadPin {
 
 impl Drop for ThreadPin {
     fn drop(&mut self) {
-        // SAFETY: as in `to`; `previous` is the affinity the OS reported when
-        // the pin was set.
-        let restored = unsafe {
-            SetThreadGroupAffinity(GetCurrentThread(), &self.previous, std::ptr::null_mut())
-        };
+        // SAFETY: `GetCurrentThread` has no preconditions; the pseudo handle
+        // it returns needs no closing.
+        let thread = unsafe { GetCurrentThread() };
+        // SAFETY: `thread` is that pseudo handle; `previous` is the affinity
+        // the OS reported when the pin was set, and a null out-pointer is
+        // allowed because the old affinity is not wanted.
+        let restored =
+            unsafe { SetThreadGroupAffinity(thread, &self.previous, std::ptr::null_mut()) };
         debug_assert_ne!(restored, 0, "restoring the thread affinity failed");
     }
 }
@@ -447,12 +453,12 @@ mod tests {
     /// The first logical processor the test thread may run on.
     fn allowed_cpu() -> LogicalCpu {
         let mut affinity = GROUP_AFFINITY { Mask: 0, Group: 0, Reserved: [0; 3] };
-        // SAFETY: valid pseudo handle and out-pointer.
+        // SAFETY: `GetCurrentThread` has no preconditions.
+        let thread = unsafe { GetCurrentThread() };
+        // SAFETY: `thread` is a valid pseudo handle and `affinity` a live
+        // out-pointer.
         let ok = unsafe {
-            windows_sys::Win32::System::Threading::GetThreadGroupAffinity(
-                GetCurrentThread(),
-                &mut affinity,
-            )
+            windows_sys::Win32::System::Threading::GetThreadGroupAffinity(thread, &mut affinity)
         };
         assert_ne!(ok, 0, "GetThreadGroupAffinity failed");
         LogicalCpu { group: affinity.Group, index: affinity.Mask.trailing_zeros() as u8 }
@@ -481,14 +487,14 @@ mod tests {
     #[test]
     fn msr_read_runs_on_the_requested_processor_and_restores_affinity() {
         let cpu = allowed_cpu();
+        // SAFETY: `GetCurrentThread` has no preconditions.
+        let thread = unsafe { GetCurrentThread() };
         let before = {
             let mut affinity = GROUP_AFFINITY { Mask: 0, Group: 0, Reserved: [0; 3] };
-            // SAFETY: valid pseudo handle and out-pointer.
+            // SAFETY: `thread` is a valid pseudo handle and `affinity` a live
+            // out-pointer.
             unsafe {
-                windows_sys::Win32::System::Threading::GetThreadGroupAffinity(
-                    GetCurrentThread(),
-                    &mut affinity,
-                )
+                windows_sys::Win32::System::Threading::GetThreadGroupAffinity(thread, &mut affinity)
             };
             affinity.Mask
         };
@@ -509,12 +515,10 @@ mod tests {
         );
         drop(pin);
         let mut after = GROUP_AFFINITY { Mask: 0, Group: 0, Reserved: [0; 3] };
-        // SAFETY: valid pseudo handle and out-pointer.
+        // SAFETY: `thread` is still the valid pseudo handle of this thread and
+        // `after` a live out-pointer.
         unsafe {
-            windows_sys::Win32::System::Threading::GetThreadGroupAffinity(
-                GetCurrentThread(),
-                &mut after,
-            )
+            windows_sys::Win32::System::Threading::GetThreadGroupAffinity(thread, &mut after)
         };
         assert_eq!(after.Mask, before, "(thread pin): expected the previous affinity back");
     }

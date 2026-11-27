@@ -29,12 +29,15 @@ fn private_bytes() -> usize {
         PeakPagefileUsage: 0,
         PrivateUsage: 0,
     };
-    // SAFETY: the pseudo-handle is always valid; `counters` is a valid
-    // `PROCESS_MEMORY_COUNTERS_EX` whose size is passed in `cb`, which the
-    // API accepts through the base `PROCESS_MEMORY_COUNTERS` pointer.
+    // SAFETY: `GetCurrentProcess` has no preconditions; it returns a pseudo
+    // handle for this process, which needs no closing.
+    let process = unsafe { GetCurrentProcess() };
+    // SAFETY: `process` is that always-valid pseudo handle; `counters` is a
+    // valid `PROCESS_MEMORY_COUNTERS_EX` whose size is passed in `cb`, which
+    // the API accepts through the base `PROCESS_MEMORY_COUNTERS` pointer.
     let ok = unsafe {
         K32GetProcessMemoryInfo(
-            GetCurrentProcess(),
+            process,
             std::ptr::from_mut(&mut counters).cast::<PROCESS_MEMORY_COUNTERS>(),
             counters.cb,
         )

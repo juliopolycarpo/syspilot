@@ -116,14 +116,19 @@ impl InterfaceSource for WindowsInterfaces {
             return Vec::new();
         }
         let table = MibTable(table);
+        // SAFETY: `table.0` is the non-null table the successful call
+        // returned, which `table` keeps allocated; reading `NumEntries` needs
+        // no more than that.
+        let entries = unsafe { (*table.0).NumEntries } as usize;
+        // SAFETY: as above. `addr_of!` takes the address of `Table` without
+        // making a reference, so the pointer keeps the provenance of the
+        // whole allocation and covers every row, not just the first.
+        let first = unsafe { ptr::addr_of!((*table.0).Table) }.cast::<MIB_IF_ROW2>();
         // SAFETY: a successful call returns a table of `NumEntries` rows laid
-        // out contiguously from `Table`; the pointer is derived from the
-        // table pointer itself so it covers every row, and `table` keeps the
-        // memory alive until the rows have been converted.
-        let rows = unsafe {
-            let first = ptr::addr_of!((*table.0).Table).cast::<MIB_IF_ROW2>();
-            std::slice::from_raw_parts(first, (*table.0).NumEntries as usize)
-        };
+        // out contiguously from `Table`, and `first` points at the first of
+        // them; `table` keeps the memory alive until the rows have been
+        // converted.
+        let rows = unsafe { std::slice::from_raw_parts(first, entries) };
         rows.iter().map(interface_from_row).collect()
     }
 
