@@ -12,11 +12,10 @@ use syspilot_proto::win::wide;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, S_OK, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{
-    PBST_ERROR, TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TASKDIALOGCONFIG_0, TD_ERROR_ICON,
-    TDCBF_CLOSE_BUTTON, TDE_CONTENT, TDE_MAIN_INSTRUCTION, TDF_CALLBACK_TIMER,
-    TDF_SHOW_PROGRESS_BAR, TDM_CLICK_BUTTON, TDM_SET_ELEMENT_TEXT, TDM_SET_PROGRESS_BAR_POS,
-    TDM_SET_PROGRESS_BAR_RANGE, TDM_SET_PROGRESS_BAR_STATE, TDN_CREATED, TDN_TIMER,
-    TaskDialogIndirect,
+    TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TASKDIALOGCONFIG_0, TD_ERROR_ICON, TDCBF_CLOSE_BUTTON,
+    TDE_CONTENT, TDE_MAIN_INSTRUCTION, TDF_CALLBACK_TIMER, TDF_SHOW_PROGRESS_BAR, TDM_CLICK_BUTTON,
+    TDM_SET_ELEMENT_TEXT, TDM_SET_PROGRESS_BAR_POS, TDM_SET_PROGRESS_BAR_RANGE, TDN_CREATED,
+    TDN_TIMER, TaskDialogIndirect,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{IDCLOSE, SendMessageW};
 use windows_sys::core::{HRESULT, PCWSTR};
@@ -177,11 +176,9 @@ impl Progress {
                     self.close(window, Phase::Ready);
                 }
             }
-            Phase::Failed(_) => {
-                send(window, TDM_SET_PROGRESS_BAR_STATE, PBST_ERROR as WPARAM, 0);
-                self.close(window, phase);
-            }
-            Phase::AlreadyCurrent => self.close(window, phase),
+            // The failure dialog takes this one's place at once, so there is
+            // no moment in which to show the bar in its error state.
+            Phase::Failed(_) | Phase::AlreadyCurrent => self.close(window, phase),
         }
     }
 }
@@ -219,8 +216,8 @@ pub fn show_progress(
     let title = wide(TITLE);
     let instruction = wide(&headline(target));
     let footer = wide(
-        "SysPilot opens again by itself when the update is done. \
-         Closing this window does not stop the update.",
+        "SysPilot opens again by itself when the update is done, unless this \
+         window is closed first. Closing it does not stop the update.",
     );
     let mut progress = Progress {
         shared,
