@@ -290,6 +290,7 @@ version = "0.3.0"
 dependencies = [
  "embed-resource",
  "serde",
+ "syspilot-engine",
  "syspilot-proto",
  "toml",
  "windows-reactor",

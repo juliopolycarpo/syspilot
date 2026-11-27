@@ -33,6 +33,10 @@ windows-sys = { workspace = true, features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+[dev-dependencies]
+# Tests read the SID of the account running them, to own what they make.
+syspilot-engine.workspace = true
+
 [build-dependencies]
 embed-resource = "3"
 # Stages the Windows App SDK runtime next to the executable, so the app

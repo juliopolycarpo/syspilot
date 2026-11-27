@@ -313,6 +313,8 @@ pub fn open_folder(folder: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use syspilot_proto::win::SecurityDescriptor;
+    use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
 
     #[test]
     fn the_icon_is_found_only_when_it_is_beside_the_executable() {
@@ -485,10 +487,20 @@ mod tests {
 
     #[test]
     fn a_data_directory_the_user_owns_is_refused() {
-        // What a user makes, here or under a %ProgramData% they pointed
-        // elsewhere: owned by their own account, elevated or not.
+        // What a standard user makes, here or under a %ProgramData% they
+        // pointed elsewhere: owned by their own account. The owner is set
+        // explicitly: on Windows Server, as on CI, what an elevated
+        // administrator makes is owned by Administrators by default.
         let scratch = CompanionScratch::new("user-owned");
-        let refused = require_privileged_owner(&scratch.root).unwrap_err();
+        let own_sid = syspilot_engine::win::process_user_sid().unwrap();
+        let descriptor = SecurityDescriptor::from_sddl(&format!("O:{own_sid}")).unwrap();
+        let data = wide(&scratch.root.join("data").to_string_lossy());
+        // SAFETY: `data` is NUL-terminated; the attributes borrow
+        // `descriptor`, which outlives the call.
+        let created = unsafe { CreateDirectoryW(data.as_ptr(), &descriptor.attributes()) };
+        assert_ne!(created, 0, "(user-owned data directory): {}", io::Error::last_os_error());
+
+        let refused = require_privileged_owner(&scratch.root.join("data")).unwrap_err();
         assert_eq!(
             refused.kind(),
             io::ErrorKind::PermissionDenied,
