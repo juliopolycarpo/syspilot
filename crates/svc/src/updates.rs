@@ -8,7 +8,7 @@
 //! executable next to its own and reads one line.
 //!
 //! [`Updates`] is the state machine, free of processes and clocks so that it
-//! runs against [`FakeUpdater`] in tests. [`ProcessUpdater`] is the real
+//! runs against `FakeUpdater` in tests. [`ProcessUpdater`] is the real
 //! thing.
 
 use std::path::{Path, PathBuf};
