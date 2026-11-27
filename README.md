@@ -241,12 +241,14 @@ More in [`docs/`](docs/README.md): [architecture](docs/architecture/overview.md)
 ## Building
 
 Rust (the pinned toolchain installs itself through `rustup`) and the MSVC build
-tools are the only requirements. Building the installer also needs the .NET
-SDK, for the WiX toolset, which `package.ps1` installs under `target\`.
+tools are the only requirements; the tests run with
+[cargo-nextest](https://nexte.st) (see [CONTRIBUTING](CONTRIBUTING.md)).
+Building the installer also needs the .NET SDK, for the WiX toolset, which
+`package.ps1` installs under `target\`.
 
 ```console
 > cargo build --release
-> cargo test --workspace
+> cargo nextest run --workspace
 > cargo xtask fetch-modules
 > ./scripts/package.ps1
 ```

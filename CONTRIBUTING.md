@@ -10,19 +10,22 @@ toolchain version is pinned in `rust-toolchain.toml` and installs itself.
 > cargo nextest run --workspace
 > cargo test --doc --workspace
 > cargo clippy --workspace --all-targets -- -D warnings
+> $env:RUSTDOCFLAGS = '-D warnings'; cargo doc --workspace --no-deps --document-private-items
 > cargo fmt --all --check
 ```
 
-All must pass before a change is merged; CI runs the same commands.
+All must pass before a change is merged. CI runs the same commands, then
+lints, documents and tests hw, svc and sensors again with `--features
+syspilot-svc/fan-control,syspilot-sensors/fan-control`.
 
 The tests run with [cargo-nextest](https://nexte.st), at the version
 `.config/nextest.toml` requires (`cargo install cargo-nextest --locked`, or
 its prebuilt binary). It runs each test in a process of its own and the
 crates side by side, which halves the time on CI. It fails a test that
-leaves a process holding the test's output, and ends one that hangs. It skips doctests, hence
-the separate `cargo test --doc`. Plain `cargo test --workspace` runs the same
-tests. It can be the quicker of the two on a machine whose antivirus scans
-every process that starts.
+leaves a process holding the test's output, and ends one that hangs. It
+skips doctests, hence the separate `cargo test --doc`. Plain `cargo test
+--workspace` runs the same tests. It can be the quicker of the two on a
+machine whose antivirus scans every process that starts.
 
 ### Tests that touch the system
 
@@ -92,8 +95,8 @@ with `uninstall`.
 
 See [docs/tweak-catalog.md](docs/tweak-catalog.md). The short version: every
 entry cites the Microsoft page that documents the exact value it writes, and
-`cargo test -p syspilot-proto --test builtin_catalog` enforces the editorial
-rules.
+`cargo nextest run -p syspilot-proto --test builtin_catalog` enforces the
+editorial rules.
 
 ## Commits and pull requests
 

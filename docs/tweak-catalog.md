@@ -162,7 +162,7 @@ risk = "Programs running on this PC can read memory they should not be able to s
 ## Validate
 
 ```sh
-cargo test -p syspilot-proto --test builtin_catalog
+cargo nextest run -p syspilot-proto --test builtin_catalog
 ```
 
 The test parses every `*.toml` file under `catalog/tweaks/` with
