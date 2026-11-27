@@ -1,3 +1,34 @@
 // The app's icon, as resource 1: Explorer shows it for the executable and
 // the dialog shows it as its main icon.
 1 ICON "../../ui/assets/syspilot.ico"
+
+// The taskbar names the window's button after FileDescription, and Task
+// Manager the process; without it both show "syspilot-companion". The
+// version macros come from build.rs. The numbers below are VOS_NT_WINDOWS32
+// and VFT_APP, written out so no SDK header is needed.
+1 VERSIONINFO
+FILEVERSION VERSION_NUMBERS
+PRODUCTVERSION VERSION_NUMBERS
+FILEFLAGSMASK 0x3FL
+FILEFLAGS 0x0L
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription", "SysPilot update"
+            VALUE "FileVersion", VERSION_TEXT
+            VALUE "InternalName", "syspilot-companion"
+            VALUE "OriginalFilename", "syspilot-companion.exe"
+            VALUE "ProductName", "SysPilot"
+            VALUE "ProductVersion", VERSION_TEXT
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

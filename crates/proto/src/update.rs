@@ -26,6 +26,37 @@ pub const INSTALL_LOG: &str = "install.log";
 /// while an update it started installs, next to the app.
 pub const COMPANION_EXECUTABLE: &str = "syspilot-companion.exe";
 
+/// The colours the app hands to the update companion with `--theme`, so
+/// that its window looks like the app the user just left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompanionTheme {
+    /// Whatever Windows is set to, followed as it changes.
+    System,
+    /// Light.
+    Light,
+    /// Dark.
+    Dark,
+}
+
+impl CompanionTheme {
+    /// Every theme.
+    pub const ALL: [Self; 3] = [Self::System, Self::Light, Self::Dark];
+
+    /// The value on the companion's command line.
+    pub fn argument(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+
+    /// Reads a value written by [`Self::argument`].
+    pub fn parse(argument: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|theme| theme.argument() == argument)
+    }
+}
+
 /// Longest version text accepted from the updater.
 const VERSION_MAX: usize = 32;
 
@@ -114,5 +145,19 @@ mod tests {
         }
         let long = format!("available {}", "1".repeat(VERSION_MAX + 1));
         assert_eq!(UpdaterReport::parse_line(&long), None);
+    }
+
+    #[test]
+    fn every_companion_theme_survives_its_argument() {
+        for theme in CompanionTheme::ALL {
+            assert_eq!(CompanionTheme::parse(theme.argument()), Some(theme), "{theme:?}");
+        }
+        for other in ["", "Dark", "auto", "high-contrast"] {
+            assert_eq!(
+                CompanionTheme::parse(other),
+                None,
+                "(--theme): expected {other:?} to be refused | received: a theme"
+            );
+        }
     }
 }

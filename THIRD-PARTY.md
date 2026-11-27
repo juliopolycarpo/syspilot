@@ -26,6 +26,17 @@ Besides `windows-sys` from the table above:
 | --------------------------------------------- | ------------------- | --------------------------------- |
 | [`ed25519-compact`](https://crates.io/crates/ed25519-compact) | MIT | Verifying a release's signature (Ed25519, SHA-512) |
 
+## Linked into the update companion
+
+Besides the crates in the first table:
+
+| Crate                                         | Licence             | Used for                          |
+| --------------------------------------------- | ------------------- | --------------------------------- |
+| [`windows`](https://crates.io/crates/windows), `windows-core`, `windows-numerics`, `windows-result`, `windows-strings`, `windows-collections`, `windows-future`, `windows-threading` | MIT OR Apache-2.0 | Direct2D, DirectWrite, DWM and UI Automation calls for its window |
+
+Build-time only: `windows-implement`, `windows-interface` (MIT OR
+Apache-2.0). The libraries those calls reach are part of Windows.
+
 ## Inside the installer
 
 | Component                                     | Licence             | Used for                          |

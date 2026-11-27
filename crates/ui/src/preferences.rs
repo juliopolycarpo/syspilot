@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::{fs, io};
 
 use serde::{Deserialize, Serialize};
+use syspilot_proto::update::CompanionTheme;
 
 use crate::model::ViewLevel;
 
@@ -38,6 +39,15 @@ impl Theme {
             Self::System => "Use Windows setting",
             Self::Light => "Light",
             Self::Dark => "Dark",
+        }
+    }
+
+    /// The same choice, as the update companion is told it.
+    pub fn for_companion(self) -> CompanionTheme {
+        match self {
+            Self::System => CompanionTheme::System,
+            Self::Light => CompanionTheme::Light,
+            Self::Dark => CompanionTheme::Dark,
         }
     }
 }
@@ -110,6 +120,13 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn the_companion_is_told_the_theme_the_app_uses() {
+        assert_eq!(Theme::System.for_companion(), CompanionTheme::System);
+        assert_eq!(Theme::Light.for_companion(), CompanionTheme::Light);
+        assert_eq!(Theme::Dark.for_companion(), CompanionTheme::Dark);
     }
 
     #[test]
