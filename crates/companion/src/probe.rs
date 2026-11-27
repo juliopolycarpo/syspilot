@@ -3,7 +3,9 @@
 use syspilot_proto::message::UpdateState;
 use syspilot_proto::win::{OwnedHandle, wide};
 use syspilot_proto::{Client, ClientError, Instance};
-use windows_sys::Win32::Foundation::{WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows_sys::Win32::Foundation::{
+    ERROR_FILE_NOT_FOUND, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 use windows_sys::Win32::System::Threading::{
     MUTEX_MODIFY_STATE, OpenMutexW, ReleaseMutex, SYNCHRONIZATION_SYNCHRONIZE, WaitForSingleObject,
 };
@@ -69,10 +71,17 @@ fn is_held(name: &str) -> bool {
     // SAFETY: `name` is NUL-terminated and outlives the call.
     let handle =
         unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE | MUTEX_MODIFY_STATE, 0, name.as_ptr()) };
-    // Absent means no installation ran since Windows started. Without the
-    // right to give it back it must not be taken; then nothing is known,
-    // and the watch's timeouts bound the wait.
-    let Ok(mutex) = OwnedHandle::new(handle) else { return false };
+    let mutex = match OwnedHandle::new(handle) {
+        Ok(mutex) => mutex,
+        // Absent: no installation runs.
+        Err(error) if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => return false,
+        // Without the right to give it back it must not be taken, and then
+        // nothing is known. Busy is the answer that waits: idle would call
+        // a new version ready before Windows Installer has committed it, and
+        // start the restart timeout halfway through the installation. The
+        // watch's timeouts bound the wait.
+        Err(_) => return true,
+    };
     // SAFETY: `mutex` is an open mutex handle with SYNCHRONIZE access.
     match unsafe { WaitForSingleObject(mutex.raw(), 0) } {
         WAIT_TIMEOUT => true,
@@ -156,6 +165,23 @@ mod tests {
         ask_from_another_thread(&name, |held| assert!(held, "(held mutex): expected held"));
         // SAFETY: this thread took the mutex above.
         unsafe { ReleaseMutex(mutex.raw()) };
+    }
+
+    #[test]
+    fn a_mutex_that_cannot_be_given_back_counts_as_busy() {
+        use syspilot_proto::win::SecurityDescriptor;
+        use windows_sys::Win32::System::Threading::CreateMutexW;
+        let name = format!(r"Local\SysPilot-Test.companion-denied-{}", std::process::id());
+        // SYNCHRONIZE for everyone and nothing else: opening it with the
+        // right to release it is refused.
+        let descriptor = SecurityDescriptor::from_sddl("D:P(A;;0x100000;;;WD)").unwrap();
+        let attributes = descriptor.attributes();
+        let wide_name = wide(&name);
+        // SAFETY: `wide_name` is NUL-terminated and `attributes` points at
+        // `descriptor`, both alive for the call; not owned on creation.
+        let created = unsafe { CreateMutexW(&attributes, 0, wide_name.as_ptr()) };
+        let _mutex = OwnedHandle::new(created).unwrap();
+        assert!(is_held(&name), "(mutex without release right): expected busy | received: idle");
     }
 
     #[test]
