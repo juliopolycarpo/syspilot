@@ -88,6 +88,46 @@ impl ConnectionLimit {
     }
 }
 
+/// The answers the loop owes or has handed over but a connection has not
+/// written yet. The loop hands an answer to the connection's thread, which
+/// writes it; a process that ends right after its last answer, as a console
+/// run does on `Shutdown`, waits here so that the answer is not lost.
+#[derive(Debug, Default)]
+pub struct PendingReplies {
+    unwritten: Mutex<usize>,
+    written: Condvar,
+}
+
+/// One answer owed; dropping it, once the answer is written or will never
+/// be, settles it.
+struct OwedReply<'a>(&'a PendingReplies);
+
+impl Drop for OwedReply<'_> {
+    fn drop(&mut self) {
+        *self.0.unwritten.lock().unwrap_or_else(PoisonError::into_inner) -= 1;
+        self.0.written.notify_all();
+    }
+}
+
+impl PendingReplies {
+    fn owe(&self) -> OwedReply<'_> {
+        *self.unwritten.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+        OwedReply(self)
+    }
+
+    /// Waits until every answer has been written, or `bound` has passed.
+    /// Returns whether they all were. A request that reached the queue but
+    /// not the loop is never answered, so it holds this up to `bound`.
+    pub fn wait_until_written(&self, bound: Duration) -> bool {
+        let unwritten = self.unwritten.lock().unwrap_or_else(PoisonError::into_inner);
+        let (unwritten, _) = self
+            .written
+            .wait_timeout_while(unwritten, bound, |unwritten| *unwritten > 0)
+            .unwrap_or_else(PoisonError::into_inner);
+        *unwritten == 0
+    }
+}
+
 fn create_instance(
     name: &[u16],
     security: &SecurityDescriptor,
@@ -113,15 +153,18 @@ fn create_instance(
 }
 
 /// Creates the pipe and starts serving it. Fails if the name is already
-/// taken, which means another copy (or an impostor) is running.
-pub fn start(instance: &Instance, queue: Arc<EventQueue>) -> io::Result<()> {
+/// taken, which means another copy (or an impostor) is running. Returns the
+/// answers its connections have yet to write.
+pub fn start(instance: &Instance, queue: Arc<EventQueue>) -> io::Result<Arc<PendingReplies>> {
     let name = wide(&instance.pipe_name());
     let security = SecurityDescriptor::from_sddl(&pipe_sddl())?;
     let first = create_instance(&name, &security, true)?;
+    let pending = Arc::new(PendingReplies::default());
+    let for_listener = pending.clone();
     std::thread::Builder::new()
         .name("pipe-listener".into())
-        .spawn(move || listen(name, security, first, queue))?;
-    Ok(())
+        .spawn(move || listen(name, security, first, queue, for_listener))?;
+    Ok(pending)
 }
 
 fn listen(
@@ -129,6 +172,7 @@ fn listen(
     security: SecurityDescriptor,
     first: OwnedHandle,
     queue: Arc<EventQueue>,
+    pending: Arc<PendingReplies>,
 ) {
     let limit = Arc::new(ConnectionLimit::default());
     let mut next = Some(first);
@@ -151,9 +195,9 @@ fn listen(
             continue;
         }
         let stream = PipeStream::from_handle(instance);
-        let (queue, limit_for_thread) = (queue.clone(), limit.clone());
+        let (queue, limit_for_thread, pending) = (queue.clone(), limit.clone(), pending.clone());
         let spawned = std::thread::Builder::new().name("pipe-connection".into()).spawn(move || {
-            serve(stream, &queue);
+            serve(stream, &queue, &pending);
             limit_for_thread.release();
         });
         if spawned.is_err() {
@@ -206,7 +250,7 @@ fn forward_events(stream: &mut PipeStream, events: &Receiver<ClientEvent>) {
 }
 
 /// Serves one connection until the client leaves or the service stops.
-fn serve(mut stream: PipeStream, queue: &EventQueue) {
+fn serve(mut stream: PipeStream, queue: &EventQueue, pending: &PendingReplies) {
     match read_frame(&mut stream) {
         Ok(Request::Hello { protocol }) if protocol == PROTOCOL_VERSION => {}
         Ok(Request::Hello { protocol }) => {
@@ -253,6 +297,9 @@ fn serve(mut stream: PipeStream, queue: &EventQueue) {
                 return;
             }
             request => {
+                // Owed from before the loop can see the request until the
+                // answer is written, or the connection gives up on it.
+                let _owed = pending.owe();
                 let (reply, response) = sync_channel(1);
                 queue.push(Event::Request { request: Box::new(request), elevated, reply });
                 // A closed channel means the loop is shutting down.
@@ -278,6 +325,7 @@ mod tests {
     struct TestServer {
         instance: Instance,
         queue: Arc<EventQueue>,
+        pending: Arc<PendingReplies>,
     }
 
     impl TestServer {
@@ -289,8 +337,8 @@ mod tests {
             );
             let instance = Instance::named(&name).unwrap();
             let queue = EventQueue::new().unwrap();
-            start(&instance, queue.clone()).unwrap();
-            Self { instance, queue }
+            let pending = start(&instance, queue.clone()).unwrap();
+            Self { instance, queue, pending }
         }
 
         /// Connects without the pipe-owner check of `Client::connect`: a
@@ -341,6 +389,73 @@ mod tests {
                 _ => panic!("expected a Request event"),
             }
             assert_eq!(request.join().unwrap().unwrap(), Response::States(vec![]));
+        });
+    }
+
+    #[test]
+    fn waiting_for_replies_returns_at_once_when_none_is_owed() {
+        let pending = PendingReplies::default();
+        assert!(pending.wait_until_written(Duration::ZERO), "(owed replies): expected none");
+    }
+
+    #[test]
+    fn waiting_for_replies_gives_up_at_its_bound() {
+        let pending = PendingReplies::default();
+        let owed = pending.owe();
+        assert!(
+            !pending.wait_until_written(Duration::from_millis(20)),
+            "(wait with a reply owed): expected false at the bound | received: true"
+        );
+        drop(owed);
+        assert!(
+            pending.wait_until_written(Duration::ZERO),
+            "(owed replies after settling): expected none"
+        );
+    }
+
+    /// The regression behind a console run's `Shutdown`: the loop hands its
+    /// answer over and the process may end straight after, so the answer
+    /// must count as owed until the connection has written it.
+    #[test]
+    fn an_answer_is_owed_from_the_request_until_it_is_written() {
+        let server = TestServer::start();
+        let mut client = server.connect();
+        std::thread::scope(|scope| {
+            let request = scope.spawn(|| client.request(&Request::States));
+            let Event::Request { reply, .. } = server.next_event() else {
+                panic!("expected a Request event");
+            };
+            assert!(
+                !server.pending.wait_until_written(Duration::from_millis(50)),
+                "(reply before the loop answered): expected owed | received: written"
+            );
+            reply.send(Response::States(vec![])).unwrap();
+            assert!(
+                server.pending.wait_until_written(Duration::from_secs(5)),
+                "(reply after the loop answered): expected written within 5 s | received: still owed"
+            );
+            assert_eq!(request.join().unwrap().unwrap(), Response::States(vec![]));
+        });
+    }
+
+    #[test]
+    fn an_answer_the_loop_drops_is_no_longer_owed() {
+        let server = TestServer::start();
+        let mut client = server.connect();
+        std::thread::scope(|scope| {
+            let request = scope.spawn(|| client.request(&Request::States));
+            let Event::Request { reply, .. } = server.next_event() else {
+                panic!("expected a Request event");
+            };
+            drop(reply);
+            assert!(
+                server.pending.wait_until_written(Duration::from_secs(5)),
+                "(reply the loop dropped): expected settled within 5 s | received: still owed"
+            );
+            assert!(
+                request.join().unwrap().is_err(),
+                "(client of a dropped reply): expected an error"
+            );
         });
     }
 
