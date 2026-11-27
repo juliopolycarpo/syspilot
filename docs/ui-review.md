@@ -23,6 +23,11 @@ a click are driven by accessible name:
 ./scripts/capture-window.ps1 -ProcessId <pid> -Path target/ui-shots/confirm.png
 ```
 
+Both scripts find the window through `scripts/window-finder.ps1`, which picks
+the visible `SysPilot - <page>` window instead of `Process.MainWindowHandle`;
+an elevated process also owns a 50x50 overlay that the latter can return.
+`./scripts/test-window-finder.ps1` checks that lookup and needs a desktop.
+
 ## Checklist
 
 For every screenshot:
