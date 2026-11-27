@@ -767,3 +767,22 @@ impl Drop for Window {
         _ = unsafe { DestroyWindow(self.handle) };
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_window_grows_with_the_dpi_and_takes_its_frame_around_the_content() {
+        let (width, height) = outer_size(520.0, 300.0, 96);
+        assert!(
+            width > 520 && height > 300,
+            "(96 dpi): expected the frame around 520x300 | received: {width}x{height}"
+        );
+        let (wide, high) = outer_size(520.0, 300.0, 144);
+        assert!(
+            wide >= 780 && high >= 450 && wide > width && high > height,
+            "(144 dpi): expected at least 780x450 | received: {wide}x{high}"
+        );
+    }
+}
