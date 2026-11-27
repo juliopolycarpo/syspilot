@@ -295,11 +295,19 @@ impl Painter {
         unsafe { target.CreateBitmapFromWicBitmap(&converter, Some(&properties)) }
     }
 
-    /// Draws `frame` into `window`.
-    pub fn paint(&mut self, window: HWND, frame: &Frame<'_>) -> Result<()> {
+    /// Makes the render target for `window` now, so that a machine where
+    /// Direct2D cannot draw is found before the window shows, while the
+    /// task dialog can still take its place.
+    pub fn prepare(&mut self, window: HWND) -> Result<()> {
         if self.target.is_none() {
             self.target = Some(self.make_target(window)?);
         }
+        Ok(())
+    }
+
+    /// Draws `frame` into `window`.
+    pub fn paint(&mut self, window: HWND, frame: &Frame<'_>) -> Result<()> {
+        self.prepare(window)?;
         let Some(target) = &self.target else { return Ok(()) };
         let canvas = Canvas { target: &target.target, brush: &target.brush, painter: self };
         // SAFETY: a live target, drawn from this thread only.

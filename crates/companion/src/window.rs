@@ -663,7 +663,10 @@ impl Window {
         // SAFETY: a live window and a registered message.
         _ = unsafe { ChangeWindowMessageFilterEx(handle, taskbar_created, MSGFLT_ALLOW, None) };
         state.borrow_mut().apply_look(handle);
-        Ok(Self { handle, state })
+        let window = Self { handle, state };
+        // On failure the window is dropped, and destroyed, unseen.
+        window.state.borrow_mut().painter.prepare(handle)?;
+        Ok(window)
     }
 
     fn show(&self) {
