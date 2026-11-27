@@ -73,7 +73,8 @@ with `uninstall`.
   `#[allow]`: the reason says why, and the expectation warns once there is
   nothing left to suppress, which `-D warnings` makes an error.
 - Doc links resolve and point at public items:
-  `cargo doc --workspace --no-deps` fails otherwise, and CI runs it.
+  `cargo doc --workspace --no-deps --document-private-items` fails
+  otherwise, and CI runs it.
 - External I/O goes behind a trait with a named fake (`FakeRegistry`,
   `FakeHardware`), not an ad-hoc stub in the test.
 - Every new function has a test. Every bug fix has a test that fails without
