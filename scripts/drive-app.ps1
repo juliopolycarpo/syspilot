@@ -27,8 +27,35 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+Add-Type -Namespace SysPilot -Name DriveWin -MemberDefinition @'
+[DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc enumFunc, IntPtr param);
+public delegate bool EnumWindowsProc(IntPtr window, IntPtr param);
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr window, System.Text.StringBuilder text, int maxCount);
+[DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr window);
+public static IntPtr FindMainWindow(uint pid) {
+    IntPtr found = IntPtr.Zero;
+    EnumWindows((window, _) => {
+        uint windowPid;
+        GetWindowThreadProcessId(window, out windowPid);
+        if (windowPid == pid && IsWindowVisible(window)) {
+            var title = new System.Text.StringBuilder(256);
+            GetWindowText(window, title, 256);
+            if (title.ToString().StartsWith("SysPilot")) {
+                found = window;
+                return false;
+            }
+        }
+        return true;
+    }, IntPtr.Zero);
+    return found;
+}
+'@
 $automation = [System.Windows.Automation.AutomationElement]
-$window = (Get-Process -Id $ProcessId).MainWindowHandle
+$window = [SysPilot.DriveWin]::FindMainWindow([uint32]$ProcessId)
+if ($window -eq [IntPtr]::Zero) {
+    $window = (Get-Process -Id $ProcessId).MainWindowHandle
+}
 if ($window -eq [IntPtr]::Zero) {
     throw "(window): expected process $ProcessId to have a window | received: none"
 }
