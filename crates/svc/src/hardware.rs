@@ -1,7 +1,7 @@
 //! The service's view of the machine's hardware.
 //!
 //! The event loop talks to hardware only through [`Hardware`], so it can be
-//! exercised with [`FakeHardware`] and never touches a device in tests. The
+//! exercised with `FakeHardware` and never touches a device in tests. The
 //! real implementation is [`crate::worker::WorkerHardware`].
 
 use syspilot_hw::Provider;

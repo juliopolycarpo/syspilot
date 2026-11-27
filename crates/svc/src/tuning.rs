@@ -22,7 +22,7 @@
 //! user changes it or asks for it again.
 //!
 //! [`Tuning`] is the state machine, free of processes and files so that it
-//! runs against [`FakeTuner`] and [`FakeApplyMark`] in tests. [`ProcessTuner`]
+//! runs against `FakeTuner` and `FakeApplyMark` in tests. [`ProcessTuner`]
 //! and [`FileApplyMark`] are the real things.
 
 use std::collections::{BTreeMap, BTreeSet};
