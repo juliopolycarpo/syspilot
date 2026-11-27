@@ -44,6 +44,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'checksum.ps1')
 $repository = Split-Path -Parent $PSScriptRoot
 $release = Join-Path $repository 'target\x86_64-pc-windows-msvc\release'
 # The WiX version the installer source is written for. Version 5 is the last
@@ -202,8 +203,7 @@ if ($SigningThumbprint) {
     Add-PublisherSignature $package
 }
 
-$hash = (Get-FileHash -Algorithm SHA256 $package).Hash.ToLowerInvariant()
-Set-Content -Encoding ascii -Path "$package.sha256" -Value "$hash  $name.msi"
+$hash = Write-Checksum $package
 
 '{0} ({1:N1} MB)' -f $package, ((Get-Item $package).Length / 1MB)
 "sha256 $hash"
