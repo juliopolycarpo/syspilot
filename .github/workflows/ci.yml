@@ -51,6 +51,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "(test-leftovers.ps1 in pwsh): expected exit code 0 | received: $LASTEXITCODE" }
           powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/test-leftovers.ps1
           if ($LASTEXITCODE -ne 0) { throw "(test-leftovers.ps1 in powershell): expected exit code 0 | received: $LASTEXITCODE" }
+          ./scripts/test-checksum.ps1
+          if ($LASTEXITCODE -ne 0) { throw "(test-checksum.ps1 in pwsh): expected exit code 0 | received: $LASTEXITCODE" }
+          powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/test-checksum.ps1
+          if ($LASTEXITCODE -ne 0) { throw "(test-checksum.ps1 in powershell): expected exit code 0 | received: $LASTEXITCODE" }
 
       - name: Lint
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
