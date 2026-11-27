@@ -14,7 +14,7 @@ the registry does; the exact values are detail for the Advanced level.
 | Tweak | A setting from the built-in catalog that SysPilot can keep in place. | Hack, optimization, fix |
 | Check | A catalog entry that only reports (for example, whether Secure Boot is on). It has no switch. | Audit, test |
 | Custom action | A registry value, service start type, power setting or command the user defined, kept in place like a tweak. | Rule, script |
-| Level | How much the app shows: **Simple** or **Advanced**. | Mode, profile |
+| Level | How much the app shows: **Simple** or **Advanced**. Switched with the *Show Advanced Settings* check box, in the title bar and in Settings. | Mode, profile |
 | Profile | The file that lists what is turned on, with the custom actions and the fan curves. Used on the command line and in the documentation, and on the Fans page, which says where curves are set. Nowhere else in the app. | Config |
 | History | The record of what SysPilot applied, restored and turned off. | Log |
 | Sensor | One reading of the hardware. | Probe, metric |
