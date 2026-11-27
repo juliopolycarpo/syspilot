@@ -158,6 +158,7 @@ fn launch(options: &Options, arguments: Vec<String>) -> Launch {
             options.instance.name().to_owned(),
             "install".to_owned(),
         ],
+        companion_instance: options.demo.is_none().then(|| options.instance.clone()),
     }
 }
 
@@ -265,8 +266,10 @@ mod tests {
     fn a_demo_keeps_no_preferences_and_installs_its_own_instance() {
         let demo = launch(&parse(&arguments("--demo")).unwrap(), Vec::new());
         assert_eq!(demo.preferences_file, None);
+        assert!(demo.companion_instance.is_none(), "(demo): expected no update companion");
         let test = launch(&parse(&arguments("--instance SysPilot-Test.ui")).unwrap(), Vec::new());
         assert_eq!(test.install_arguments, ["--instance", "SysPilot-Test.ui", "install"]);
+        assert_eq!(test.companion_instance.as_ref().map(Instance::name), Some("SysPilot-Test.ui"));
         if let Some(file) = test.preferences_file {
             assert!(file.ends_with(r"SysPilot-Test.ui\app.toml"), "{file:?}");
         }

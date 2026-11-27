@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use syspilot_proto::Instance;
 use syspilot_proto::catalog::Category;
 use syspilot_proto::message::Request;
 use syspilot_proto::profile::{LoggingConfig, UpdateMode};
@@ -41,6 +42,9 @@ pub struct Launch {
     /// Arguments for the service executable to install and start the
     /// service this app talks to.
     pub install_arguments: Vec<String>,
+    /// The instance whose updates the app hands over to the update
+    /// companion. `None` in a demo, which installs nothing.
+    pub companion_instance: Option<Instance>,
 }
 
 /// A destination in the navigation pane.
@@ -301,6 +305,9 @@ pub enum Message {
     CheckForUpdate,
     /// "Update now".
     InstallUpdate,
+    /// The service answered "Update now": what the update companion is
+    /// to be told, if there is one to hand over to, and the answer.
+    UpdateStarted(Option<launch::Handover>, Result<(), Failure>),
     /// A tuning value was entered: device key, control key, the number.
     TuningValue(String, String, Option<f64>),
     /// The tuning switch of a device was flipped.
@@ -335,6 +342,7 @@ pub struct App {
     preferences_file: Option<PathBuf>,
     arguments: Vec<String>,
     install_arguments: Vec<String>,
+    companion_instance: Option<Instance>,
     listener: ListenerSlot,
     /// Whether the listener should ask for a redraw on every reading.
     wants_readings: Arc<AtomicBool>,
@@ -583,6 +591,27 @@ impl App {
             self.fail(failure);
         }
         self.load(context);
+    }
+
+    /// The service took "Update now". Windows Installer is about to close
+    /// the app, so it hands over to the update companion and closes first;
+    /// the companion opens it again when the update is done. If the
+    /// companion cannot start, the app stays until the installation closes
+    /// it, as it did before there was one.
+    fn update_started(
+        &mut self,
+        handover: Option<launch::Handover>,
+        result: Result<(), Failure>,
+        context: &ComponentContext<Self>,
+    ) {
+        if result.is_ok()
+            && let Some(handover) = handover
+            && launch::start_update_companion(&handover).is_ok()
+        {
+            _ = context.window().request_close();
+            return;
+        }
+        self.request_done(None, result, context);
     }
 
     fn go(&mut self, page: Page) {
@@ -834,6 +863,7 @@ impl Component for App {
             preferences_file: launch.preferences_file.clone(),
             arguments: launch.arguments.clone(),
             install_arguments: launch.install_arguments.clone(),
+            companion_instance: launch.companion_instance.clone(),
             listener: ListenerSlot::default(),
             wants_readings: Arc::new(AtomicBool::new(false)),
             trends: Arc::default(),
@@ -1024,7 +1054,20 @@ impl Component for App {
                 }
             }
             Message::CheckForUpdate => self.send(None, Request::CheckForUpdate, context),
-            Message::InstallUpdate => self.send(None, Request::InstallUpdate, context),
+            Message::InstallUpdate => {
+                // What the companion needs, as the user saw it when asking:
+                // the status changes once the service has the request.
+                let handover = self.companion_instance.as_ref().zip(self.snapshot.status.as_ref());
+                let handover = handover
+                    .and_then(|(instance, status)| launch::Handover::for_update(instance, status));
+                let backend = Arc::clone(&self.backend);
+                _ = context.spawn_background(move |_| {
+                    Message::UpdateStarted(handover, backend.send(&Request::InstallUpdate))
+                });
+            }
+            Message::UpdateStarted(handover, result) => {
+                self.update_started(handover, result, context);
+            }
             Message::TuningValue(device, control, entered) => {
                 self.enter_tuning_value(&device, &control, entered);
             }
