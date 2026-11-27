@@ -131,7 +131,7 @@ stopped (see [tuning](docs/tuning.md)).
 ![The Tuning page with a graphics card's values, from the demo](docs/images/tuning.png)
 
 `syspilot --demo` runs the app on made-up data without a service, to look
-around without changing anything.
+around without changing anything. It does not ask for administrator rights.
 
 ## The command line
 
