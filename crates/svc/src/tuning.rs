@@ -1314,11 +1314,91 @@ mod tests {
         fixture.assert_state(&failed, "after the failure of the round's own apply");
     }
 
+    /// A job that ends every process in it when the test drops it, so that
+    /// what a test starts does not outlive the test.
+    struct ProcessTreeJob(syspilot_proto::win::OwnedHandle);
+
+    impl ProcessTreeJob {
+        fn new() -> io::Result<Self> {
+            use windows_sys::Win32::System::JobObjects::{
+                CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+                SetInformationJobObject,
+            };
+            // SAFETY: null attributes and name create an anonymous job.
+            let job = syspilot_proto::win::OwnedHandle::new(unsafe {
+                CreateJobObjectW(std::ptr::null(), std::ptr::null())
+            })?;
+            // SAFETY: the structure is plain data for which all-zero is valid.
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // SAFETY: `limits` matches the information class and outlives
+            // the call; the size passed is its size.
+            let set = unsafe {
+                SetInformationJobObject(
+                    job.raw(),
+                    JobObjectExtendedLimitInformation,
+                    std::ptr::from_ref(&limits).cast(),
+                    size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                )
+            };
+            if set == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Self(job))
+        }
+
+        /// Puts `child` in the job; the processes it starts from then on
+        /// are in it too.
+        fn assign(&self, child: &Child) -> io::Result<()> {
+            use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+            // SAFETY: both handles are valid for the duration of the call.
+            if unsafe { AssignProcessToJobObject(self.0.raw(), child.as_raw_handle()) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        }
+
+        /// How many processes in the job are still running.
+        fn running(&self) -> u32 {
+            use windows_sys::Win32::System::JobObjects::{
+                JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectBasicAccountingInformation,
+                QueryInformationJobObject,
+            };
+            // SAFETY: the structure is plain data for which all-zero is valid.
+            let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION =
+                unsafe { std::mem::zeroed() };
+            // SAFETY: `accounting` matches the information class and
+            // outlives the call; the size passed is its size.
+            let queried = unsafe {
+                QueryInformationJobObject(
+                    self.0.raw(),
+                    JobObjectBasicAccountingInformation,
+                    std::ptr::from_mut(&mut accounting).cast(),
+                    size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_ne!(
+                queried,
+                0,
+                "(job): expected its accounting | received: {}",
+                io::Error::last_os_error()
+            );
+            accounting.ActiveProcesses
+        }
+    }
+
     /// A child that neither reads its input nor reports, as a tuner stuck in
     /// a driver call. `cmd` starts `ping` and ends with the kill, but `ping`
     /// lives on with the pipes it inherited, so anything that waits for the
     /// pipes to close waits as long as `ping` runs: about seven seconds.
-    fn spawn_stuck_child() -> io::Result<Spawned> {
+    ///
+    /// Both go into `job`, which ends `ping` when the test is done. `cmd` is
+    /// put there as soon as it exists, milliseconds before it can have
+    /// started `ping`; a `ping` that was quicker would be outside the job,
+    /// and the test's count of the job's processes would say so.
+    fn spawn_stuck_child(job: &ProcessTreeJob) -> io::Result<Spawned> {
         use std::os::windows::process::CommandExt;
         use std::process::{Command, Stdio};
         use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
@@ -1329,6 +1409,10 @@ mod tests {
             .stderr(Stdio::null())
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()?;
+        if let Err(error) = job.assign(&process) {
+            let _ = process.kill();
+            return Err(error);
+        }
         let streams = process.stdin.take().zip(process.stdout.take());
         streams
             .map(|(input, output)| (process, input, output))
@@ -1350,9 +1434,16 @@ mod tests {
             reset: Vec::new(),
         };
         for job in [TuneJob::default(), large] {
+            let tree = ProcessTreeJob::new().unwrap();
             let started = Instant::now();
-            let outcome = run_tuner(&job, spawn_stuck_child, 300);
+            let outcome = run_tuner(&job, || spawn_stuck_child(&tree), 300);
             let took = started.elapsed();
+            // `ping` outlived the kill with the pipes, or the test would not
+            // show that nothing waits for them.
+            assert!(
+                tree.running() >= 1,
+                "(processes left in the tuner's job): expected ping still running | received: none"
+            );
             assert_eq!(
                 outcome,
                 Err("(tuner): expected its report within 0.3 s | received: nothing".to_owned()),
