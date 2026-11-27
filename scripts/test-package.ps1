@@ -25,6 +25,7 @@
 param()
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'leftovers.ps1')
 $repository = Split-Path -Parent $PSScriptRoot
 $instance = 'SysPilot-Test.msi'
 $folder = Join-Path $env:ProgramFiles $instance
@@ -163,8 +164,7 @@ action = { registry = { scope = "machine", key = 'SOFTWARE\SysPilot-Test\Msi', n
     Assert-Same 'service registration left' $false (Test-Path "HKLM:\SYSTEM\CurrentControlSet\Services\$instance")
     Assert-Same 'event log source left' $false (Test-Path "HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\$instance")
     Assert-Same 'processes left' 0 @(Get-InstalledProcesses).Count
-    $left = @(Get-ChildItem -Recurse -Force $folder -ErrorAction SilentlyContinue | ForEach-Object Name)
-    Assert-Same 'files left in the install folder' '' ($left -join ', ')
+    Assert-Same 'files left in the install folder' '' ((Get-LeftoverName $folder) -join ', ')
     Assert-Same 'install folder left' $false (Test-Path $folder)
     Assert-Same 'data folder left' $false (Test-Path $data)
     Assert-Same 'start menu shortcut left' $false (Test-Path $shortcut)

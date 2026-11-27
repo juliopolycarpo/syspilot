@@ -35,6 +35,12 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
+      # The scripts' own tests that need no desktop and no build.
+      # test-window-finder.ps1 needs an interactive desktop, so it is not here.
+      - name: Test the scripts
+        shell: pwsh
+        run: ./scripts/test-leftovers.ps1
+
       - name: Lint
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
