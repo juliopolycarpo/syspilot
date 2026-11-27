@@ -70,8 +70,8 @@ with `uninstall`.
   sound; the lint enforces its presence, review enforces its content.
 - No `unwrap` outside tests.
 - A lint is suppressed with `#[expect(lint, reason = "…")]`, never
-  `#[allow]`: the reason says why, and the expectation fails once there is
-  nothing left to suppress.
+  `#[allow]`: the reason says why, and the expectation warns once there is
+  nothing left to suppress, which `-D warnings` makes an error.
 - Doc links resolve and point at public items:
   `cargo doc --workspace --no-deps` fails otherwise, and CI runs it.
 - External I/O goes behind a trait with a named fake (`FakeRegistry`,
