@@ -186,9 +186,20 @@ fn token_user_sid(token: &OwnedHandle) -> Option<String> {
     if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 {
         return None;
     }
-    // SAFETY: on success `text` is a NUL-terminated string; the loop stops
-    // at the terminator.
-    let length = unsafe { (0..).take_while(|&index| *text.add(index) != 0).count() };
+    // On success `text` is a NUL-terminated string, so the scan stops at the
+    // terminator and never reads past it.
+    let length = (0..)
+        .take_while(|&index| {
+            // SAFETY: `take_while` only reaches `index` after every earlier
+            // unit was non-NUL, so `index` is at most the terminator's
+            // position and `text.add(index)` stays inside the string's
+            // allocation.
+            let unit = unsafe { text.add(index) };
+            // SAFETY: `unit` points at an initialised UTF-16 unit of the
+            // string: either a character or the terminator itself.
+            unsafe { *unit != 0 }
+        })
+        .count();
     // SAFETY: `text` is valid for `length` UTF-16 units (measured above).
     let sid_string = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, length) });
     // SAFETY: `text` was allocated with `LocalAlloc` by the conversion and
@@ -200,9 +211,12 @@ fn token_user_sid(token: &OwnedHandle) -> Option<String> {
 /// The SID of the user this process runs as.
 pub fn process_user_sid() -> Option<String> {
     let mut token: HANDLE = ptr::null_mut();
-    // SAFETY: the pseudo-handle from `GetCurrentProcess` is always valid;
-    // `token` is a valid out-pointer.
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+    // SAFETY: `GetCurrentProcess` has no preconditions; it returns a
+    // pseudo-handle that is always valid and needs no closing.
+    let process = unsafe { GetCurrentProcess() };
+    // SAFETY: `process` is the always-valid pseudo-handle from above; `token`
+    // is a valid out-pointer.
+    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
         return None;
     }
     token_user_sid(&OwnedHandle::new(token).ok()?)
@@ -298,13 +312,14 @@ impl Launcher for WinLauncher {
         let flags = CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT;
         let environment_pointer =
             environment.as_ref().map_or(ptr::null(), |block| block.0.cast_const());
-        // SAFETY: `application` and `command_line` are NUL-terminated and
-        // outlive the call; `startup` and `process` are valid; the
-        // environment block, when present, is a valid Unicode block; the
-        // token, when present, is a valid primary token.
-        let created = unsafe {
-            match &user_token {
-                Some(token) => CreateProcessAsUserW(
+        let created = match &user_token {
+            // SAFETY: `token` is a valid primary token of the user's session;
+            // `application` and `command_line` are NUL-terminated and outlive
+            // the call; `environment_pointer` is the Unicode block
+            // `CreateEnvironmentBlock` built for this same token;
+            // `startup` and `process` are valid for the call.
+            Some(token) => unsafe {
+                CreateProcessAsUserW(
                     token.raw(),
                     application.as_ptr(),
                     command_line.as_mut_ptr(),
@@ -316,8 +331,14 @@ impl Launcher for WinLauncher {
                     ptr::null(),
                     &startup,
                     &mut process,
-                ),
-                None => CreateProcessW(
+                )
+            },
+            // SAFETY: `application` and `command_line` are NUL-terminated and
+            // outlive the call; no token means no environment block, so
+            // `environment_pointer` is null and the child inherits ours;
+            // `startup` and `process` are valid for the call.
+            None => unsafe {
+                CreateProcessW(
                     application.as_ptr(),
                     command_line.as_mut_ptr(),
                     ptr::null(),
@@ -328,8 +349,8 @@ impl Launcher for WinLauncher {
                     ptr::null(),
                     &startup,
                     &mut process,
-                ),
-            }
+                )
+            },
         };
         if created == 0 {
             return Err(last_error(context()));
@@ -359,12 +380,20 @@ impl Launcher for WinLauncher {
                 Ok(exit_code as i32)
             }
             WAIT_TIMEOUT => {
-                // SAFETY: both handles are valid; terminating an already
-                // exited process is harmless.
-                unsafe {
-                    TerminateJobObject(job.raw(), 1);
-                    TerminateProcess(process_handle.raw(), 1);
-                }
+                // Both results are ignored: the process is being killed on a
+                // timeout and there is nothing to recover if a call fails.
+                // SAFETY: `job` is the handle `CreateJobObjectW` returned
+                // (full access, so it may terminate), owned here and open
+                // until it drops. A job with no live process, because
+                // assignment failed or the process already exited, is
+                // terminated harmlessly.
+                unsafe { TerminateJobObject(job.raw(), 1) };
+                // SAFETY: `process_handle` is the handle the process creation
+                // returned (full access, so it may terminate), owned here and
+                // open until it drops. An already exited process makes the
+                // call fail without effect, and this call is what ends the
+                // process when it never joined the job.
+                unsafe { TerminateProcess(process_handle.raw(), 1) };
                 Err(OsError::new(
                     OsErrorKind::Timeout,
                     format!("{}: still running after {} s", context(), timeout.as_secs()),
