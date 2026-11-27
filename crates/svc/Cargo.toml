@@ -47,5 +47,9 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
-# Tests put the processes they start in a job that ends them with the test.
-windows-sys = { workspace = true, features = ["Win32_System_JobObjects"] }
+# Tests put the processes they start in a job that ends them with the test,
+# starting them suspended and resuming their threads once they are in it.
+windows-sys = { workspace = true, features = [
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+] }

@@ -1404,30 +1404,74 @@ mod tests {
         }
     }
 
+    /// Resumes every thread of the process `pid`, which was started
+    /// suspended: std does not hand out the primary thread's handle, so the
+    /// threads are found in a snapshot of the system's threads.
+    fn resume_threads_of(pid: u32) -> io::Result<()> {
+        use syspilot_proto::win::OwnedHandle;
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+        };
+        use windows_sys::Win32::System::Threading::{
+            OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
+        };
+        // SAFETY: a thread snapshot takes no process id and has no
+        // preconditions; failure is checked by `OwnedHandle::new`.
+        let snapshot = OwnedHandle::new(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) })?;
+        let mut entry =
+            THREADENTRY32 { dwSize: size_of::<THREADENTRY32>() as u32, ..Default::default() };
+        let mut resumed = 0;
+        // SAFETY: `snapshot` is a valid snapshot handle and `entry` a live
+        // THREADENTRY32 whose `dwSize` is set, as the call requires.
+        let mut more = unsafe { Thread32First(snapshot.raw(), &mut entry) } != 0;
+        while more {
+            if entry.th32OwnerProcessID == pid {
+                // SAFETY: no pointers are passed; a failed open returns null,
+                // which `OwnedHandle::new` rejects.
+                let thread = OwnedHandle::new(unsafe {
+                    OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID)
+                })?;
+                // SAFETY: `thread` is a valid handle opened with
+                // THREAD_SUSPEND_RESUME, the right ResumeThread needs.
+                if unsafe { ResumeThread(thread.raw()) } == u32::MAX {
+                    return Err(io::Error::last_os_error());
+                }
+                resumed += 1;
+            }
+            // SAFETY: as for `Thread32First`.
+            more = unsafe { Thread32Next(snapshot.raw(), &mut entry) } != 0;
+        }
+        if resumed == 0 {
+            return Err(io::Error::other(format!(
+                "(suspended child): expected a thread of process {pid} to resume | received: none"
+            )));
+        }
+        Ok(())
+    }
+
     /// A child that neither reads its input nor reports, as a tuner stuck in
     /// a driver call. `cmd` starts `ping` and ends with the kill, but `ping`
     /// lives on with the pipes it inherited, so anything that waits for the
     /// pipes to close waits as long as `ping` runs: about seven seconds.
     ///
-    /// Both go into `job`, which ends `ping` when the test is done. `cmd` is
-    /// put there as soon as it exists, milliseconds before it can have
-    /// started `ping`; a `ping` that was quicker would be outside the job,
-    /// and this function would say so.
+    /// Both go into `job`, which ends `ping` when the test is done. `cmd`
+    /// starts suspended and runs only once it is in the job, so `ping`, which
+    /// it starts, is in the job too.
     ///
     /// Returns once `ping` runs, so that the tuner's timeout, which starts
     /// then, cannot end `cmd` before `ping` exists on a slow machine.
     fn spawn_stuck_child(job: &ProcessTreeJob) -> io::Result<Spawned> {
         use std::os::windows::process::CommandExt;
         use std::process::{Command, Stdio};
-        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+        use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
         let mut process = Command::new("cmd")
             .args(["/c", "ping", "-n", "8", "127.0.0.1", ">nul"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW)
+            .creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED)
             .spawn()?;
-        if let Err(error) = job.assign(&process) {
+        if let Err(error) = job.assign(&process).and_then(|()| resume_threads_of(process.id())) {
             let _ = process.kill();
             return Err(error);
         }
