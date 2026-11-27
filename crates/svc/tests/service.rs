@@ -148,10 +148,13 @@ impl StandardUser {
     fn impersonate() -> Self {
         let (mut process_token, mut filtered): (HANDLE, HANDLE) =
             (ptr::null_mut(), ptr::null_mut());
-        // SAFETY: the pseudo-handle of this process is always valid and the
-        // out-pointer is valid.
+        // SAFETY: takes no arguments and only returns the pseudo-handle of
+        // this process, which needs no closing.
+        let current_process = unsafe { GetCurrentProcess() };
+        // SAFETY: `current_process` is that always-valid pseudo-handle and the
+        // out-pointer `process_token` is valid for writes.
         let opened =
-            unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &mut process_token) };
+            unsafe { OpenProcessToken(current_process, TOKEN_ALL_ACCESS, &mut process_token) };
         assert_ne!(opened, 0, "open the process token: {}", std::io::Error::last_os_error());
         // SAFETY: `process_token` is valid; no SIDs or privileges are
         // listed explicitly; the flag asks for the standard-user variant.
@@ -169,12 +172,11 @@ impl StandardUser {
             )
         };
         assert_ne!(created, 0, "create the filtered token: {}", std::io::Error::last_os_error());
-        // SAFETY: `process_token` is valid and no longer needed; `filtered`
-        // is a valid token.
-        let impersonating = unsafe {
-            CloseHandle(process_token);
-            ImpersonateLoggedOnUser(filtered)
-        };
+        // SAFETY: `process_token` was opened above, is no longer needed and is
+        // closed exactly once.
+        unsafe { CloseHandle(process_token) };
+        // SAFETY: `filtered` is a valid token, created by the call above.
+        let impersonating = unsafe { ImpersonateLoggedOnUser(filtered) };
         assert_ne!(impersonating, 0, "impersonate: {}", std::io::Error::last_os_error());
         Self(filtered)
     }
@@ -182,12 +184,12 @@ impl StandardUser {
 
 impl Drop for StandardUser {
     fn drop(&mut self) {
-        // SAFETY: ends the impersonation started in `impersonate`, then
-        // closes the token it owns exactly once.
-        unsafe {
-            RevertToSelf();
-            CloseHandle(self.0);
-        }
+        // SAFETY: takes no arguments; ends the impersonation started in
+        // `impersonate` on this thread.
+        unsafe { RevertToSelf() };
+        // SAFETY: `self.0` is the token `impersonate` created and owns; it is
+        // closed exactly once, after the impersonation has ended.
+        unsafe { CloseHandle(self.0) };
     }
 }
 

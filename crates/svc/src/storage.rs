@@ -186,11 +186,10 @@ fn is_owned_by_system_or_administrators(path_w: &[u16]) -> Result<bool, u32> {
         return Err(status);
     }
     // SAFETY: on success `owner` points into `descriptor`, which is alive
-    // until the `LocalFree` below.
-    let trusted = unsafe {
-        IsWellKnownSid(owner, WinLocalSystemSid) != 0
-            || IsWellKnownSid(owner, WinBuiltinAdministratorsSid) != 0
-    };
+    // until the `LocalFree` below, and this closure is not called after it.
+    // The call only reads the SID and the well-known-SID kind is a constant.
+    let is_well_known = |kind| unsafe { IsWellKnownSid(owner, kind) } != 0;
+    let trusted = is_well_known(WinLocalSystemSid) || is_well_known(WinBuiltinAdministratorsSid);
     // SAFETY: `descriptor` was allocated by the call above; freed once.
     unsafe { LocalFree(descriptor) };
     Ok(trusted)

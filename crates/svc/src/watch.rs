@@ -141,14 +141,16 @@ impl ActiveWatch {
 impl Drop for ActiveWatch {
     fn drop(&mut self) {
         if self.wait != 0 {
-            // SAFETY: `wait` is valid. Clearing the handle stops new
-            // callbacks; waiting (and cancelling queued ones) guarantees
-            // none is running when the context is freed below.
-            unsafe {
-                SetThreadpoolWait(self.wait, ptr::null_mut(), ptr::null());
-                WaitForThreadpoolWaitCallbacks(self.wait, 1);
-                CloseThreadpoolWait(self.wait);
-            }
+            // SAFETY: `wait` is valid. A null event clears the handle, which
+            // stops new callbacks from being queued.
+            unsafe { SetThreadpoolWait(self.wait, ptr::null_mut(), ptr::null()) };
+            // SAFETY: `wait` is still valid. Waiting (and cancelling queued
+            // callbacks) guarantees none is running when the context is freed
+            // below.
+            unsafe { WaitForThreadpoolWaitCallbacks(self.wait, 1) };
+            // SAFETY: `wait` is valid, no callback is pending or running any
+            // more, and it is closed exactly once.
+            unsafe { CloseThreadpoolWait(self.wait) };
         }
         // SAFETY: `context` came from `Box::into_raw` in `open` and no
         // callback can use it any more (see above).
