@@ -606,10 +606,19 @@ impl App {
     ) {
         if result.is_ok()
             && let Some(handover) = handover
-            && launch::start_update_companion(&handover).is_ok()
         {
-            _ = context.window().request_close();
-            return;
+            match launch::start_update_companion(&handover) {
+                Ok(()) => {
+                    _ = context.window().request_close();
+                    return;
+                }
+                // The update goes on; only the window that follows it is
+                // missing, and the user should know why the app stays.
+                Err(error) => self.fail(format!(
+                    "The update is installing, but its progress window did not open: {error}. \
+                     SysPilot closes when the installation starts."
+                )),
+            }
         }
         self.request_done(None, result, context);
     }
