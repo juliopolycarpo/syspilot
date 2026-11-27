@@ -19,7 +19,7 @@ The tests run with [cargo-nextest](https://nexte.st), at the version
 `.config/nextest.toml` requires (`cargo install cargo-nextest --locked`, or
 its prebuilt binary). It runs each test in a process of its own and the
 crates side by side, which halves the time on CI. It fails a test that
-leaves a process running, and ends one that hangs. It skips doctests, hence
+leaves a process holding the test's output, and ends one that hangs. It skips doctests, hence
 the separate `cargo test --doc`. Plain `cargo test --workspace` runs the same
 tests. It can be the quicker of the two on a machine whose antivirus scans
 every process that starts.

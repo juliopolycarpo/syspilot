@@ -80,11 +80,13 @@ jobs:
         with:
           tool: cargo-nextest@0.9.152
 
-      # As in CI: nextest has no doctests, so cargo test runs those.
       - name: Test
-        run: |
-          cargo nextest run --workspace --locked --profile ci
-          cargo test --doc --workspace --locked
+        run: cargo nextest run --workspace --locked --profile ci
+
+      # As in CI: nextest has no doctests, and a step of their own keeps a
+      # test failure from being hidden by their exit code.
+      - name: Doctests
+        run: cargo test --doc --workspace --locked
 
       # The modules are the PawnIO project's signed LGPL files, pinned by
       # SHA-256. They go into the package as separate files with their

@@ -58,11 +58,14 @@ jobs:
       # Hosted runners are elevated, which the service tests need. They
       # install a service named SysPilot-Test and remove it again. nextest
       # runs the tests of all crates side by side, in half the time cargo test
-      # takes here; it has no doctests, so cargo test runs those.
+      # takes here.
       - name: Test
-        run: |
-          cargo nextest run --workspace --locked --profile ci
-          cargo test --doc --workspace --locked
+        run: cargo nextest run --workspace --locked --profile ci
+
+      # nextest has no doctests. A step of their own: in one pwsh step only the
+      # last command's exit code would decide it.
+      - name: Doctests
+        run: cargo test --doc --workspace --locked
 
       # The feature tier. Fan control is off in every release, so the steps
       # above never compile it. These do, for the crates that carry it, and
