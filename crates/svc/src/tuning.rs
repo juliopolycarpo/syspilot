@@ -1402,6 +1402,50 @@ mod tests {
             let ids = listed.filter_map(|&id| u32::try_from(id).ok());
             ids.filter(|&id| Some(id) != self.assigned.get()).collect()
         }
+
+        /// Whether a process the assigned one started runs `image` (a file
+        /// name such as `PING.EXE`, in any case). By name, because the
+        /// console host Windows starts for `cmd` joins the job too, and
+        /// before `ping` does.
+        fn runs(&self, image: &str) -> bool {
+            self.descendants()
+                .into_iter()
+                .filter_map(image_name)
+                .any(|name| name.eq_ignore_ascii_case(image))
+        }
+    }
+
+    /// The file name of the executable process `pid` runs, or `None` once it
+    /// has ended or cannot be opened.
+    fn image_name(pid: u32) -> Option<String> {
+        use syspilot_proto::win::OwnedHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+            QueryFullProcessImageNameW,
+        };
+        // SAFETY: no pointers are passed; a failed open returns null, which
+        // `OwnedHandle::new` rejects.
+        let process =
+            OwnedHandle::new(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) })
+                .ok()?;
+        let mut path = [0u16; 1024];
+        let mut length = path.len() as u32;
+        // SAFETY: `process` was opened with the right the call needs; `path`
+        // has room for `length` UTF-16 units, and the call writes back how
+        // many it used.
+        let named = unsafe {
+            QueryFullProcessImageNameW(
+                process.raw(),
+                PROCESS_NAME_WIN32,
+                path.as_mut_ptr(),
+                &mut length,
+            )
+        };
+        if named == 0 {
+            return None;
+        }
+        let path = String::from_utf16_lossy(path.get(..length as usize)?);
+        path.rsplit('\\').next().map(str::to_owned)
     }
 
     /// Resumes every thread of the process `pid`, which was started
@@ -1476,12 +1520,14 @@ mod tests {
             return Err(error);
         }
         let deadline = Instant::now() + Duration::from_secs(5);
-        while job.descendants().is_empty() {
+        while !job.runs("PING.EXE") {
             if Instant::now() >= deadline {
                 let _ = process.kill();
-                return Err(io::Error::other(
-                    "(stuck child): expected cmd to start ping in the job within 5 s | received: no other process in the job",
-                ));
+                let running: Vec<String> =
+                    job.descendants().into_iter().filter_map(image_name).collect();
+                return Err(io::Error::other(format!(
+                    "(stuck child): expected cmd to start PING.EXE in the job within 5 s | received: {running:?}"
+                )));
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -1517,12 +1563,13 @@ mod tests {
             let outcome = run_tuner(&job, spawn, 300);
             let took = started.get().elapsed();
             // `ping` outlived the kill with the pipes, or the test would not
-            // show that nothing waits for them. `cmd` itself may still be
-            // listed while the kill takes effect, so it does not count.
-            let descendants = tree.descendants();
+            // show that nothing waits for them. Looked for by name: `cmd`
+            // may still be listed while its kill takes effect, and its
+            // console host is in the job too.
             assert!(
-                !descendants.is_empty(),
-                "(processes cmd started, in the tuner's job): expected ping still running | received: none"
+                tree.runs("PING.EXE"),
+                "(processes cmd started, in the tuner's job): expected PING.EXE still running | received: {:?}",
+                tree.descendants().into_iter().filter_map(image_name).collect::<Vec<_>>()
             );
             assert_eq!(
                 outcome,
