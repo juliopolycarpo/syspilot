@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use syspilot_proto::catalog::Category;
 use syspilot_proto::message::Request;
@@ -293,8 +293,8 @@ pub enum Message {
     LoggingEnabled(bool),
     /// The logging interval was changed via slider or numeric box.
     LoggingInterval(Option<f64>),
-    /// Debounced commit of the logging interval after dragging or typing settles.
-    CommitLoggingInterval(u64, u32),
+    /// The timer that sends the logging interval once it settles woke up.
+    LoggingIntervalTimer,
     /// An update mode was picked by index.
     PickUpdateMode(Option<usize>),
     /// "Look now" for a new version.
@@ -375,8 +375,8 @@ pub struct App {
     pub tuning_drafts: TuningDrafts,
     /// Pending logging interval while a slider drag or numeric edit settles.
     pub logging_interval_draft: Option<u32>,
-    /// Sequence counter for debouncing logging interval commits.
-    logging_interval_seq: u64,
+    /// When the draft last changed, while the timer that sends it runs.
+    logging_interval_changed: Option<Instant>,
     /// Whether the navigation pane is open, once the view has said so.
     pane_open: Option<bool>,
 }
@@ -390,6 +390,24 @@ fn set_open(open_keys: &mut HashSet<String>, key: String, open: bool) {
     } else {
         open_keys.remove(&key);
     }
+}
+
+/// How long the logging interval must stay still before it is sent, so that
+/// a slider drag sends one request and not one per pixel.
+const LOGGING_SETTLE: Duration = Duration::from_millis(250);
+
+/// How much longer to wait for a logging interval last changed `since` ago,
+/// or `None` once it has been still for [`LOGGING_SETTLE`].
+fn settle_wait(since: Duration) -> Option<Duration> {
+    LOGGING_SETTLE.checked_sub(since).filter(|wait| !wait.is_zero())
+}
+
+/// Wakes the app with [`Message::LoggingIntervalTimer`] after `wait`.
+fn wait_for_logging_interval(wait: Duration, context: &ComponentContext<App>) {
+    _ = context.spawn_background(move |_| {
+        std::thread::sleep(wait);
+        Message::LoggingIntervalTimer
+    });
 }
 
 /// Clamps and rounds a user-entered logging interval to 1..=3600 seconds.
@@ -559,6 +577,9 @@ impl App {
             (_, None) => {}
         }
         if let Err(failure) = result {
+            // A refused interval is not saved, so the box must not keep
+            // showing it.
+            self.logging_interval_draft = None;
             self.fail(failure);
         }
         self.load(context);
@@ -835,7 +856,7 @@ impl Component for App {
             details_open: HashSet::new(),
             tuning_drafts: TuningDrafts::new(),
             logging_interval_draft: None,
-            logging_interval_seq: 0,
+            logging_interval_changed: None,
             pane_open: None,
         };
         app.go(Page::Home);
@@ -969,22 +990,27 @@ impl Component for App {
                     return;
                 }
                 self.logging_interval_draft = Some(seconds);
-                self.logging_interval_seq = self.logging_interval_seq.wrapping_add(1);
-                let seq = self.logging_interval_seq;
-                _ = context.spawn_background(move |_| {
-                    std::thread::sleep(Duration::from_millis(250));
-                    Message::CommitLoggingInterval(seq, seconds)
-                });
+                // One timer serves a whole drag: it is only started when none
+                // is running, and checks on waking how long the value has
+                // been still.
+                if self.logging_interval_changed.replace(Instant::now()).is_none() {
+                    wait_for_logging_interval(LOGGING_SETTLE, context);
+                }
             }
-            Message::CommitLoggingInterval(seq, seconds) => {
-                if seq == self.logging_interval_seq && self.can_change() {
-                    let mut logging = self.logging();
-                    if logging.interval_secs != seconds {
-                        logging.interval_secs = seconds;
-                        self.send(None, Request::SetLogging(logging), context);
-                    } else {
-                        self.logging_interval_draft = None;
-                    }
+            Message::LoggingIntervalTimer => {
+                let Some(changed) = self.logging_interval_changed else { return };
+                if let Some(wait) = settle_wait(changed.elapsed()) {
+                    wait_for_logging_interval(wait, context);
+                    return;
+                }
+                self.logging_interval_changed = None;
+                let Some(seconds) = self.logging_interval_draft else { return };
+                let mut logging = self.logging();
+                if logging.interval_secs != seconds && self.can_change() {
+                    logging.interval_secs = seconds;
+                    self.send(None, Request::SetLogging(logging), context);
+                } else {
+                    self.logging_interval_draft = None;
                 }
             }
             Message::PickUpdateMode(index) => {
@@ -1368,6 +1394,16 @@ mod tests {
         // The scripted backend has no second listener: reconnecting fails
         // at `listen`, which proves a new one was asked for.
         assert_eq!(listen(&backend, &slot, &trends, &wants_readings), Err(Failure::NotRunning));
+    }
+
+    #[test]
+    fn a_logging_interval_is_sent_once_it_has_been_still_for_the_settle_time() {
+        let just_changed = settle_wait(Duration::ZERO);
+        assert_eq!(just_changed, Some(LOGGING_SETTLE), "(just changed): expected the full wait");
+        let halfway = settle_wait(LOGGING_SETTLE / 2);
+        assert_eq!(halfway, Some(LOGGING_SETTLE / 2), "(halfway): expected the rest of the wait");
+        assert_eq!(settle_wait(LOGGING_SETTLE), None, "(settled exactly): expected no wait");
+        assert_eq!(settle_wait(LOGGING_SETTLE * 2), None, "(long settled): expected no wait");
     }
 
     #[test]
