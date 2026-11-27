@@ -3,6 +3,53 @@
 Every change to SysPilot, by release. This file is generated from the commit
 messages by [git-cliff](https://git-cliff.org); do not edit it by hand.
 
+## [0.4.0](https://github.com/juliopolycarpo/syspilot/compare/v0.3.0...v0.4.0) - 2026-11-27
+
+### Features
+
+- **ui:** Ask for administrator rights as the app starts ([#42](https://github.com/juliopolycarpo/syspilot/pull/42))
+- **ui:** Polish controls, add sliders for numeric inputs, and improve visibility ([#41](https://github.com/juliopolycarpo/syspilot/pull/41))
+- Follow an update in a companion window and reopen the app ([#70](https://github.com/juliopolycarpo/syspilot/pull/70))
+- **companion:** Draw the update window with Mica in the app's theme ([#73](https://github.com/juliopolycarpo/syspilot/pull/73))
+
+### Fixes
+
+- **scripts:** Find the SysPilot window when running elevated ([#40](https://github.com/juliopolycarpo/syspilot/pull/40))
+- **scripts:** Stop the package test from searching all of Program Files ([#44](https://github.com/juliopolycarpo/syspilot/pull/44))
+- **scripts:** Clean up after a failed package test and wait for the app ([#47](https://github.com/juliopolycarpo/syspilot/pull/47))
+- **svc:** Write the last answers before a stopping service exits ([#64](https://github.com/juliopolycarpo/syspilot/pull/64))
+- **svc:** Write each subscriber's Stopping event before the service exits ([#66](https://github.com/juliopolycarpo/syspilot/pull/66))
+- **installer:** Make the removal wait for the app and the service to exit ([#69](https://github.com/juliopolycarpo/syspilot/pull/69))
+
+### Documentation
+
+- **svc:** Name the test fakes without linking to them ([#49](https://github.com/juliopolycarpo/syspilot/pull/49))
+- **tune:** Link TuneReport by its path ([#50](https://github.com/juliopolycarpo/syspilot/pull/50))
+- **hw:** Fix the doc links rustdoc warns about ([#48](https://github.com/juliopolycarpo/syspilot/pull/48))
+- Point the test commands at nextest and list the docs check ([#67](https://github.com/juliopolycarpo/syspilot/pull/67))
+
+### Refactoring
+
+- **pawnio:** Expect missing docs on the status codes, with a reason ([#51](https://github.com/juliopolycarpo/syspilot/pull/51))
+- **sensors:** Expect the unread sample fields without fan control ([#52](https://github.com/juliopolycarpo/syspilot/pull/52))
+- **svc:** One unsafe operation per block ([#55](https://github.com/juliopolycarpo/syspilot/pull/55))
+- **sensors:** Do not unwrap in a test fake's write ([#56](https://github.com/juliopolycarpo/syspilot/pull/56))
+- **engine:** One unsafe operation per block ([#57](https://github.com/juliopolycarpo/syspilot/pull/57))
+- **proto:** One unsafe operation per block ([#58](https://github.com/juliopolycarpo/syspilot/pull/58))
+- **ui:** One unsafe operation per block ([#59](https://github.com/juliopolycarpo/syspilot/pull/59))
+- **hw:** One unsafe operation per block, and no unwrap in a Result ([#60](https://github.com/juliopolycarpo/syspilot/pull/60))
+
+### Tests
+
+- **svc:** End the stuck tuner's ping when its test is done ([#46](https://github.com/juliopolycarpo/syspilot/pull/46))
+
+### Build and CI
+
+- Generate the changelog with git-cliff ([#39](https://github.com/juliopolycarpo/syspilot/pull/39))
+- Run the tests with nextest ([#45](https://github.com/juliopolycarpo/syspilot/pull/45))
+- Tighten the workspace lints and check the docs ([#53](https://github.com/juliopolycarpo/syspilot/pull/53))
+- Keep the package test's installer logs when it fails ([#62](https://github.com/juliopolycarpo/syspilot/pull/62))
+
 ## [0.3.0](https://github.com/juliopolycarpo/syspilot/compare/v0.2.2...v0.3.0) - 2026-11-26
 
 ### Features

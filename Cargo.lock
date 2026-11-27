@@ -219,7 +219,7 @@ dependencies = [
 
 [[package]]
 name = "syspilot-companion"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "embed-resource",
  "syspilot-proto",
@@ -231,7 +231,7 @@ dependencies = [
 
 [[package]]
 name = "syspilot-engine"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "syspilot-proto",
@@ -241,7 +241,7 @@ dependencies = [
 
 [[package]]
 name = "syspilot-hw"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "syspilot-pawnio",
@@ -252,14 +252,14 @@ dependencies = [
 
 [[package]]
 name = "syspilot-pawnio"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "windows-sys",
 ]
 
 [[package]]
 name = "syspilot-proto"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "postcard",
  "serde",
@@ -269,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "syspilot-sensors"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "syspilot-hw",
  "syspilot-pawnio",
@@ -278,7 +278,7 @@ dependencies = [
 
 [[package]]
 name = "syspilot-svc"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "postcard",
  "serde",
@@ -292,7 +292,7 @@ dependencies = [
 
 [[package]]
 name = "syspilot-tune"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "syspilot-hw",
  "syspilot-proto",
@@ -300,7 +300,7 @@ dependencies = [
 
 [[package]]
 name = "syspilot-ui"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "embed-resource",
  "serde",
@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "syspilot-update"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ed25519-compact",
  "syspilot-proto",
@@ -657,4 +657,4 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.3.0"
+version = "0.4.0"
