@@ -1104,7 +1104,7 @@ mod tests {
         }
 
         fn check(&self, operation: FanOperation) -> Result<(), BusError> {
-            if self.registers.lock().unwrap().failing.contains(&operation) {
+            if locked(&self.registers).failing.contains(&operation) {
                 return Err(BusError::rejected(
                     format!("fake channel {}", self.id),
                     "the operation to work",
@@ -1141,7 +1141,7 @@ mod tests {
             self.log.push(format!("{}: take_manual({duty_percent:.0})", self.id));
             self.check(FanOperation::TakeManual)?;
             // The duty first, then the mode: as the real write path does.
-            let mut registers = self.registers.lock().unwrap();
+            let mut registers = locked(&self.registers);
             registers.duty = (duty_percent * 2.55).round() as u8;
             registers.mode &= 0x0F;
             let duty = f64::from(registers.duty) / 2.55;
@@ -1166,7 +1166,7 @@ mod tests {
         fn restore(&mut self, original: &ControlSnapshot) -> Result<(), BusError> {
             self.log.push(format!("{}: restore", self.id));
             self.check(FanOperation::Restore)?;
-            let mut registers = self.registers.lock().unwrap();
+            let mut registers = locked(&self.registers);
             for &(address, value) in &original.registers {
                 match address {
                     MODE_REGISTER => registers.mode = value,
@@ -1219,7 +1219,7 @@ mod tests {
         }
 
         fn check(&self, operation: StoreOperation) -> Result<(), StoreError> {
-            if self.state.lock().unwrap().failing.contains(&operation) {
+            if locked(&self.state).failing.contains(&operation) {
                 return Err(StoreError(format!("an injected {operation:?} failure")));
             }
             Ok(())
@@ -1235,20 +1235,20 @@ mod tests {
         fn save(&mut self, channel: &str, original: &ControlSnapshot) -> Result<(), StoreError> {
             self.log.push(format!("store.save {channel}"));
             self.check(StoreOperation::Save)?;
-            self.state.lock().unwrap().records.insert(channel.to_owned(), original.clone());
+            locked(&self.state).records.insert(channel.to_owned(), original.clone());
             Ok(())
         }
 
         fn clear(&mut self, channel: &str) -> Result<(), StoreError> {
             self.log.push(format!("store.clear {channel}"));
             self.check(StoreOperation::Clear)?;
-            self.state.lock().unwrap().records.remove(channel);
+            locked(&self.state).records.remove(channel);
             Ok(())
         }
 
         fn channels(&mut self) -> Result<Vec<String>, StoreError> {
             self.check(StoreOperation::Load)?;
-            Ok(self.state.lock().unwrap().records.keys().cloned().collect())
+            Ok(locked(&self.state).records.keys().cloned().collect())
         }
     }
 

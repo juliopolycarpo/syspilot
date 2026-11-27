@@ -393,7 +393,7 @@ impl Drop for FanSession {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{Mutex, MutexGuard, PoisonError};
 
     use super::*;
     use crate::bus::replay::{ReplaySuperIo, SuperIoWrite, superio_hwm_key};
@@ -436,24 +436,32 @@ may-stop = false
     #[derive(Clone, Default)]
     struct MemoryOriginalStore(Arc<Mutex<Vec<(String, ControlSnapshot)>>>);
 
+    impl MemoryOriginalStore {
+        /// The records, also after a test thread panicked while holding them,
+        /// so that a store method never panics inside its `Result`.
+        fn records(&self) -> MutexGuard<'_, Vec<(String, ControlSnapshot)>> {
+            self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        }
+    }
+
     impl OriginalStore for MemoryOriginalStore {
         fn load(&mut self, channel: &str) -> Result<Option<ControlSnapshot>, StoreError> {
-            let records = self.0.lock().unwrap();
+            let records = self.records();
             Ok(records.iter().find(|(id, _)| id == channel).map(|(_, record)| record.clone()))
         }
 
         fn save(&mut self, channel: &str, original: &ControlSnapshot) -> Result<(), StoreError> {
-            self.0.lock().unwrap().push((channel.to_owned(), original.clone()));
+            self.records().push((channel.to_owned(), original.clone()));
             Ok(())
         }
 
         fn clear(&mut self, channel: &str) -> Result<(), StoreError> {
-            self.0.lock().unwrap().retain(|(id, _)| id != channel);
+            self.records().retain(|(id, _)| id != channel);
             Ok(())
         }
 
         fn channels(&mut self) -> Result<Vec<String>, StoreError> {
-            Ok(self.0.lock().unwrap().iter().map(|(id, _)| id.clone()).collect())
+            Ok(self.records().iter().map(|(id, _)| id.clone()).collect())
         }
     }
 
@@ -532,7 +540,13 @@ may-stop = false
             &mut self,
             curves: &[FanCurve],
         ) -> Result<Option<FanSession>, SessionError> {
-            let grant = self.catalog.offer("ACME", "TEST BOARD", Chip::Nct6779D).unwrap();
+            let grant =
+                self.catalog.offer("ACME", "TEST BOARD", Chip::Nct6779D).map_err(|reason| {
+                    SessionError::new(
+                        "the test board to be offered fan control",
+                        format!("{reason:?}"),
+                    )
+                })?;
             let io = self.io.take().expect("a rig starts one session");
             FanSession::start(
                 &grant,

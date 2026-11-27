@@ -467,7 +467,7 @@ impl Provider for AmdCpuProvider {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{Mutex, PoisonError};
     use std::time::Duration;
 
     use super::*;
@@ -875,8 +875,8 @@ mod tests {
 
     impl Smn for ScriptedSmn {
         fn read(&mut self, address: u32) -> Result<u32, BusError> {
-            self.reads.lock().unwrap().push(address);
-            if *self.failing.lock().unwrap() {
+            self.reads.lock().unwrap_or_else(PoisonError::into_inner).push(address);
+            if *self.failing.lock().unwrap_or_else(PoisonError::into_inner) {
                 return Err(BusError::Driver(syspilot_pawnio::Error::Timeout {
                     function: "ioctl_read_smn".into(),
                 }));

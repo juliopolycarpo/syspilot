@@ -576,7 +576,7 @@ impl Platform for SystemPlatform {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{Mutex, PoisonError};
 
     use super::*;
     use crate::bus::replay::{
@@ -655,7 +655,7 @@ mod tests {
         }
 
         fn gate(&self, module: Module) -> Result<(), ModuleError> {
-            self.calls.lock().unwrap().push(module.file_name());
+            self.calls.lock().unwrap_or_else(PoisonError::into_inner).push(module.file_name());
             match self.refused.iter().find(|(refused, _)| *refused == module) {
                 Some((_, error)) => Err(error.clone()),
                 None => Ok(()),
