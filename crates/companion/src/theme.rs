@@ -206,7 +206,9 @@ impl Palette {
                 accent_pressed: system.highlight,
                 on_accent: system.highlight_text,
                 strong_stroke: system.window_text,
-                spinner_track: system.window_text,
+                // In the window's own colour, so only the turning arc shows:
+                // a text-coloured ring hid a highlight-coloured arc.
+                spinner_track: system.window,
                 critical: system.window_text,
                 on_critical: system.window,
                 button: system.button_face,
@@ -295,6 +297,17 @@ mod tests {
         let dark = Palette::new(Look::Fluent(Scheme::Dark, Accent::DEFAULT));
         let light = Palette::new(Look::Fluent(Scheme::Light, Accent::DEFAULT));
         assert!(dark.text.r > 0.9 && light.text.r < 0.1, "(text): dark {dark:?} light {light:?}");
+    }
+
+    #[test]
+    fn under_a_contrast_theme_the_spinner_shows_its_arc_alone() {
+        let palette = Palette::new(Look::Contrast(SYSTEM));
+        assert_eq!(
+            palette.spinner_track, palette.background,
+            "(contrast): expected the spinner's ring in the window colour | received: {:?}",
+            palette.spinner_track
+        );
+        assert_ne!(palette.accent, palette.background, "(contrast): expected the arc to show");
     }
 
     #[test]
