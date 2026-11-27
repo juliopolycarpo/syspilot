@@ -98,6 +98,33 @@ struct Progress {
     done_since: Option<Instant>,
     /// The final phase, set just before the dialog is closed by the watch.
     outcome: Option<Phase>,
+    /// When the dialog stops waiting for a watch that has stopped
+    /// publishing, and what it then shows.
+    give_up: GiveUp,
+}
+
+/// When the dialog ends an update the watch never finished: a look can block
+/// on a service that accepted the connection and never answers, and then the
+/// watch's own timeout is never reached.
+pub struct GiveUp {
+    /// How long after the dialog opened.
+    after: Duration,
+    /// What the update then ends as.
+    phase: Phase,
+    /// When the dialog opened.
+    opened: Instant,
+}
+
+impl GiveUp {
+    /// Gives up `after` the dialog opens, as `phase`.
+    pub fn new(after: Duration, phase: Phase) -> Self {
+        Self { after, phase, opened: Instant::now() }
+    }
+
+    /// Whether it is time, `elapsed` after the dialog opened.
+    fn due(&self, elapsed: Duration) -> bool {
+        elapsed >= self.after
+    }
 }
 
 fn send(window: HWND, message: i32, wparam: WPARAM, lparam: LPARAM) {
@@ -128,6 +155,9 @@ impl Progress {
     fn tick(&mut self, window: HWND) {
         let phase = self.shared.lock().unwrap_or_else(PoisonError::into_inner).clone();
         match phase {
+            Phase::Working(_) if self.give_up.due(self.give_up.opened.elapsed()) => {
+                self.close(window, self.give_up.phase.clone());
+            }
             Phase::Working(step) => {
                 let since = match self.step {
                     Some((shown, since)) if shown == step => since,
@@ -181,7 +211,11 @@ unsafe extern "system" fn progress_callback(
 
 /// Shows the update as it runs, following the phases published in
 /// `shared`, until the watch ends it or the user closes the window.
-pub fn show_progress(shared: Arc<Mutex<Phase>>, target: Option<&str>) -> ProgressEnd {
+pub fn show_progress(
+    shared: Arc<Mutex<Phase>>,
+    target: Option<&str>,
+    give_up: GiveUp,
+) -> ProgressEnd {
     let title = wide(TITLE);
     let instruction = wide(&headline(target));
     let footer = wide(
@@ -196,6 +230,7 @@ pub fn show_progress(shared: Arc<Mutex<Phase>>, target: Option<&str>) -> Progres
         instruction: instruction.clone(),
         done_since: None,
         outcome: None,
+        give_up,
     };
     // SAFETY: a null name asks for this executable's module, always loaded.
     let module = unsafe { GetModuleHandleW(std::ptr::null()) };
@@ -306,6 +341,17 @@ mod tests {
         for step in Step::ALL {
             assert_eq!(checklist(Some(step)).lines().count(), Step::ALL.len(), "{step:?}");
         }
+    }
+
+    #[test]
+    fn the_window_gives_up_only_once_its_wait_is_over() {
+        let after = Duration::from_secs(60);
+        let give_up = GiveUp::new(after, Phase::Failed("stuck".into()));
+        assert!(
+            !give_up.due(after - Duration::from_secs(1)),
+            "(59 s of 60): expected still waiting | received: given up"
+        );
+        assert!(give_up.due(after), "(60 s of 60): expected given up | received: still waiting");
     }
 
     #[test]

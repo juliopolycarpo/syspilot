@@ -26,12 +26,15 @@ use std::time::{Duration, Instant};
 use syspilot_proto::Instance;
 use syspilot_proto::update::INSTALL_LOG;
 
-use crate::dialog::{Choice, ProgressEnd};
+use crate::dialog::{Choice, GiveUp, ProgressEnd};
 use crate::probe::{MachineProbe, Probe};
-use crate::watch::{Phase, Step, Watch};
+use crate::watch::{Phase, Step, UPDATE_TIMEOUT, Watch};
 
 /// Time between two looks.
 const LOOK_INTERVAL: Duration = Duration::from_millis(500);
+/// How much longer than the watch's own timeout the window waits for a
+/// watch that stopped publishing, stuck in a look that never returns.
+const STUCK_WATCH_GRACE: Duration = Duration::from_secs(60);
 
 /// What the command line says.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,10 +141,12 @@ fn run(options: &Options) {
     let shared = Arc::new(Mutex::new(Phase::Working(Step::Preparing)));
     let published = shared.clone();
     let (instance, from) = (options.instance.clone(), options.from.clone());
+    let log = install_log(&instance);
+    let give_up = GiveUp::new(UPDATE_TIMEOUT + STUCK_WATCH_GRACE, watch::timed_out(&log));
     let watcher = std::thread::spawn(move || {
         let started = Instant::now();
-        let mut probe = MachineProbe::new(instance.clone(), &from);
-        let mut watch = Watch::new(&from, &install_log(&instance));
+        let mut probe = MachineProbe::new(instance, &from);
+        let mut watch = Watch::new(&from, &log);
         follow(
             &mut probe,
             &mut watch,
@@ -151,7 +156,7 @@ fn run(options: &Options) {
         )
     });
 
-    let last = match dialog::show_progress(shared, options.to.as_deref()) {
+    let last = match dialog::show_progress(shared, options.to.as_deref(), give_up) {
         ProgressEnd::Ended(phase) => phase,
         // Closed by the user: the update goes on, and nobody waits for it.
         ProgressEnd::Closed => return,

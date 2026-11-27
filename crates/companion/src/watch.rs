@@ -112,6 +112,15 @@ pub struct Watch {
     step: Step,
 }
 
+/// An update that ran past [`UPDATE_TIMEOUT`], with Windows Installer's
+/// `log` named.
+pub fn timed_out(log: &str) -> Phase {
+    Phase::Failed(format!(
+        "The update did not finish within {} minutes. Windows Installer's log is {log}.",
+        UPDATE_TIMEOUT.as_secs() / 60
+    ))
+}
+
 /// How long ago `since` was, starting the count now if it had not begun.
 fn waited(since: &mut Option<Duration>, elapsed: Duration) -> Duration {
     elapsed.saturating_sub(*since.get_or_insert(elapsed))
@@ -134,11 +143,7 @@ impl Watch {
     /// the update stands.
     pub fn see(&mut self, observation: &Observation, elapsed: Duration) -> Phase {
         if elapsed >= UPDATE_TIMEOUT {
-            return Phase::Failed(format!(
-                "The update did not finish within {} minutes. Windows Installer's log is {}.",
-                UPDATE_TIMEOUT.as_secs() / 60,
-                self.log
-            ));
+            return timed_out(&self.log);
         }
         let busy = observation.installer_busy;
         let phase = match &observation.service {
