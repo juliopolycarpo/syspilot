@@ -160,11 +160,15 @@ impl Query {
         let count = count.min(bytes / item_size).min(self.buffer.len() * 8 / item_size);
         for index in 0..count {
             // SAFETY: `index * item_size` lies inside the buffer (checked by
-            // the `count` bound above) and the buffer start is 8-byte
-            // aligned, as the item type requires; PDH initialised these
-            // items.
-            let item =
-                unsafe { &*self.buffer.as_ptr().cast::<PDH_FMT_COUNTERVALUE_ITEM_W>().add(index) };
+            // the `count` bound above), so the offset stays within the one
+            // allocation.
+            let item_ptr =
+                unsafe { self.buffer.as_ptr().cast::<PDH_FMT_COUNTERVALUE_ITEM_W>().add(index) };
+            // SAFETY: the buffer start is 8-byte aligned, as the item type
+            // requires, and `item_ptr` addresses a whole item inside it; PDH
+            // initialised these items and nothing writes to the buffer while
+            // the reference lives.
+            let item = unsafe { &*item_ptr };
             if !is_valid_status(item.FmtValue.CStatus) {
                 continue;
             }

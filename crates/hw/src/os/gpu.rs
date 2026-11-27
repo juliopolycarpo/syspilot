@@ -565,7 +565,7 @@ pub fn probe() -> Vec<Box<dyn Provider>> {
     if adapters.is_empty() {
         return Vec::new();
     }
-    let usage = usage.map(|u| Box::new(u) as Box<dyn UsageSource>);
+    let usage = usage.map(|u| -> Box<dyn UsageSource> { Box::new(u) });
     vec![Box::new(GpuProvider { adapters, usage })]
 }
 

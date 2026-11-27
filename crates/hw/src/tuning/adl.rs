@@ -88,9 +88,11 @@ type PowerCall = unsafe extern "C" fn(Context, i32, *mut OdnPower) -> i32;
 /// one.
 unsafe extern "system" fn allocate(size: i32) -> *mut c_void {
     let Ok(size) = usize::try_from(size) else { return ptr::null_mut() };
+    // SAFETY: `GetProcessHeap` has no preconditions.
+    let heap = unsafe { GetProcessHeap() };
     // SAFETY: the process heap is valid for the life of the process, and
     // `HeapAlloc` returns null when it cannot give `size` bytes.
-    unsafe { HeapAlloc(GetProcessHeap(), 0, size) }
+    unsafe { HeapAlloc(heap, 0, size) }
 }
 
 /// The text of a fixed-size C string field, cleaned like every other device
@@ -158,12 +160,15 @@ struct Functions {
 
 /// The loaded library with an open context.
 pub struct AdlLibrary {
-    module: HMODULE,
+    /// Unloads the library after [`Drop`] has destroyed the context: a
+    /// struct's fields drop once its own `drop` has run.
+    _module: ModuleGuard,
     context: Context,
     functions: Functions,
 }
 
-/// Unloads the library when binding it fails half way.
+/// Unloads the library when dropped: when binding it fails half way, and once
+/// an [`AdlLibrary`] owns it, after the context is destroyed.
 struct ModuleGuard(HMODULE);
 
 impl Drop for ModuleGuard {
@@ -207,28 +212,72 @@ impl AdlLibrary {
         if module.is_null() {
             return Err(AdlError::NotInstalled);
         }
+        // Owns the module until the library value takes it over below, so
+        // that a binding that fails on the way unloads it.
         let guard = ModuleGuard(module);
-        // SAFETY: `module` is the ADL library, and each type is the signature
-        // `adl_sdk.h` and the Overdrive N sample declare for the named
-        // function. That holds for every `export` in the block.
-        let (create, functions) = unsafe {
-            let create: MainCreate = export(module, c"ADL2_Main_Control_Create")?;
-            let functions = Functions {
-                destroy: export(module, c"ADL2_Main_Control_Destroy")?,
-                adapter_count: export(module, c"ADL2_Adapter_NumberOfAdapters_Get")?,
-                adapter_info: export(module, c"ADL2_Adapter_AdapterInfo_Get")?,
-                overdrive_caps: export(module, c"ADL2_Overdrive_Caps")?,
-                capabilities: export(module, c"ADL2_OverdriveN_CapabilitiesX2_Get")?,
-                system_clocks_get: export(module, c"ADL2_OverdriveN_SystemClocksX2_Get")?,
-                system_clocks_set: export(module, c"ADL2_OverdriveN_SystemClocksX2_Set")?,
-                memory_clocks_get: export(module, c"ADL2_OverdriveN_MemoryClocksX2_Get")?,
-                memory_clocks_set: export(module, c"ADL2_OverdriveN_MemoryClocksX2_Set")?,
-                fan_get: export(module, c"ADL2_OverdriveN_FanControl_Get")?,
-                fan_set: export(module, c"ADL2_OverdriveN_FanControl_Set")?,
-                power_get: export(module, c"ADL2_OverdriveN_PowerLimit_Get")?,
-                power_set: export(module, c"ADL2_OverdriveN_PowerLimit_Set")?,
-            };
-            (create, functions)
+        // In each binding below the annotated type is the function pointer
+        // type `adl_sdk.h` or the Overdrive N sample declares for that export.
+        // SAFETY: `module` is the ADL library, loaded above, and `MainCreate`
+        // is the signature of `ADL2_Main_Control_Create`.
+        let create: MainCreate = unsafe { export(module, c"ADL2_Main_Control_Create") }?;
+        // SAFETY: `module` is still that library; `MainDestroy` is the
+        // signature of `ADL2_Main_Control_Destroy`.
+        let destroy: MainDestroy = unsafe { export(module, c"ADL2_Main_Control_Destroy") }?;
+        // SAFETY: `AdapterCount` is the signature of
+        // `ADL2_Adapter_NumberOfAdapters_Get`.
+        let adapter_count: AdapterCount =
+            unsafe { export(module, c"ADL2_Adapter_NumberOfAdapters_Get") }?;
+        // SAFETY: `AdapterInfoGet` is the signature of
+        // `ADL2_Adapter_AdapterInfo_Get`.
+        let adapter_info: AdapterInfoGet =
+            unsafe { export(module, c"ADL2_Adapter_AdapterInfo_Get") }?;
+        // SAFETY: `OverdriveCaps` is the signature of `ADL2_Overdrive_Caps`.
+        let overdrive_caps: OverdriveCaps = unsafe { export(module, c"ADL2_Overdrive_Caps") }?;
+        // SAFETY: `CapabilitiesGet` is the signature of
+        // `ADL2_OverdriveN_CapabilitiesX2_Get`.
+        let capabilities: CapabilitiesGet =
+            unsafe { export(module, c"ADL2_OverdriveN_CapabilitiesX2_Get") }?;
+        // SAFETY: `LevelsCall` is the signature of
+        // `ADL2_OverdriveN_SystemClocksX2_Get`.
+        let system_clocks_get: LevelsCall =
+            unsafe { export(module, c"ADL2_OverdriveN_SystemClocksX2_Get") }?;
+        // SAFETY: `LevelsCall` is also the signature of
+        // `ADL2_OverdriveN_SystemClocksX2_Set`.
+        let system_clocks_set: LevelsCall =
+            unsafe { export(module, c"ADL2_OverdriveN_SystemClocksX2_Set") }?;
+        // SAFETY: `LevelsCall` is the signature of
+        // `ADL2_OverdriveN_MemoryClocksX2_Get`.
+        let memory_clocks_get: LevelsCall =
+            unsafe { export(module, c"ADL2_OverdriveN_MemoryClocksX2_Get") }?;
+        // SAFETY: `LevelsCall` is also the signature of
+        // `ADL2_OverdriveN_MemoryClocksX2_Set`.
+        let memory_clocks_set: LevelsCall =
+            unsafe { export(module, c"ADL2_OverdriveN_MemoryClocksX2_Set") }?;
+        // SAFETY: `FanCall` is the signature of `ADL2_OverdriveN_FanControl_Get`.
+        let fan_get: FanCall = unsafe { export(module, c"ADL2_OverdriveN_FanControl_Get") }?;
+        // SAFETY: `FanCall` is also the signature of
+        // `ADL2_OverdriveN_FanControl_Set`.
+        let fan_set: FanCall = unsafe { export(module, c"ADL2_OverdriveN_FanControl_Set") }?;
+        // SAFETY: `PowerCall` is the signature of
+        // `ADL2_OverdriveN_PowerLimit_Get`.
+        let power_get: PowerCall = unsafe { export(module, c"ADL2_OverdriveN_PowerLimit_Get") }?;
+        // SAFETY: `PowerCall` is also the signature of
+        // `ADL2_OverdriveN_PowerLimit_Set`.
+        let power_set: PowerCall = unsafe { export(module, c"ADL2_OverdriveN_PowerLimit_Set") }?;
+        let functions = Functions {
+            destroy,
+            adapter_count,
+            adapter_info,
+            overdrive_caps,
+            capabilities,
+            system_clocks_get,
+            system_clocks_set,
+            memory_clocks_get,
+            memory_clocks_set,
+            fan_get,
+            fan_set,
+            power_get,
+            power_set,
         };
         let mut context: Context = ptr::null_mut();
         // SAFETY: `allocate` matches the callback type, 1 asks for present
@@ -236,8 +285,7 @@ impl AdlLibrary {
         let code = unsafe { create(allocate, 1, &mut context) };
         checked("ADL2_Main_Control_Create", code)?;
         // The library value owns the module from here and frees it on drop.
-        std::mem::forget(guard);
-        Ok(Self { module, context, functions })
+        Ok(Self { _module: guard, context, functions })
     }
 
     fn levels(
@@ -274,11 +322,9 @@ impl AdlLibrary {
 impl Drop for AdlLibrary {
     fn drop(&mut self) {
         // SAFETY: the context was created by this library and is destroyed
-        // once, before the module that owns it is unloaded, also once.
-        unsafe {
-            (self.functions.destroy)(self.context);
-            FreeLibrary(self.module);
-        }
+        // once. The module is still loaded: `_module` is dropped, and so
+        // unloads it, only after this body.
+        unsafe { (self.functions.destroy)(self.context) };
     }
 }
 
@@ -438,13 +484,13 @@ mod tests {
 
     #[test]
     fn a_string_field_ends_at_its_terminator() {
-        let mut field = [0 as c_char; 16];
+        let mut field: [c_char; 16] = [0; 16];
         for (slot, byte) in field.iter_mut().zip(b" RX 550 \0junk") {
             *slot = *byte as c_char;
         }
         assert_eq!(text(&field), "RX 550");
-        assert_eq!(text(&[0 as c_char; 4]), "");
-        let mut padded = [0 as c_char; 16];
+        assert_eq!(text(&[0; 4]), "");
+        let mut padded: [c_char; 16] = [0; 16];
         for (slot, byte) in padded.iter_mut().zip(b"Radeon  RX\t550") {
             *slot = *byte as c_char;
         }
@@ -463,11 +509,16 @@ mod tests {
     #[test]
     fn the_allocator_gives_memory_and_refuses_a_negative_size() {
         // SAFETY: `allocate` has no requirement beyond being called.
-        let (memory, refused) = unsafe { (allocate(16), allocate(-1)) };
+        let memory = unsafe { allocate(16) };
+        // SAFETY: as above; a negative size is refused before the heap is
+        // touched.
+        let refused = unsafe { allocate(-1) };
         assert!(!memory.is_null());
         assert!(refused.is_null());
+        // SAFETY: `GetProcessHeap` has no preconditions.
+        let heap = unsafe { GetProcessHeap() };
         // SAFETY: `memory` is 16 bytes from the process heap, freed once.
-        unsafe { windows_sys::Win32::System::Memory::HeapFree(GetProcessHeap(), 0, memory) };
+        unsafe { windows_sys::Win32::System::Memory::HeapFree(heap, 0, memory) };
     }
 
     /// Reads only. On a machine without the AMD driver the library is not

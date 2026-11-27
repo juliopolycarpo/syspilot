@@ -262,6 +262,7 @@ impl BusLocks for FakeBusLocks {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::mem::ManuallyDrop;
     use std::sync::atomic::AtomicU32;
     use std::sync::mpsc;
 
@@ -312,8 +313,9 @@ mod tests {
                 .spawn(|| {
                     let guard = locks.acquire(BusKind::Smbus).unwrap();
                     // The thread ends while owning the mutex: the kernel
-                    // marks it abandoned.
-                    std::mem::forget(guard);
+                    // marks it abandoned. `ManuallyDrop` keeps the guard from
+                    // releasing it first.
+                    let _abandoning = ManuallyDrop::new(guard);
                 })
                 .join()
                 .unwrap();

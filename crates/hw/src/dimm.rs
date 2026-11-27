@@ -886,6 +886,8 @@ impl Provider for DimmProvider {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::PoisonError;
+
     use super::*;
     use crate::bus::replay::{ReplaySmbus, smbus_byte_key, smbus_word_key};
     use crate::bus::{FakeBusLocks, Fixture};
@@ -1282,16 +1284,16 @@ mod tests {
 
     impl Smbus for FailingSmbus {
         fn read_byte_data(&mut self, _: u8, _: u8) -> Result<u8, BusError> {
-            *self.transfers.lock().unwrap() += 1;
+            *self.transfers.lock().unwrap_or_else(PoisonError::into_inner) += 1;
             Err(self.error.clone())
         }
         fn read_word_data(&mut self, _: u8, _: u8) -> Result<u16, BusError> {
-            *self.transfers.lock().unwrap() += 1;
+            *self.transfers.lock().unwrap_or_else(PoisonError::into_inner) += 1;
             Err(self.error.clone())
         }
         #[cfg(feature = "spd-paging")]
         fn select_spd_page(&mut self, _: u8) -> Result<(), BusError> {
-            *self.transfers.lock().unwrap() += 1;
+            *self.transfers.lock().unwrap_or_else(PoisonError::into_inner) += 1;
             Err(self.error.clone())
         }
     }

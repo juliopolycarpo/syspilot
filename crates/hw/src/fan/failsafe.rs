@@ -997,6 +997,7 @@ fn install_panic_hook() {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::mem::ManuallyDrop;
 
     use super::*;
     use crate::chips::nct67xx::Chip;
@@ -1104,7 +1105,7 @@ mod tests {
         }
 
         fn check(&self, operation: FanOperation) -> Result<(), BusError> {
-            if self.registers.lock().unwrap().failing.contains(&operation) {
+            if locked(&self.registers).failing.contains(&operation) {
                 return Err(BusError::rejected(
                     format!("fake channel {}", self.id),
                     "the operation to work",
@@ -1141,7 +1142,7 @@ mod tests {
             self.log.push(format!("{}: take_manual({duty_percent:.0})", self.id));
             self.check(FanOperation::TakeManual)?;
             // The duty first, then the mode: as the real write path does.
-            let mut registers = self.registers.lock().unwrap();
+            let mut registers = locked(&self.registers);
             registers.duty = (duty_percent * 2.55).round() as u8;
             registers.mode &= 0x0F;
             let duty = f64::from(registers.duty) / 2.55;
@@ -1166,7 +1167,7 @@ mod tests {
         fn restore(&mut self, original: &ControlSnapshot) -> Result<(), BusError> {
             self.log.push(format!("{}: restore", self.id));
             self.check(FanOperation::Restore)?;
-            let mut registers = self.registers.lock().unwrap();
+            let mut registers = locked(&self.registers);
             for &(address, value) in &original.registers {
                 match address {
                     MODE_REGISTER => registers.mode = value,
@@ -1219,7 +1220,7 @@ mod tests {
         }
 
         fn check(&self, operation: StoreOperation) -> Result<(), StoreError> {
-            if self.state.lock().unwrap().failing.contains(&operation) {
+            if locked(&self.state).failing.contains(&operation) {
                 return Err(StoreError(format!("an injected {operation:?} failure")));
             }
             Ok(())
@@ -1235,20 +1236,20 @@ mod tests {
         fn save(&mut self, channel: &str, original: &ControlSnapshot) -> Result<(), StoreError> {
             self.log.push(format!("store.save {channel}"));
             self.check(StoreOperation::Save)?;
-            self.state.lock().unwrap().records.insert(channel.to_owned(), original.clone());
+            locked(&self.state).records.insert(channel.to_owned(), original.clone());
             Ok(())
         }
 
         fn clear(&mut self, channel: &str) -> Result<(), StoreError> {
             self.log.push(format!("store.clear {channel}"));
             self.check(StoreOperation::Clear)?;
-            self.state.lock().unwrap().records.remove(channel);
+            locked(&self.state).records.remove(channel);
             Ok(())
         }
 
         fn channels(&mut self) -> Result<Vec<String>, StoreError> {
             self.check(StoreOperation::Load)?;
-            Ok(self.state.lock().unwrap().records.keys().cloned().collect())
+            Ok(locked(&self.state).records.keys().cloned().collect())
         }
     }
 
@@ -1332,7 +1333,7 @@ may-stop = true
             .map(|(index, (channel, source))| {
                 let board_channel = grant.channel(index as u8 + 1).unwrap();
                 let plan = ChannelPlan::new(board_channel, curve(), source, tuning).unwrap();
-                (plan, Box::new(channel.clone()) as Box<dyn FanChannel>)
+                (plan, channel.duplicate())
             })
             .collect();
         FanController::new(policy, Box::new(store.clone()), planned).unwrap()
@@ -1750,7 +1751,8 @@ may-stop = true
     fn crashed_while_controlling() -> (FakeOriginalStore, Vec<FakeFanChannel>, EventLog) {
         let rig = controlled();
         let Rig { controller, store, channels, log } = rig;
-        std::mem::forget(controller);
+        // Its `Drop` would hand the fans back; a crash does not get to run it.
+        let _crashed = ManuallyDrop::new(controller);
         (store, channels, log)
     }
 
@@ -1848,7 +1850,7 @@ may-stop = true
         let mut restarted = FanController::new(
             FailSafePolicy::default(),
             Box::new(store),
-            vec![(plan, Box::new(channels[0].clone()) as Box<dyn FanChannel>)],
+            vec![(plan, channels[0].duplicate())],
         )
         .unwrap();
         let events = restarted.recover();
@@ -1896,7 +1898,7 @@ may-stop = true
         FanController::new(
             FailSafePolicy::default(),
             Box::new(store.clone()),
-            vec![(plan, Box::new(channel.clone()) as Box<dyn FanChannel>)],
+            vec![(plan, channel.duplicate())],
         )
         .unwrap()
     }
@@ -2077,7 +2079,7 @@ may-stop = true
                     NO_RAMP,
                 )
                 .unwrap();
-                (plan, Box::new(channel.clone()) as Box<dyn FanChannel>)
+                (plan, channel.duplicate())
             })
             .collect();
         let error = FanController::new(FailSafePolicy::default(), Box::new(store), plans)
@@ -2224,7 +2226,7 @@ may-stop = true
         let controller = FanController::new(
             FailSafePolicy::default(),
             Box::new(store.clone()),
-            vec![(plan, Box::new(channels[0].clone()) as Box<dyn FanChannel>)],
+            vec![(plan, channels[0].duplicate())],
         )
         .unwrap();
         // The state a panic inside take_manual leaves: original saved and held,
