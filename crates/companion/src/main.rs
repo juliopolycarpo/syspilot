@@ -8,15 +8,27 @@
 //! It is a small executable with no toolkit, and the app runs it from a
 //! copy outside the installation folder, so nothing it holds is a file the
 //! update replaces. It changes nothing: it only looks at the service's pipe
-//! and at Windows Installer (see [`watch`]), and starts the app.
+//! and at Windows Installer (see [`watch`]), and starts the app. Its window
+//! is drawn with what Windows has (see [`window`]), with the task dialog in
+//! reserve (see [`dialog`]).
 //!
-//! `syspilot-companion --instance <name> --from <version> --app <path> [--to <version>]`
+//! `syspilot-companion --instance <name> --from <version> --app <path>
+//! [--to <version>] [--theme system|light|dark]`
 #![windows_subsystem = "windows"]
 
+mod access;
 mod dialog;
+mod follow;
+mod layout;
+mod paint;
 mod probe;
 mod progress;
+mod screen;
+mod surface;
+mod system;
+mod theme;
 mod watch;
+mod window;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -24,11 +36,13 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use syspilot_proto::Instance;
-use syspilot_proto::update::INSTALL_LOG;
+use syspilot_proto::update::{CompanionTheme, INSTALL_LOG};
 
-use crate::dialog::{Choice, GiveUp, ProgressEnd};
+use crate::dialog::TaskDialogs;
+use crate::follow::{Follower, GiveUp};
 use crate::probe::{MachineProbe, Probe};
-use crate::watch::{Phase, Step, UPDATE_TIMEOUT, Watch};
+use crate::surface::{Choice, ProgressEnd, Surface};
+use crate::watch::{Phase, UPDATE_TIMEOUT, Watch};
 
 /// Time between two looks.
 const LOOK_INTERVAL: Duration = Duration::from_millis(500);
@@ -47,10 +61,13 @@ struct Options {
     to: Option<String>,
     /// The app to open again.
     app: PathBuf,
+    /// The app's theme, which the window takes.
+    theme: CompanionTheme,
 }
 
 fn parse(arguments: &[String]) -> Result<Options, String> {
     let (mut instance, mut from, mut to, mut app) = (None, None, None, None);
+    let mut theme = CompanionTheme::System;
     let mut rest = arguments.iter();
     while let Some(argument) = rest.next() {
         let value = rest
@@ -64,9 +81,14 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
             "--from" => from = Some(value),
             "--to" => to = Some(value),
             "--app" => app = Some(PathBuf::from(value)),
+            "--theme" => {
+                theme = CompanionTheme::parse(&value).ok_or_else(|| {
+                    format!("(--theme): expected system | light | dark | received: {value}")
+                })?;
+            }
             other => {
                 return Err(format!(
-                    "(argument): expected --instance, --from, --to or --app | received: {other}"
+                    "(argument): expected --instance, --from, --to, --app or --theme | received: {other}"
                 ));
             }
         }
@@ -77,6 +99,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         from: from.ok_or_else(|| missing("--from"))?,
         to,
         app: app.ok_or_else(|| missing("--app"))?,
+        theme,
     })
 }
 
@@ -137,8 +160,40 @@ fn open_app(options: &Options) -> Result<(), String> {
         .map_err(|error| format!("{} could not be started: {error}", options.app.display()))
 }
 
+/// The drawn window, or the task dialog when it cannot be made.
+fn open_surface(theme: CompanionTheme) -> Box<dyn Surface> {
+    match window::Window::open(theme) {
+        Ok(window) => Box::new(window),
+        Err(_) => Box::new(TaskDialogs),
+    }
+}
+
+/// Whether the app is to be opened once following ended as `end`, after
+/// telling of a failure on `surface`. `unseen` waits for the watch when no
+/// window could show it.
+fn conclude(end: ProgressEnd, unseen: impl FnOnce() -> Phase, surface: &mut dyn Surface) -> bool {
+    let (last, shown) = match end {
+        ProgressEnd::Ended(phase) => (phase, true),
+        // Closed by the user: the update goes on, and nobody waits for it.
+        ProgressEnd::Closed => return false,
+        // Without a window the update is still followed, unseen, so that
+        // the app comes back all the same.
+        ProgressEnd::NotShown => (unseen(), false),
+    };
+    match last {
+        Phase::Ready | Phase::AlreadyCurrent => true,
+        // No window either, then, to offer the app from: open it, and it
+        // shows the update's state.
+        Phase::Failed(_) if !shown => true,
+        Phase::Failed(reason) => {
+            surface.fail("The update did not finish", &reason, true) == Choice::OpenApp
+        }
+        Phase::Working(_) => false,
+    }
+}
+
 fn run(options: &Options) {
-    let shared = Arc::new(Mutex::new(Phase::Working(Step::Preparing)));
+    let shared = Arc::new(Mutex::new(Phase::Working(watch::Step::Preparing)));
     let published = shared.clone();
     let (instance, from) = (options.instance.clone(), options.from.clone());
     let log = install_log(&instance);
@@ -156,31 +211,20 @@ fn run(options: &Options) {
         )
     });
 
-    let (last, shown) = match dialog::show_progress(shared, options.to.as_deref(), give_up) {
-        ProgressEnd::Ended(phase) => (phase, true),
-        // Closed by the user: the update goes on, and nobody waits for it.
-        ProgressEnd::Closed => return,
-        // Without a window the update is still followed, unseen, so that
-        // the app comes back all the same.
-        ProgressEnd::NotShown => (
-            watcher
-                .join()
-                .unwrap_or_else(|_| Phase::Failed("The update could not be followed.".to_owned())),
-            false,
-        ),
+    let mut surface = open_surface(options.theme);
+    let end = surface.follow(&shared, Follower::new(options.to.as_deref(), give_up));
+    let unseen = || {
+        watcher
+            .join()
+            .unwrap_or_else(|_| Phase::Failed("The update could not be followed.".to_owned()))
     };
-    let open = match last {
-        Phase::Ready | Phase::AlreadyCurrent => true,
-        // No failure dialog either, then, to offer the app from: open it, and
-        // it shows the update's state.
-        Phase::Failed(_) if !shown => true,
-        Phase::Failed(reason) => {
-            dialog::show_failure("The update did not finish", &reason, true) == Choice::OpenApp
-        }
-        Phase::Working(_) => false,
-    };
-    if open && let Err(problem) = open_app(options) {
-        dialog::show_failure("SysPilot did not open", &problem, false);
+    if !conclude(end, unseen, surface.as_mut()) {
+        return;
+    }
+    // The app takes over; the window comes back only if it does not open.
+    surface.hide();
+    if let Err(problem) = open_app(options) {
+        surface.fail("SysPilot did not open", &problem, false);
     }
 }
 
@@ -189,7 +233,13 @@ fn main() {
     match parse(&arguments) {
         Ok(options) => run(&options),
         // Only the app starts this; a bad command line is a bug in it.
-        Err(problem) => _ = dialog::show_failure("The update cannot be followed", &problem, false),
+        Err(problem) => {
+            _ = open_surface(CompanionTheme::System).fail(
+                "The update cannot be followed",
+                &problem,
+                false,
+            );
+        }
     }
 }
 
@@ -197,7 +247,81 @@ fn main() {
 mod tests {
     use super::*;
     use crate::probe::ScriptedProbe;
-    use crate::watch::{Observation, Service};
+    use crate::watch::{Observation, Service, Step};
+
+    /// A window that remembers the failures it was asked to tell of and
+    /// answers each with `choice`.
+    struct RecordingSurface {
+        choice: Choice,
+        failures: Vec<(String, String, bool)>,
+    }
+
+    impl RecordingSurface {
+        fn answering(choice: Choice) -> Self {
+            Self { choice, failures: Vec::new() }
+        }
+    }
+
+    impl Surface for RecordingSurface {
+        fn follow(&mut self, _shared: &Arc<Mutex<Phase>>, _follower: Follower) -> ProgressEnd {
+            ProgressEnd::Closed
+        }
+
+        fn fail(&mut self, headline: &str, reason: &str, can_open: bool) -> Choice {
+            self.failures.push((headline.to_owned(), reason.to_owned(), can_open));
+            self.choice
+        }
+
+        fn hide(&mut self) {}
+    }
+
+    fn unreachable_watch() -> Phase {
+        panic!("(watch): expected not to be waited for")
+    }
+
+    #[test]
+    fn a_finished_update_opens_the_app_without_a_word() {
+        let mut surface = RecordingSurface::answering(Choice::Close);
+        for phase in [Phase::Ready, Phase::AlreadyCurrent] {
+            assert!(
+                conclude(ProgressEnd::Ended(phase.clone()), unreachable_watch, &mut surface),
+                "{phase:?}"
+            );
+        }
+        assert!(surface.failures.is_empty(), "(finished): received {:?}", surface.failures);
+    }
+
+    #[test]
+    fn a_closed_window_opens_nothing() {
+        let mut surface = RecordingSurface::answering(Choice::OpenApp);
+        assert!(!conclude(ProgressEnd::Closed, unreachable_watch, &mut surface));
+        assert!(surface.failures.is_empty());
+    }
+
+    #[test]
+    fn a_failure_is_told_and_the_app_opens_only_if_asked() {
+        let failed = || ProgressEnd::Ended(Phase::Failed("Because.".into()));
+        let mut opening = RecordingSurface::answering(Choice::OpenApp);
+        assert!(conclude(failed(), unreachable_watch, &mut opening));
+        assert_eq!(
+            opening.failures,
+            [("The update did not finish".to_owned(), "Because.".to_owned(), true)]
+        );
+        let mut closing = RecordingSurface::answering(Choice::Close);
+        assert!(!conclude(failed(), unreachable_watch, &mut closing), "(Close): expected no app");
+    }
+
+    #[test]
+    fn without_a_window_the_watch_is_waited_for_and_the_app_opens_even_on_failure() {
+        let mut surface = RecordingSurface::answering(Choice::Close);
+        let failed = || Phase::Failed("Because.".into());
+        assert!(conclude(ProgressEnd::NotShown, failed, &mut surface));
+        assert!(
+            surface.failures.is_empty(),
+            "(no window): expected no failure shown | received: {:?}",
+            surface.failures
+        );
+    }
     use syspilot_proto::message::UpdateState;
 
     fn arguments(text: &str) -> Vec<String> {
@@ -214,7 +338,21 @@ mod tests {
         assert_eq!((options.from.as_str(), options.to.as_deref()), ("0.3.0", Some("0.3.1")));
         assert_eq!(options.app, PathBuf::from(r"C:\SysPilot\syspilot.exe"));
         let without_target = parse(&arguments("--instance SysPilot --from 0.3.0 --app a.exe"));
-        assert_eq!(without_target.unwrap().to, None);
+        let without_target = without_target.unwrap();
+        assert_eq!(without_target.to, None);
+        assert_eq!(without_target.theme, CompanionTheme::System, "(no --theme)");
+        let dark = parse(&arguments("--instance SysPilot --from 0.3.0 --app a.exe --theme dark"));
+        assert_eq!(dark.unwrap().theme, CompanionTheme::Dark);
+    }
+
+    #[test]
+    fn an_unknown_theme_is_named() {
+        let refused =
+            parse(&arguments("--instance SysPilot --from 0.3.0 --app a.exe --theme Dark"));
+        assert_eq!(
+            refused.unwrap_err(),
+            "(--theme): expected system | light | dark | received: Dark"
+        );
     }
 
     #[test]
