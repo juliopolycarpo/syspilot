@@ -7,7 +7,7 @@ use crate::version::Version;
 /// NTSTATUS codes seen from the driver and the published modules.
 ///
 /// Values come from `ntstatus.inc` of PawnIO.Modules and `ntstatus.h`.
-#[allow(missing_docs)]
+#[expect(missing_docs, reason = "each constant is the NTSTATUS of the same name")]
 pub mod status {
     pub const SUCCESS: u32 = 0x0000_0000;
     pub const DEVICE_BUSY: u32 = 0x8000_0011;
