@@ -32,6 +32,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # The version .config/nextest.toml requires.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.152
+
       - name: Format
         run: cargo fmt --all --check
 
@@ -51,9 +56,16 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       # Hosted runners are elevated, which the service tests need. They
-      # install a service named SysPilot-Test and remove it again.
+      # install a service named SysPilot-Test and remove it again. nextest
+      # runs the tests of all crates side by side, in half the time cargo test
+      # takes here.
       - name: Test
-        run: cargo test --workspace --locked
+        run: cargo nextest run --workspace --locked --profile ci
+
+      # nextest has no doctests. A step of their own: in one pwsh step only the
+      # last command's exit code would decide it.
+      - name: Doctests
+        run: cargo test --doc --workspace --locked
 
       # The feature tier. Fan control is off in every release, so the steps
       # above never compile it. These do, for the crates that carry it, and
@@ -69,9 +81,10 @@ jobs:
           -- -D warnings
 
       - name: Test with fan control
-        run: |
-          cargo test -p syspilot-hw -p syspilot-sensors -p syspilot-svc --locked --lib --bins --features syspilot-svc/fan-control,syspilot-sensors/fan-control
-          cargo test -p syspilot-hw -p syspilot-sensors -p syspilot-svc --locked --test driver --test worker --features syspilot-svc/fan-control,syspilot-sensors/fan-control
+        run: >
+          cargo nextest run -p syspilot-hw -p syspilot-sensors -p syspilot-svc
+          --lib --bins --test driver --test worker --locked --profile ci
+          --features syspilot-svc/fan-control,syspilot-sensors/fan-control
 
       - name: Build release
         run: cargo build --release --workspace --locked

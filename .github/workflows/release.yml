@@ -75,8 +75,18 @@ jobs:
           git cliff --latest --strip all --output $env:RUNNER_TEMP/release-notes.md
           if ($LASTEXITCODE -ne 0) { throw "(git cliff): expected exit code 0 | received: $LASTEXITCODE" }
 
+      # The version .config/nextest.toml requires.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.152
+
       - name: Test
-        run: cargo test --workspace --locked
+        run: cargo nextest run --workspace --locked --profile ci
+
+      # As in CI: nextest has no doctests, and a step of their own keeps a
+      # test failure from being hidden by their exit code.
+      - name: Doctests
+        run: cargo test --doc --workspace --locked
 
       # The modules are the PawnIO project's signed LGPL files, pinned by
       # SHA-256. They go into the package as separate files with their
