@@ -55,6 +55,13 @@ jobs:
       - name: Lint
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      # Broken and private doc links are denied in Cargo.toml; -D warnings
+      # fails on every other rustdoc warning too.
+      - name: Docs
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --locked
+
       # Hosted runners are elevated, which the service tests need. They
       # install a service named SysPilot-Test and remove it again. nextest
       # runs the tests of all crates side by side, in half the time cargo test
@@ -79,6 +86,13 @@ jobs:
           --all-targets --locked
           --features syspilot-svc/fan-control,syspilot-sensors/fan-control
           -- -D warnings
+
+      - name: Docs with fan control
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: >
+          cargo doc -p syspilot-hw -p syspilot-svc -p syspilot-sensors --no-deps --locked
+          --features syspilot-svc/fan-control,syspilot-sensors/fan-control
 
       - name: Test with fan control
         run: >

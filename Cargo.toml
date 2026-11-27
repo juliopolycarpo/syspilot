@@ -30,6 +30,15 @@ undocumented_unsafe_blocks = "deny"
 unwrap_used = "deny"
 dbg_macro = "deny"
 todo = "deny"
+# A suppression is `#[expect(lint, reason = "…")]`: it says why, and it fails
+# once there is nothing left to suppress instead of staying on unnoticed.
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+
+# Checked by `cargo doc`, which CI runs.
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
 
 [profile.release]
 lto = "fat"
