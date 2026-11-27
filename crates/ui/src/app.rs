@@ -291,8 +291,10 @@ pub enum Message {
     AskClearHistory,
     /// Sensor logging was switched.
     LoggingEnabled(bool),
-    /// The logging interval was changed.
+    /// The logging interval was changed via slider or numeric box.
     LoggingInterval(Option<f64>),
+    /// Debounced commit of the logging interval after dragging or typing settles.
+    CommitLoggingInterval(u64, u32),
     /// An update mode was picked by index.
     PickUpdateMode(Option<usize>),
     /// "Look now" for a new version.
@@ -371,6 +373,10 @@ pub struct App {
     pub details_open: HashSet<String>,
     /// Tuning values entered and not saved.
     pub tuning_drafts: TuningDrafts,
+    /// Pending logging interval while a slider drag or numeric edit settles.
+    pub logging_interval_draft: Option<u32>,
+    /// Sequence counter for debouncing logging interval commits.
+    logging_interval_seq: u64,
     /// Whether the navigation pane is open, once the view has said so.
     pane_open: Option<bool>,
 }
@@ -384,6 +390,11 @@ fn set_open(open_keys: &mut HashSet<String>, key: String, open: bool) {
     } else {
         open_keys.remove(&key);
     }
+}
+
+/// Clamps and rounds a user-entered logging interval to 1..=3600 seconds.
+fn clamp_logging_interval(entered: Option<f64>) -> Option<u32> {
+    entered.filter(|value| value.is_finite()).map(|value| value.round().clamp(1.0, 3600.0) as u32)
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -446,6 +457,12 @@ impl App {
         lock(&self.trends).clone()
     }
 
+    /// The logging interval shown in Settings: the active draft while
+    /// dragging/typing, otherwise the saved value.
+    pub fn logging_interval_shown(&self, saved: u32) -> u32 {
+        self.logging_interval_draft.unwrap_or(saved)
+    }
+
     fn load(&mut self, context: &ComponentContext<Self>) {
         if self.loading {
             self.reload_wanted = true;
@@ -502,6 +519,7 @@ impl App {
             Failure::Other(message) => Link::Failed(message),
         };
         self.pending.clear();
+        self.logging_interval_draft = None;
         self.dialog = None;
         self.retry_later(context);
     }
@@ -757,6 +775,11 @@ impl App {
                 for id in self.settled.drain(..) {
                     self.pending.remove(&id);
                 }
+                if self.logging_interval_draft == Some(self.logging().interval_secs)
+                    || !self.can_change()
+                {
+                    self.logging_interval_draft = None;
+                }
                 if !self.listening {
                     self.listen(context);
                 }
@@ -811,6 +834,8 @@ impl Component for App {
             unfolded: HashSet::new(),
             details_open: HashSet::new(),
             tuning_drafts: TuningDrafts::new(),
+            logging_interval_draft: None,
+            logging_interval_seq: 0,
             pane_open: None,
         };
         app.go(Page::Home);
@@ -940,13 +965,30 @@ impl Component for App {
                 }
             }
             Message::LoggingInterval(seconds) => {
-                let mut logging = self.logging();
-                // An emptied box has no value; the setting stays as it is.
-                let seconds = seconds
-                    .map_or(logging.interval_secs, |value| value.round().clamp(1.0, 3600.0) as u32);
-                if logging.interval_secs != seconds && self.can_change() {
-                    logging.interval_secs = seconds;
-                    self.send(None, Request::SetLogging(logging), context);
+                let Some(seconds) = clamp_logging_interval(seconds) else {
+                    return;
+                };
+                let shown = self.logging_interval_shown(self.logging().interval_secs);
+                if seconds == shown || !self.can_change() {
+                    return;
+                }
+                self.logging_interval_draft = Some(seconds);
+                self.logging_interval_seq = self.logging_interval_seq.wrapping_add(1);
+                let seq = self.logging_interval_seq;
+                _ = context.spawn_background(move |_| {
+                    std::thread::sleep(Duration::from_millis(250));
+                    Message::CommitLoggingInterval(seq, seconds)
+                });
+            }
+            Message::CommitLoggingInterval(seq, seconds) => {
+                if seq == self.logging_interval_seq && self.can_change() {
+                    let mut logging = self.logging();
+                    if logging.interval_secs != seconds {
+                        logging.interval_secs = seconds;
+                        self.send(None, Request::SetLogging(logging), context);
+                    } else {
+                        self.logging_interval_draft = None;
+                    }
                 }
             }
             Message::PickUpdateMode(index) => {
@@ -1038,8 +1080,11 @@ impl Component for App {
                 SlotView::new(NavigationViewSlot::Content, content),
             ]);
 
-        let level_item = |name: &str, own: ViewLevel| {
-            KeyedView::new(name, SelectorBarItem::new().text(name).is_selected(level == own))
+        let level_item = |name: &str, own: ViewLevel, tip: &str| {
+            KeyedView::new(
+                name,
+                SelectorBarItem::new().text(name).is_selected(level == own).tooltip(tip),
+            )
         };
         let title_bar = TitleBar::new().title("SysPilot").grid_row(0).slots([SlotView::new(
             TitleBarSlot::RightHeader,
@@ -1049,8 +1094,16 @@ impl Component for App {
                 .collection_slot(
                     SelectorBarSlot::Items,
                     [
-                        level_item("Simple", ViewLevel::Simple),
-                        level_item("Advanced", ViewLevel::Advanced),
+                        level_item(
+                            "Simple",
+                            ViewLevel::Simple,
+                            "Common, safe options in plain language",
+                        ),
+                        level_item(
+                            "Advanced",
+                            ViewLevel::Advanced,
+                            "Every option, technical detail, fans, tuning, custom actions and history",
+                        ),
                     ],
                 ),
         )]);
@@ -1334,5 +1387,15 @@ mod tests {
         // The scripted backend has no second listener: reconnecting fails
         // at `listen`, which proves a new one was asked for.
         assert_eq!(listen(&backend, &slot, &trends, &wants_readings), Err(Failure::NotRunning));
+    }
+
+    #[test]
+    fn logging_interval_clamps_rounds_and_ignores_non_finite() {
+        assert_eq!(clamp_logging_interval(None), None);
+        assert_eq!(clamp_logging_interval(Some(f64::NAN)), None);
+        assert_eq!(clamp_logging_interval(Some(f64::INFINITY)), None);
+        assert_eq!(clamp_logging_interval(Some(0.2)), Some(1));
+        assert_eq!(clamp_logging_interval(Some(5.6)), Some(6));
+        assert_eq!(clamp_logging_interval(Some(9999.0)), Some(3600));
     }
 }

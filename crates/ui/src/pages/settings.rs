@@ -7,7 +7,7 @@ use syspilot_proto::profile::UpdateMode;
 use windows_reactor::*;
 
 use crate::app::{App, Message};
-use crate::model;
+use crate::model::{self, ViewLevel};
 use crate::pages::sensors::hardware_access;
 use crate::pages::tweaks::switch;
 use crate::preferences::Theme;
@@ -55,15 +55,36 @@ fn logging(app: &App, context: &ViewContext<App>) -> View {
         ),
         setting(
             "Seconds between rows",
-            "How often a row is written. Old files are removed automatically.",
-            NumberBox::new()
-                .minimum(1.0)
-                .maximum(3600.0)
-                .value(f64::from(profile.logging.interval_secs))
-                .is_enabled(app.can_change())
-                .automation_name("Seconds between rows")
-                .min_width(120.0)
-                .on_value_changed(context.callback(Message::LoggingInterval)),
+            "How often a row is written (1 to 3600 s). Old files are removed automatically.",
+            Grid::new()
+                .columns([GridLength::Auto, GridLength::Auto])
+                .column_spacing(GAP_SMALL)
+                .children((
+                    widgets::slider_with_number_box(
+                        widgets::NumericRange {
+                            min: 1.0,
+                            max: 3600.0,
+                            value: f64::from(
+                                app.logging_interval_shown(profile.logging.interval_secs),
+                            ),
+                        },
+                        app.can_change(),
+                        Some(180.0),
+                        96.0,
+                        (
+                            "Seconds between rows slider".to_owned(),
+                            "Seconds between rows".to_owned(),
+                        ),
+                        (
+                            context.callback(|value| Message::LoggingInterval(Some(value))),
+                            context.callback(Message::LoggingInterval),
+                        ),
+                    ),
+                    widgets::dim("s")
+                        .min_width(16.0)
+                        .vertical_alignment(VerticalAlignment::Center)
+                        .grid_column(1),
+                )),
         ),
         Button::new()
             .on_click(context.message(Message::OpenLogs))
@@ -132,32 +153,42 @@ fn about(app: &App, context: &ViewContext<App>) -> View {
     rows.push(("Licence", "GPL-3.0-or-later. SysPilot comes with no warranty.".to_owned()));
     let facts =
         rows.into_iter().map(|(label, value)| KeyedView::new(label, widgets::fact(label, value)));
-    widgets::card().content(
-        StackPanel::new().spacing(GAP_SMALL).children((
-            StackPanel::new().spacing(GAP_SMALL).keyed_children(facts),
-            Button::new()
-                .style(ButtonStyle::TextLink)
-                .on_click(context.message(Message::OpenLink(PROJECT_LINK.to_owned())))
-                .content("Source code, documentation and issues")
-                .tooltip(PROJECT_LINK),
-        )),
-    )
+    widgets::card().content(StackPanel::new().spacing(GAP_SMALL).children((
+        StackPanel::new().spacing(GAP_SMALL).keyed_children(facts),
+        widgets::link(
+            "Source code, documentation and issues",
+            PROJECT_LINK,
+            context.message(Message::OpenLink(PROJECT_LINK.to_owned())),
+        ),
+    )))
 }
 
 /// The settings page.
 pub fn view(app: &App, context: &ViewContext<App>) -> View {
     let theme = Theme::ALL.iter().position(|theme| *theme == app.preferences.theme);
+    let level_index = match app.level() {
+        ViewLevel::Simple => Some(0),
+        ViewLevel::Advanced => Some(1),
+    };
     let mut content = vec![
         KeyedView::new(
             "level",
             setting(
                 "Level",
-                "Simple shows the common, safe options. Advanced adds everything else, with the technical detail, custom actions and the history. Switch at the top of the window.",
-                widgets::strong(if app.level() == model::ViewLevel::Simple {
-                    "Simple"
-                } else {
-                    "Advanced"
-                }),
+                "Simple shows the common, safe options. Advanced adds everything else, with the technical detail, custom actions and the history. You can also switch at the top of the window.",
+                ComboBox::new()
+                    .items_source(["Simple", "Advanced"])
+                    .selected_index(level_index)
+                    .automation_name("Level")
+                    .min_width(200.0)
+                    .on_selection_changed(context.callback(|index| {
+                        let name = match index {
+                            Some(0) => Some("Simple".to_owned()),
+                            Some(1) => Some("Advanced".to_owned()),
+                            _ => None,
+                        };
+                        Message::PickLevel(name)
+                    })),
             ),
         ),
         KeyedView::new(

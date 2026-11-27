@@ -223,8 +223,13 @@ pub fn view(app: &App, context: &ViewContext<App>) -> View {
             continue;
         }
         let rows = main.iter().map(|sensor| reading(app, sensor, &trends, context));
+        let heading = if index == 0 {
+            widgets::strong(&device.name)
+        } else {
+            widgets::strong(&device.name).margin(Thickness::new(0.0, GAP_SMALL, 0.0, 0.0))
+        };
         let mut group = vec![
-            KeyedView::new("name", widgets::strong(&device.name)),
+            KeyedView::new("name", heading),
             KeyedView::new(
                 "main",
                 widgets::card().content(StackPanel::new().spacing(GAP_MEDIUM).keyed_children(rows)),

@@ -175,11 +175,11 @@ fn follow_curves(status: &ServiceStatus, context: &ViewContext<App>) -> View {
                 widgets::caption(
                     "This switch shows what SysPilot does. It can't be changed from the app yet.",
                 ),
-                Button::new()
-                    .style(ButtonStyle::TextLink)
-                    .on_click(context.message(Message::OpenLink(DOCS_LINK.to_owned())))
-                    .content("Read the documentation")
-                    .tooltip(DOCS_LINK),
+                widgets::link(
+                    "Read the documentation",
+                    DOCS_LINK,
+                    context.message(Message::OpenLink(DOCS_LINK.to_owned())),
+                ),
             )),
             // Disabled on purpose; the position shows what the service does.
             widgets::column(1).content(

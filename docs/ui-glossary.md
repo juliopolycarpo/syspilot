@@ -74,6 +74,7 @@ driver has none.
 | Held back | Windows did not shut down normally after the values were last set, so SysPilot has not set them again. |
 | Failed | The values could not be set; the reason is shown. |
 | Not found | Values are saved for a device that is not in the PC now. |
+| Unsaved | Tuning values were changed in the app and have not been saved yet. |
 
 Colours carry the same meaning everywhere: green for in place, amber for
 something to look at, red for something that did not happen, grey for

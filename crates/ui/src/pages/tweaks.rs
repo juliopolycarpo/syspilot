@@ -92,11 +92,11 @@ fn details(app: &App, row: &TweakRow, context: &ViewContext<App>) -> View {
     let source = row.source.clone();
     let mut actions: Vec<KeyedView> = vec![KeyedView::new(
         "source",
-        Button::new()
-            .style(ButtonStyle::TextLink)
-            .on_click(context.callback(move |()| Message::OpenLink(source.clone())))
-            .content("Microsoft's documentation")
-            .tooltip(row.source.clone()),
+        widgets::link(
+            "Microsoft's documentation",
+            row.source.clone(),
+            context.callback(move |()| Message::OpenLink(source.clone())),
+        ),
     )];
     let stuck = row.badge.as_ref().is_some_and(|badge| badge.tone != Tone::Good);
     if row.enabled && stuck && app.can_change() {
@@ -154,15 +154,34 @@ pub fn view(app: &App, category: Category, context: &ViewContext<App>) -> View {
     let unfiltered = model::tweak_rows(&app.snapshot, category, level, "").len();
     // A filter is only worth its space on a long list.
     if unfiltered > 8 {
-        content.push(KeyedView::new(
-            "filter",
+        let mut filter_bar = vec![KeyedView::new(
+            "box",
             TextBox::new()
                 .text(app.filter.clone())
-                .placeholder_text("Filter by name")
+                .placeholder_text("Filter by name, description or ID")
                 .on_text_changed(context.callback(Message::Filter))
                 .automation_name("Filter")
-                .width(320.0)
-                .horizontal_alignment(HorizontalAlignment::Left),
+                .width(320.0),
+        )];
+        if !app.filter.is_empty() {
+            filter_bar.push(KeyedView::new(
+                "clear",
+                Button::new()
+                    .on_click(context.message(Message::Filter(String::new())))
+                    .content("Clear"),
+            ));
+            filter_bar.push(KeyedView::new(
+                "count",
+                widgets::caption(format!("{} of {unfiltered} shown", rows.len()))
+                    .vertical_alignment(VerticalAlignment::Center),
+            ));
+        }
+        content.push(KeyedView::new(
+            "filter",
+            StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .spacing(GAP_SMALL)
+                .keyed_children(filter_bar),
         ));
     }
     if rows.is_empty() {
