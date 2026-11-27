@@ -14,6 +14,7 @@ mod install;
 mod logger;
 mod pipe;
 mod privilege;
+mod processes;
 mod runtime;
 mod service;
 mod storage;
@@ -42,7 +43,9 @@ fn main() -> ExitCode {
         Command::Help => Ok(cli::USAGE.to_owned()),
         Command::Version => Ok(cli::version()),
         Command::Install { start } => install::install(instance, start),
-        Command::Uninstall { keep_tweaks } => install::uninstall(instance, keep_tweaks),
+        Command::Uninstall { keep_tweaks, wait_for_processes } => {
+            install::uninstall(instance, keep_tweaks, wait_for_processes)
+        }
         Command::Run => service::run_in_console(instance).map(|()| String::new()),
         Command::Service => service::run_as_service(instance).map(|()| String::new()),
         command => cli::run_client_command(instance, command),

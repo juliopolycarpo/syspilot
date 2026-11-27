@@ -142,26 +142,40 @@
                            TerminateProcess="0"
                            Timeout="5" />
 
-    <!-- All three run the installed service executable as LocalSystem, by
-         its full path, and fail the installation if they fail. -->
+    <!-- All four run the installed service executable as LocalSystem, by
+         its full path. RegisterService and the two removals fail the
+         installation if they fail. -->
     <CustomAction Id="RegisterService"
                   Directory="INSTALLFOLDER"
                   ExeCommand='"$(Service)" --instance $(Instance) install --no-start'
                   Execute="deferred" Impersonate="no" Return="check" />
+    <!-- The three that remove the service ask it to wait for processes (the
+         wait-for-processes flag), because the files are deleted right after
+         they return. Restart Manager reports the app closed before its
+         process has exited, and a service reports itself stopped before its
+         process is gone. A file such a process still holds is deleted only
+         when it closes, by which time the installer has found the folder not
+         empty and left it, empty, behind. The wait is bounded and never fails
+         the action. It does not apply to an update: removing the old version
+         then runs none of these. -->
     <CustomAction Id="RemoveService"
                   Directory="INSTALLFOLDER"
-                  ExeCommand='"$(Service)" --instance $(Instance) uninstall'
+                  ExeCommand='"$(Service)" --instance $(Instance) uninstall --wait-for-processes'
                   Execute="deferred" Impersonate="no" Return="check" />
     <CustomAction Id="RemoveServiceKeepingTweaks"
                   Directory="INSTALLFOLDER"
-                  ExeCommand='"$(Service)" --instance $(Instance) uninstall --keep-tweaks'
+                  ExeCommand='"$(Service)" --instance $(Instance) uninstall --keep-tweaks --wait-for-processes'
                   Execute="deferred" Impersonate="no" Return="check" />
     <!-- Undoes RegisterService when a first installation fails later on. An
          update that fails keeps the registration: the old version, which the
-         rollback puts back, is run by it. -->
+         rollback puts back, is run by it. It waits too: it runs just before
+         the rollback deletes the files, and the service that the failed
+         installation started may still be ending, the same as on removal.
+         Return="ignore" and the bound mean the wait cannot hold up or fail
+         the rollback for long. -->
     <CustomAction Id="UnregisterServiceOnRollback"
                   Directory="INSTALLFOLDER"
-                  ExeCommand='"$(Service)" --instance $(Instance) uninstall --keep-tweaks'
+                  ExeCommand='"$(Service)" --instance $(Instance) uninstall --keep-tweaks --wait-for-processes'
                   Execute="rollback" Impersonate="no" Return="ignore" />
 
     <InstallExecuteSequence>

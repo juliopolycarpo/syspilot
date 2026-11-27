@@ -33,6 +33,7 @@ use windows_sys::Win32::System::Services::{
 use crate::catalog;
 use crate::core::Core;
 use crate::privilege::is_process_elevated;
+use crate::processes;
 use crate::runtime::{NEEDS_ELEVATION, os_build};
 use crate::storage::{DataDir, FileStore};
 
@@ -377,7 +378,18 @@ fn remove_user_preferences(instance: &Instance, profiles: &Path) -> usize {
 /// profile, the state, the logs, downloaded updates and what the app kept
 /// for each user. Unless `keep_tweaks` is set, every setting it changed is
 /// restored first.
-pub fn uninstall(instance: &Instance, keep_tweaks: bool) -> Result<String, String> {
+///
+/// With `wait_for_processes`, it also waits (see [`processes::EXIT_WAIT`])
+/// until no SysPilot program runs from this executable's folder. That is for
+/// the installer, which deletes the folder's files as soon as this returns:
+/// a program still ending would hold some of them open. A wait that runs out
+/// is reported on the error output and the removal goes on, so a stuck
+/// program cannot keep SysPilot from being removed.
+pub fn uninstall(
+    instance: &Instance,
+    keep_tweaks: bool,
+    wait_for_processes: bool,
+) -> Result<String, String> {
     if !is_process_elevated() {
         return Err(NEEDS_ELEVATION.into());
     }
@@ -424,6 +436,11 @@ pub fn uninstall(instance: &Instance, keep_tweaks: bool) -> Result<String, Strin
         if unsafe { DeleteService(service.0) } == 0 {
             return Err(failure("remove the service", last_error()));
         }
+    }
+    // After the revert, which may have run the tuner from this folder, and
+    // before the data goes, which the programs of the folder may still use.
+    if wait_for_processes && let Some(report) = processes::wait_for_own_folder() {
+        eprintln!("{report}");
     }
     data.remove().map_err(|error| format!("remove {}: {error}", data.root().display()))?;
     remove_user_preferences(instance, &profiles_root());

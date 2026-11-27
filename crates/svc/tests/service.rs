@@ -19,7 +19,9 @@ use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::Security::{
     CreateRestrictedToken, ImpersonateLoggedOnUser, LUA_TOKEN, RevertToSelf, TOKEN_ALL_ACCESS,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows_sys::Win32::System::Threading::{
+    CREATE_NO_WINDOW, GetCurrentProcess, OpenProcessToken,
+};
 
 const EXECUTABLE: &str = env!("CARGO_BIN_EXE_syspilot-svc");
 const SCRATCH_ROOT: &str = r"Software\SysPilot-Test";
@@ -208,6 +210,60 @@ fn data_dir(instance: &Instance) -> PathBuf {
         .join(instance.name())
 }
 
+/// A folder under the temp directory that holds a copy of the executable
+/// and, as a stand-in for the app, a copy of `ping.exe` named `syspilot.exe`.
+/// Removed on drop.
+struct InstalledFolder(PathBuf);
+
+impl InstalledFolder {
+    fn new(tag: &str) -> Self {
+        let path = std::env::temp_dir().join(format!("SysPilot-Test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("the temp directory is writable");
+        // Owned from here, so a copy that fails still removes the folder.
+        let mut folder = Self(path);
+        // The spelling the system gives a running program's path: long names
+        // and no `\\?\` prefix, which `canonicalize` adds.
+        let long = std::fs::canonicalize(&folder.0).expect("the folder exists");
+        folder.0 = PathBuf::from(long.to_string_lossy().trim_start_matches(r"\\?\"));
+        let system = PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot is set"));
+        std::fs::copy(EXECUTABLE, folder.0.join("syspilot-svc.exe")).expect("copy the executable");
+        std::fs::copy(system.join(r"System32\PING.EXE"), folder.0.join("syspilot.exe"))
+            .expect("copy ping.exe");
+        folder
+    }
+
+    /// Starts the stand-in for the app. It ends by itself after about
+    /// `seconds` seconds.
+    fn start_app(&self, seconds: u32) -> ConsoleRun {
+        use std::os::windows::process::CommandExt;
+        let child = Command::new(self.0.join("syspilot.exe"))
+            .args(["-n", &(seconds + 1).to_string(), "127.0.0.1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .expect("the stand-in for the app starts");
+        ConsoleRun(child)
+    }
+
+    /// Runs `uninstall` from the copy of the executable in this folder.
+    fn uninstall(&self, instance: &Instance, flags: &[&str]) -> Output {
+        Command::new(self.0.join("syspilot-svc.exe"))
+            .args(["--instance", instance.name(), "uninstall"])
+            .args(flags)
+            .output()
+            .expect("the executable starts")
+    }
+}
+
+impl Drop for InstalledFolder {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 const PROFILE_HEADER: &str = "schema = 1\n\n";
 
 /// A custom action that keeps the scratch value `Kept` at 1.
@@ -370,4 +426,39 @@ fn installed_service_enforces_restores_and_uninstalls_without_a_trace() {
     assert!(String::from_utf8_lossy(&gone.stderr).contains("is not running"));
     // Removing what is not there is not an error.
     succeed(&instance, &["uninstall"]);
+}
+
+#[test]
+fn uninstall_waits_for_the_programs_of_its_folder_only_when_asked() {
+    require_elevation();
+    let instance = Instance::named("SysPilot-Test.waits").unwrap();
+    let folder = InstalledFolder::new("waits");
+
+    // Not asked: it returns with the app still running, and says nothing.
+    let mut app = folder.start_app(30);
+    let plain = folder.uninstall(&instance, &[]);
+    let stderr = String::from_utf8_lossy(&plain.stderr);
+    assert!(plain.status.success(), "(uninstall): expected success | received: {plain:?}");
+    assert_eq!(stderr, "", "(uninstall): expected nothing on stderr | received: {stderr:?}");
+    let state = app.0.try_wait().expect("the stand-in can be asked");
+    assert_eq!(state, None, "(uninstall): expected the app still running | received: {state:?}");
+    drop(app);
+
+    // Asked: it returns only once the app has ended by itself. The app lives
+    // for five seconds, well beyond what the command needs to get to its
+    // first look; if a slow machine gets there after the app ended, there is
+    // nothing to wait for and nothing to say.
+    let mut app = folder.start_app(5);
+    let waited = folder.uninstall(&instance, &["--wait-for-processes"]);
+    let stderr = String::from_utf8_lossy(&waited.stderr);
+    assert!(waited.status.success(), "(uninstall): expected success | received: {waited:?}");
+    assert!(
+        stderr.is_empty() || stderr.starts_with("Waited "),
+        "(uninstall --wait-for-processes): expected nothing or `Waited ...` on stderr | received: {stderr:?}"
+    );
+    let state = app.0.try_wait().expect("the stand-in can be asked");
+    assert!(
+        state.is_some(),
+        "(uninstall --wait-for-processes): expected the app ended when it returned | received: still running"
+    );
 }

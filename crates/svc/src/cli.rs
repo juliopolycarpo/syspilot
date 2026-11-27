@@ -22,8 +22,10 @@ use crate::logger::iso_timestamp;
 pub enum Command {
     /// Register and start the service.
     Install { start: bool },
-    /// Remove the service.
-    Uninstall { keep_tweaks: bool },
+    /// Remove the service. `wait_for_processes` also waits, before the data
+    /// is deleted, for SysPilot's programs in this folder to exit, which only
+    /// the installer asks for.
+    Uninstall { keep_tweaks: bool, wait_for_processes: bool },
     /// Run in the console.
     Run,
     /// Entry point used by the service control manager.
@@ -91,7 +93,12 @@ Change (administrator):
 
 Service (administrator):
   install [--no-start]       Register this executable as a Windows service
-  uninstall [--keep-tweaks]  Restore all settings, then remove the service
+  uninstall [--keep-tweaks] [--wait-for-processes]
+                             Restore all settings, then remove the service.
+                             --wait-for-processes also waits up to 10 s for
+                             SysPilot's programs in this folder to exit,
+                             before the data is deleted; the installer asks
+                             for it
   run                        Run in this console until Ctrl+C
 
 Options:
@@ -147,7 +154,10 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Invocation, 
 
     let command = match name.as_str() {
         "install" => Command::Install { start: !take_flag("--no-start") },
-        "uninstall" => Command::Uninstall { keep_tweaks: take_flag("--keep-tweaks") },
+        "uninstall" => Command::Uninstall {
+            keep_tweaks: take_flag("--keep-tweaks"),
+            wait_for_processes: take_flag("--wait-for-processes"),
+        },
         "run" => Command::Run,
         "service" => Command::Service,
         "status" => Command::Status,
@@ -717,8 +727,14 @@ mod tests {
         assert_eq!(command("status"), Command::Status);
         assert_eq!(command("install"), Command::Install { start: true });
         assert_eq!(command("install --no-start"), Command::Install { start: false });
-        assert_eq!(command("uninstall"), Command::Uninstall { keep_tweaks: false });
-        assert_eq!(command("uninstall --keep-tweaks"), Command::Uninstall { keep_tweaks: true });
+        assert_eq!(
+            command("uninstall"),
+            Command::Uninstall { keep_tweaks: false, wait_for_processes: false }
+        );
+        assert_eq!(
+            command("uninstall --keep-tweaks"),
+            Command::Uninstall { keep_tweaks: true, wait_for_processes: false }
+        );
         assert_eq!(command("list --enabled"), Command::List { enabled_only: true });
         assert_eq!(command("history"), Command::History { limit: 20 });
         assert_eq!(command("history 5"), Command::History { limit: 5 });
@@ -741,6 +757,25 @@ mod tests {
         assert_eq!(command("update --check"), Command::Update { check_only: true });
         assert_eq!(command("--version"), Command::Version);
         assert_eq!(command("status --help"), Command::Help);
+    }
+
+    #[test]
+    fn uninstall_waits_for_processes_only_when_asked() {
+        let both = Command::Uninstall { keep_tweaks: true, wait_for_processes: true };
+        assert_eq!(
+            command("uninstall --wait-for-processes"),
+            Command::Uninstall { keep_tweaks: false, wait_for_processes: true }
+        );
+        assert_eq!(command("uninstall --keep-tweaks --wait-for-processes"), both);
+        assert_eq!(command("uninstall --wait-for-processes --keep-tweaks"), both);
+        let invocation = parse_words("--instance SysPilot-Test.msi uninstall --wait-for-processes");
+        assert_eq!(invocation.unwrap().instance.name(), "SysPilot-Test.msi");
+        for line in ["install", "status", "run"] {
+            let problem = parse_words(&format!("{line} --wait-for-processes")).unwrap_err();
+            let expected = format!(r#"({line}): unexpected argument "--wait-for-processes""#);
+            assert!(problem.starts_with(&expected), "{line}: {problem}");
+        }
+        assert!(USAGE.contains("[--wait-for-processes]"), "(usage): expected the flag listed");
     }
 
     #[test]
