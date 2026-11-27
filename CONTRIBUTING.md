@@ -69,6 +69,12 @@ with `uninstall`.
 - `unsafe` blocks carry a `// SAFETY:` comment that states why the call is
   sound; the lint enforces its presence, review enforces its content.
 - No `unwrap` outside tests.
+- A lint is suppressed with `#[expect(lint, reason = "…")]`, never
+  `#[allow]`: the reason says why, and the expectation warns once there is
+  nothing left to suppress, which `-D warnings` makes an error.
+- Doc links resolve and point at public items:
+  `cargo doc --workspace --no-deps --document-private-items` fails
+  otherwise, and CI runs it.
 - External I/O goes behind a trait with a named fake (`FakeRegistry`,
   `FakeHardware`), not an ad-hoc stub in the test.
 - Every new function has a test. Every bug fix has a test that fails without

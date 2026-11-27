@@ -24,12 +24,31 @@ windows-sys = "0.61"
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 unused_must_use = "deny"
+# A cast that changes nothing hides the conversion that would matter.
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
 
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "deny"
+# One unsafe operation per block, so each has its own SAFETY reason.
+multiple_unsafe_ops_per_block = "deny"
+# A function that returns a Result reports its failures instead of panicking.
+unwrap_in_result = "deny"
+# A deliberate leak is said with ManuallyDrop or an expectation.
+mem_forget = "deny"
 unwrap_used = "deny"
 dbg_macro = "deny"
 todo = "deny"
+# A suppression is `#[expect(lint, reason = "…")]`: it says why, and it warns
+# (an error under CI's -D warnings) once there is nothing left to suppress,
+# instead of staying on unnoticed.
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+
+# Checked by `cargo doc`, which CI runs.
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
 
 [profile.release]
 lto = "fat"
